@@ -1195,6 +1195,113 @@ def op_topology_report(params):
     }
 
 
+def op_export_fbx(params):
+    """Binary FBX export with explicit axis/unit control (client deliverable).
+
+    Defaults follow the FBX-standard convention: axis_up="Y",
+    axis_forward="-Z" (Blender's Z-up internal space converted to Y-up),
+    which is what third-party consumers (Babylon, Unity, FBX SDK) expect.
+    NOTE (owner amendment 1, T2): a Blender re-import of this file is
+    self-consistent even when the file is wrong for a third party — the
+    caller MUST verify the written convention independently via
+    src/client/fbx_inspect.py. FBX version is whatever Blender writes
+    (7.4 binary; readable by the FBX 2020 SDK).
+    When `input` is given, the source is imported first — importing a GLB
+    TRIANGULATES (glTF stores triangles only), so an FBX produced from a GLB
+    is fully triangulated; exporting a live quad scene instead preserves
+    quads AND n-gons (verified empirically)."""
+    out_path = params.get("path")
+    if not out_path:
+        raise ValueError("path is required")
+    if params.get("input"):
+        reset_scene()
+        import_any(str(params["input"]))
+    import bpy
+
+    axis_up = str(params.get("axis_up", "Y"))
+    axis_forward = str(params.get("axis_forward", "-Z"))
+    apply_unit_scale = bool(params.get("apply_unit_scale", True))
+    bpy.ops.export_scene.fbx(
+        filepath=str(out_path),
+        axis_up=axis_up,
+        axis_forward=axis_forward,
+        apply_unit_scale=apply_unit_scale,
+        bake_space_transform=True,
+        use_selection=False,
+        object_types={"MESH"},
+    )
+    size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+    return {
+        "success": True,
+        "path": str(out_path),
+        "axis_up": axis_up,
+        "axis_forward": axis_forward,
+        "apply_unit_scale": apply_unit_scale,
+        "file_size": size,
+        "blender_version": f"Blender {bpy.app.version_string}",
+    }
+
+
+def _write_usdz_zip(usda_path, usdz_path):
+    """USDZ fallback package: uncompressed zip (ZIP_STORED) whose single
+    default layer is 64-byte aligned per the USDZ spec."""
+    import zipfile
+
+    name = os.path.basename(usda_path)
+    with open(usda_path, "rb") as f:
+        data = f.read()
+    with zipfile.ZipFile(usdz_path, "w", compression=zipfile.ZIP_STORED) as zf:
+        info = zipfile.ZipInfo(name)
+        # local file header = 30 bytes + name + extra; pad `extra` so the
+        # data starts on a 64-byte boundary
+        pad = (-(30 + len(name.encode("utf-8")))) % 64
+        info.extra = b"\x00" * pad
+        zf.writestr(info, data)
+
+
+def op_export_usdz(params):
+    """USDZ export. Empirical question (brief T2): does Blender 4.5's USD
+    exporter write .usdz directly? Try the direct write first; if the file
+    comes back missing or empty, fall back to exporting .usda and packaging
+    it as an uncompressed, 64-byte-aligned zip. Reports which method was
+    used so qa_report.json can record it."""
+    out_path = params.get("path")
+    if not out_path:
+        raise ValueError("path is required")
+    if params.get("input"):
+        reset_scene()
+        import_any(str(params["input"]))
+    import bpy
+
+    method = "direct"
+    direct_error = ""
+    try:
+        bpy.ops.wm.usd_export(filepath=str(out_path), selected_objects_only=False)
+    except Exception as e:  # noqa: BLE001 — fall back and report
+        direct_error = str(e)[:300]
+        method = "zip-fallback"
+    if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        method = "zip-fallback"
+        base = os.path.splitext(out_path)[0]
+        usda = base + ".usda"
+        bpy.ops.wm.usd_export(filepath=usda, selected_objects_only=False)
+        _write_usdz_zip(usda, usdz_path=out_path)
+        if os.path.exists(usda):
+            try:
+                os.remove(usda)
+            except OSError:
+                pass
+    size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+    return {
+        "success": True,
+        "path": str(out_path),
+        "method": method,
+        "direct_error": direct_error,
+        "file_size": size,
+        "blender_version": f"Blender {bpy.app.version_string}",
+    }
+
+
 def setup_studio_lighting():
     import bpy
 
@@ -1572,6 +1679,8 @@ DISPATCH = {
     "measure": op_measure,
     "count_ngons": op_count_ngons,
     "topology_report": op_topology_report,
+    "export_fbx": op_export_fbx,
+    "export_usdz": op_export_usdz,
     "render_views": op_render_views,
     "run_script": op_run_script,
     "inspect": op_inspect,

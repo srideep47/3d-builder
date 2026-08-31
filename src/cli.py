@@ -265,6 +265,40 @@ def health():
     ))
 
 
+def _print_gate_results(results, title: str) -> None:
+    """Render the client-validator mirror panel shared by validate/package.
+    `results` items expose gate/passed/expected/received/message (GateResult
+    objects or GateRow)."""
+    table = Table(title=title)
+    table.add_column("Gate", style="cyan")
+    table.add_column("Result")
+    table.add_column("Expected", style="dim")
+    table.add_column("Received", style="dim")
+    for r in results:
+        table.add_row(r.gate, "[green]PASS[/]" if r.passed else "[red]FAIL[/]",
+                      r.expected, r.received)
+    console.print(table)
+    for r in results:
+        if not r.passed:
+            console.print(f"  [red]✗ {r.gate}:[/] {r.message}")
+    failed = sum(1 for r in results if not r.passed)
+    console.print(Panel(
+        "[bold green]ALL GATES PASSED[/]" if not failed else f"[bold red]{failed} GATE(S) FAILED[/]",
+        title="Validation Result",
+        border_style="green" if not failed else "red",
+    ))
+
+
+def _load_job_or_exit(job: str):
+    from .client.job import load_job
+
+    try:
+        return load_job(Path(job))
+    except (FileNotFoundError, ValueError) as e:
+        console.print(f"[bold red]Error:[/] {e}")
+        raise typer.Exit(1)
+
+
 @app.command()
 def validate(
     package_dir: str = typer.Argument(..., help="Package directory to validate, e.g. output/packages/<JOB>"),
@@ -273,13 +307,8 @@ def validate(
 ):
     """Reproduce the client's validator panel against a package directory."""
     from .client.gates import MeshFacts, run_all_gates
-    from .client.job import load_job
 
-    try:
-        job_card = load_job(Path(job))
-    except (FileNotFoundError, ValueError) as e:
-        console.print(f"[bold red]Error:[/] {e}")
-        raise typer.Exit(1)
+    job_card = _load_job_or_exit(job)
 
     pkg = Path(package_dir)
     if not pkg.is_dir():
@@ -318,26 +347,56 @@ def validate(
             "all_passed": all(r.passed for r in results),
         }))
     else:
-        table = Table(title=f"Client Validator (local mirror) — {job_card.job_code}")
-        table.add_column("Gate", style="cyan")
-        table.add_column("Result")
-        table.add_column("Expected", style="dim")
-        table.add_column("Received", style="dim")
-        for r in results:
-            table.add_row(r.gate, "[green]PASS[/]" if r.passed else "[red]FAIL[/]",
-                          r.expected, r.received)
-        console.print(table)
-        for r in results:
-            if not r.passed:
-                console.print(f"  [red]✗ {r.gate}:[/] {r.message}")
-        failed = sum(1 for r in results if not r.passed)
-        console.print(Panel(
-            "[bold green]ALL GATES PASSED[/]" if not failed else f"[bold red]{failed} GATE(S) FAILED[/]",
-            title="Validation Result",
-            border_style="green" if not failed else "red",
-        ))
+        _print_gate_results(results, f"Client Validator (local mirror) — {job_card.job_code}")
 
     if any(not r.passed for r in results):
+        raise typer.Exit(1)
+
+
+@app.command()
+def package(
+    source_glb: str = typer.Argument(..., help="Verified source GLB, e.g. output/runs/<id>/final.glb"),
+    job: str = typer.Option(..., "--job", "-j", help="Path to the job card (job.yaml)"),
+    out_root: str = typer.Option("output/packages", "--out-root", help="Root directory for packages"),
+):
+    """Assemble the client delivery package (§4.1) + qa_report.json, then validate it."""
+    from .client.package import package_delivery
+
+    job_card = _load_job_or_exit(job)
+    source = Path(source_glb)
+    if not source.is_file():
+        console.print(f"[bold red]Error:[/] Source GLB not found: {source_glb}")
+        raise typer.Exit(1)
+
+    from .blender.runner import BlenderRunner
+
+    runner = BlenderRunner()
+    if not runner.is_available:
+        console.print("[bold red]Error:[/] Blender not found — packaging requires the export ops.")
+        raise typer.Exit(1)
+
+    try:
+        with console.status("[bold cyan]Assembling delivery package...[/]"):
+            report = package_delivery(job_card, source, out_root=Path(out_root),
+                                      runner=runner, log=console.print)
+    except Exception as e:  # noqa: BLE001 — packaging failures are terminal
+        console.print(f"[bold red]Error:[/] packaging failed: {e}")
+        raise typer.Exit(1)
+
+    from collections import namedtuple
+    gate_row = namedtuple("GateRow", ["gate", "passed", "expected", "received", "message"])
+    _print_gate_results([gate_row(**g) for g in report["gates"]],
+                        f"Client Validator (local mirror) — {job_card.job_code}")
+    if report["placeholders"]["lp_hp_single_source"] or report["placeholders"]["textures_synthetic"]:
+        console.print(Panel(
+            "[bold yellow]T3 placeholders in this package:[/]\n"
+            "- LP and HP GLBs are byte-identical copies of the source\n"
+            "- Texture PNGs are synthetic flat fills\n"
+            "Recorded in qa_report.json (placeholders block + per-file flags).",
+            title="Placeholder Warning", border_style="yellow"))
+    console.print(f"[bold]qa_report.json:[/] [cyan]{report['package_dir']}/qa_report.json[/]")
+
+    if not report["all_passed"]:
         raise typer.Exit(1)
 
 

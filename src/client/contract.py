@@ -60,6 +60,35 @@ TIER_TRI_CEILINGS: dict[str, int | None] = {
     "complex": None,
 }
 
+# Outstanding client-contract unknowns (brief §9 + T1/T2 empirical findings).
+# qa_report.json carries these verbatim so a disputed delivery shows exactly
+# which assumptions were in play. These are OPEN QUESTIONS, not settled
+# facts — update `handling` when the client answers, never silently.
+OPEN_QUESTIONS: tuple[dict[str, str], ...] = (
+    {"id": "spp-required",
+     "question": "Is .spp (Substance Painter project) a hard requirement, or are baked PNG sets acceptable? (brief §9.1)",
+     "handling": "Blender bake path ships first; .spp is optional in every gate."},
+    {"id": "simple-polycount-ceiling",
+     "question": "What is the Simple tier's polycount ceiling? (Medium observed 200,000.)",
+     "handling": "Provisional 50,000 in TIER_TRI_CEILINGS — one number to change."},
+    {"id": "complex-polycount-ceiling",
+     "question": "What is the Complex tier's polycount ceiling?",
+     "handling": "Unknown; check_polycount fails closed rather than guessing."},
+    {"id": "usdz-size-cap",
+     "question": "What is the USDZ size cap? (brief §4.1: 'limit unknown')",
+     "handling": "Presence-only check; no size enforcement."},
+    {"id": "fbx-axis-convention",
+     "question": "Which FBX axis/unit convention does their validator expect? (brief §9.3)",
+     "handling": "Chose the FBX-standard Y-up (Blender default export); verified against "
+                 "non-Blender readers — see qa_report.json axis_convention, not a Blender round trip."},
+    {"id": "polycount-semantics",
+     "question": "Does their validator's 'Polycount' mean triangles, faces, or triangle-equivalent? (T1 finding)",
+     "handling": "We count triangle-equivalent (conservative: >= face count)."},
+    {"id": "mb-basis",
+     "question": "Are their MB caps decimal or binary? (T1 finding)",
+     "handling": "Decimal assumed (stricter); a local pass can never overshoot their cap."},
+)
+
 
 def required_filenames(job_code: str) -> list[str]:
     return [job_code + d.suffix for d in REQUIRED_DELIVERABLES]

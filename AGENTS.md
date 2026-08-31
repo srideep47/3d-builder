@@ -10,7 +10,7 @@
 2. **Agent Layer**: `src/agent/loop.py` (analyst → neural parts → build → measure → render → gates → corrector; emits progress events, supports cancel + run_dir reuse), `src/agent/prompts.py` (Analyst, Corrector), `src/agent/verifier.py` (dimension + mesh gates), `src/ai/aptos.py` (GLM-5.3 integration), `src/ai/vlm.py` (local Qwen-VL plug point: analyst eye + advisory visual gate).
 3. **Spec Layer**: `src/spec/schema.py` (ObjectSpec v2 Pydantic model), `src/spec/resolver.py` (spec → build params), `src/spec/validation.py` (dimension gate).
 4. **Capability Layer**: `src/blender/runner.py` (subprocess runner), `src/blender/harness_script.py` (self-contained headless Blender engine — runs inside Blender's Python, must not import project code), `src/img3d/client.py` (RemoteImg3DProvider → the neural service), `services/img3d_service/` (FastAPI GPU microservice, PLAN.md §9: single-job queue, mock + tripo_sr backends, trellis/hunyuan3d bake-off slots).
-5. **Client Layer**: `src/client/` (MetaZtech delivery compliance — knows the contract, never the product): `job.py` (JobCard from job.yaml; dims + explicit unit REQUIRED, never inferred; axis_map L→X/W→Y/H→Z; client dim tolerance ±0.01 in default, separate from the internal ±1 mm), `contract.py` (the single shared deliverable-set + tier-ceiling definition), `gates.py` (six pure validator gates + MeshFacts, fail-closed without mesh facts), `units.py` (metres ↔ client units, boundary only). `python -m src.cli validate <pkg_dir> --job job.yaml` mirrors the client's validator panel locally (exit 1 on any gate failure).
+5. **Client Layer**: `src/client/` (MetaZtech delivery compliance — knows the contract, never the product): `job.py` (JobCard from job.yaml; dims + explicit unit REQUIRED, never inferred; axis_map L→X/W→Y/H→Z; client dim tolerance ±0.01 in default, separate from the internal ±1 mm), `contract.py` (the single shared deliverable-set + tier-ceiling definition), `gates.py` (six pure validator gates + MeshFacts, fail-closed without mesh facts), `units.py` (metres ↔ client units, boundary only), `fbx_inspect.py` (independent binary-FBX reader — GlobalSettings/geometry/Model transforms parsed without Blender, plus the signed-permutation chirality machinery), `package.py` (assembles `output/packages/<JOB>/` + `qa_report.json`). `python -m src.cli package <glb> --job job.yaml` then `validate <pkg_dir>` mirror the client's validator locally.
 
 ## Operational Rules
 - All lengths are stored in **meters** in internal representations.
@@ -64,10 +64,19 @@
   (backend `__init__`).
 
 ## Verification
-- `python -m pytest tests -q` — 114 tests; `blender`-marked tests auto-skip
+- `python -m pytest tests -q` — 148 tests; `blender`-marked tests auto-skip
   when no Blender is found.
-- Client packages: `python -m src.cli validate <package_dir> --job job.yaml`
-  (local mirror of the MetaZtech validator panel).
+- Client packages: `python -m src.cli package <source_glb> --job job.yaml`
+  assembles `output/packages/<JOB>/` + `qa_report.json` (audit record:
+  gates, axis convention as independently parsed, hashes, placeholders);
+  `python -m src.cli validate <package_dir> --job job.yaml` re-checks a
+  package on disk (local mirror of the MetaZtech validator panel).
+- FBX axis/handedness is verified WITHOUT a Blender round trip
+  (`src/client/fbx_inspect.py` independent binary parse + trimesh GLB
+  cross-load) against the permanent chiral fixture
+  `input/fixtures/chiral_test.spec.json`; the values Blender 4.5 actually
+  writes are pinned in `tests/test_client_export.py` and recorded in
+  PROGRESS.md.
 - Golden benchmarks in `input/benchmarks/` (dimensions.com-sourced) must pass
   both gates deterministically; `scripts/benchmark_golden.py` scores the AI flow.
 - img3d backend bake-off: `scripts/bakeoff_img3d.py` (service must be running).

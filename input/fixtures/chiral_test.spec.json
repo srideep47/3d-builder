@@ -1,0 +1,27 @@
+{
+  "schema_name": "threed-objectspec",
+  "schema_version": "2.0.0",
+  "name": "Chiral Axis Test Fixture",
+  "description": "Permanent axis/handedness verification fixture (owner amendment 2, T2). Base box 20x12x9 in with a 4x4x2 in boss on top, offset toward +x/+y. Distinct extents on all three axes; the off-centre boss has no mirror symmetry, so a handedness flip (which passes every bounds/dimension check) is detectable. Expected overall bounds: 20 x 12 x 11 in (0.508 x 0.3048 x 0.2794 m). All dims are exact inch multiples so job cards can use round inches.",
+  "units": "meters",
+  "tolerance_m": 0.001,
+  "parts": [
+    {
+      "name": "base",
+      "shape": "box",
+      "dimensions": [0.508, 0.3048, 0.2286],
+      "position": [0, 0, 0.1143]
+    },
+    {
+      "name": "boss",
+      "shape": "box",
+      "dimensions": [0.1016, 0.1016, 0.0508],
+      "position": [0.127, 0.0762, 0.254]
+    }
+  ],
+  "measurements": [
+    { "name": "overall_length", "target_value": 0.508, "unit": "meters", "applies_to": "overall.width_x" },
+    { "name": "overall_width", "target_value": 0.3048, "unit": "meters", "applies_to": "overall.depth_y" },
+    { "name": "overall_height", "target_value": 0.2794, "unit": "meters", "applies_to": "overall.height_z" }
+  ]
+}
