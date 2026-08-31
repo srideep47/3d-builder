@@ -404,12 +404,17 @@ const STAGE_LABELS = {
   analyst_done: ["Analyst", "ObjectSpec ready"],
   analyst_error: ["Analyst", "failed to produce a valid spec"],
   iteration_started: null, // separator
+  neural_part_started: ["Neural", "img3d service is generating a mesh…"],
+  neural_part_done: ["Neural", "neural mesh generated"],
+  neural_part_error: ["Neural", "neural generation failed"],
+  neural_skipped: ["Neural", "img3d unavailable — organic parts skipped"],
   build_started: ["Build", "Blender is constructing the parts…"],
   build_done: ["Build", "geometry built"],
   build_error: ["Build", "Blender build failed"],
   measure_done: ["Measure", null],
   render_done: ["Render", "studio renders ready"],
   verification: ["Gates", null],
+  visual_gate: ["Visual gate", "VLM compared renders to the reference"],
   correction_started: ["Corrector", "GLM-5.3 is fixing the spec…"],
   correction_done: ["Corrector", "spec corrected"],
   run_finished: null,
@@ -443,6 +448,22 @@ function handleEvent(ev) {
 
     case "iteration_started":
       addSeparator(`Iteration ${ev.index}`);
+      break;
+
+    case "neural_part_started":
+      addStep("neural_part_started", "running", `${ev.part} · ${ev.image?.split(/[\\/]/).pop() || ""}`);
+      break;
+
+    case "neural_part_done":
+      addStep("neural_part_done", "ok", `${ev.part} · ${ev.tri_count ?? "?"} tris · ${ev.duration_s ?? "?"}s`);
+      break;
+
+    case "neural_part_error":
+      addStep("neural_part_error", "warn", (ev.error || "").slice(0, 200));
+      break;
+
+    case "neural_skipped":
+      addStep("neural_skipped", "warn", (ev.reason || "").slice(0, 200));
       break;
 
     case "build_started":
@@ -486,6 +507,19 @@ function handleEvent(ev) {
           ? "dimension + mesh gates passed"
           : (ev.feedback || "").split("\n").slice(0, 3).join(" · ").slice(0, 220)
       );
+      break;
+    }
+
+    case "visual_gate": {
+      const ok = ev.matches_reference;
+      addStep(
+        "visual_gate",
+        ev.parsed === false ? "warn" : ok ? "done" : "warn",
+        ev.parsed === false
+          ? "VLM verdict could not be parsed"
+          : `score ${ev.score ?? "?"}/10${ev.summary ? " — " + ev.summary : ""}`
+      );
+      state.visualVerdict = ev;
       break;
     }
 

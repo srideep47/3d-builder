@@ -112,10 +112,13 @@ class AptosGLMProvider(AIProvider):
 
     def supports_vision(self) -> bool:
         """Resolve vision capability once, honouring the config mode:
-        auto = probe the endpoint, on = assume yes, off = assume no."""
+        auto = probe the endpoint, on = assume yes, off = assume no.
+        (`vision` may be a plain string or a dict with a `mode` key — the
+        dict form also carries the local-VLM config, see ai/vlm.py.)"""
         if self._vision_cached is not None:
             return self._vision_cached
-        mode = str(self.config.get("vision", "auto")).lower()
+        vision_cfg = self.config.get("vision", "auto")
+        mode = str(vision_cfg.get("mode", "auto")).lower() if isinstance(vision_cfg, dict) else str(vision_cfg).lower()
         if mode == "on":
             self._vision_cached = True
         elif mode == "off":

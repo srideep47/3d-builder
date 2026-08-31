@@ -67,6 +67,22 @@ class AgentLoop:
         # builds without organic parts never touch the service.
         self._img3d_provider = None
         self._img3d_checked = False
+        # local vision model (Qwen2.5-VL plug point) — lazy, fails soft
+        self._vlm = None
+        self._vlm_checked = False
+
+    # ── Local vision model (analyst eye + visual gate) ───────────────────────
+
+    def _get_vlm(self):
+        if not self._vlm_checked:
+            self._vlm_checked = True
+            try:
+                from ..ai.vlm import get_local_vlm
+
+                self._vlm = get_local_vlm()
+            except Exception:
+                self._vlm = None
+        return self._vlm
 
     # ── Neural parts (image_to_3d) ───────────────────────────────────────────
 
@@ -236,7 +252,25 @@ class AgentLoop:
         if use_vision:
             user_message = ChatMessage(role="user", content=vision_user_content(user_text, images))
         else:
+            # Vision ladder step 2: a local VLM (Qwen2.5-VL, config ai.yaml
+            # vision.vlm) can still describe the references for the text-only
+            # GLM-5.3 analyst.
+            vlm_description = ""
             if images:
+                vlm = self._get_vlm()
+                if vlm is not None and vlm.is_available():
+                    try:
+                        vlm_description = vlm.describe_reference_images(images)
+                    except Exception:
+                        vlm_description = ""
+            if vlm_description:
+                user_text += (
+                    "\nA vision model analyzed the reference images:\n"
+                    f"{vlm_description}\n"
+                    "Ground the spec's part decomposition and proportions in this "
+                    "analysis; the user's measurements remain the accuracy contract.\n"
+                )
+            elif images:
                 user_text += (
                     "\nNOTE: vision is unavailable — rely on the measurements and the "
                     "user's description; state assumptions in the spec description.\n"
@@ -371,6 +405,7 @@ class AgentLoop:
         rendered_views: dict[str, str] = {}
         last_error: str | None = None
         budget_exhausted = False
+        visual_verdict: dict | None = None
 
         while iteration < self.max_iterations:
             if cancelled():
@@ -478,6 +513,9 @@ class AgentLoop:
 
             if latest_verification.passed:
                 shutil.copy2(step_glb, final_glb_path)
+                # Advisory visual gate: compare renders against the reference
+                # images via the local VLM (no-op unless one is configured).
+                visual_verdict = self._run_visual_gate(rendered_views, image_paths, current_spec, emit)
                 break
 
             if cancelled():
@@ -516,7 +554,32 @@ class AgentLoop:
             budget_exhausted=budget_exhausted,
             emit=emit,
             user_cancelled=cancelled(),
+            visual_verdict=visual_verdict,
         )
+
+    def _run_visual_gate(self, rendered_views, image_paths, spec, emit) -> dict | None:
+        """Advisory visual gate (PROJECT_PLAN §13.1.2): compare the studio
+        renders against the reference images with the local VLM; the verdict
+        is recorded in the manifest but never blocks the run."""
+        if not rendered_views or not image_paths:
+            return None
+        vlm = self._get_vlm()
+        if vlm is None or not vlm.is_available():
+            return None
+        refs = [str(p) for p in image_paths if p.exists()]
+        if not refs:
+            return None
+        try:
+            summary = f"{spec.name}: {len(spec.parts)} parts" if spec is not None else ""
+            verdict = vlm.visual_verdict(rendered_views, refs, model_summary=summary)
+        except Exception as e:
+            verdict = {"available": True, "parsed": False, "error": str(e)[:400]}
+        if emit is not None:
+            try:
+                emit("visual_gate", **verdict)
+            except Exception:
+                pass
+        return verdict
 
     def _finish(
         self,
@@ -532,6 +595,7 @@ class AgentLoop:
         budget_exhausted: bool = False,
         emit=None,
         user_cancelled: bool = False,
+        visual_verdict: dict | None = None,
     ) -> AgentRunResult:
         passed = bool(verification and verification.passed)
         self.run_store.save_spec(run_dir, spec)
@@ -560,6 +624,7 @@ class AgentLoop:
                 "dimension_details": verification.dimension_gate.details if verification else [],
                 "mesh_warnings": verification.mesh_gate.warnings if verification else [],
                 "unresolved_error": error,
+                "visual_verdict": visual_verdict,
             },
             status=status,
         )
