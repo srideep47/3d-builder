@@ -1,0 +1,63 @@
+{
+  "schema_name": "threed-objectspec",
+  "schema_version": "2.0.0",
+  "name": "Coffee Table",
+  "description": "Standard coffee table: 1.2 m long x 0.6 m wide x 0.40 m tall with four tapered oak legs.",
+  "units": "meters",
+  "tolerance_m": 0.001,
+  "parts": [
+    {
+      "name": "tabletop",
+      "shape": "rounded_box",
+      "dimensions": [1.2, 0.6, 0.04],
+      "position": [0, 0, 0.38],
+      "modifiers": {
+        "bevel": { "width": 0.004, "segments": 3 }
+      },
+      "material": {
+        "preset": "oak_wood",
+        "roughness": 0.55
+      }
+    },
+    {
+      "name": "leg_fl",
+      "shape": "tapered_extrude",
+      "dimensions": [0.05, 0.05, 0.36],
+      "position": [-0.54, -0.24, 0.0],
+      "top_scale": [0.7, 0.7],
+      "material": { "preset": "walnut_wood" }
+    },
+    {
+      "name": "leg_fr",
+      "shape": "tapered_extrude",
+      "dimensions": [0.05, 0.05, 0.36],
+      "position": [0.54, -0.24, 0.0],
+      "top_scale": [0.7, 0.7],
+      "material": { "preset": "walnut_wood" }
+    },
+    {
+      "name": "leg_bl",
+      "shape": "tapered_extrude",
+      "dimensions": [0.05, 0.05, 0.36],
+      "position": [-0.54, 0.24, 0.0],
+      "top_scale": [0.7, 0.7],
+      "material": { "preset": "walnut_wood" }
+    },
+    {
+      "name": "leg_br",
+      "shape": "tapered_extrude",
+      "dimensions": [0.05, 0.05, 0.36],
+      "position": [0.54, 0.24, 0.0],
+      "top_scale": [0.7, 0.7],
+      "material": { "preset": "walnut_wood" }
+    }
+  ],
+  "measurements": [
+    { "name": "overall_length", "target_value": 1.2, "unit": "meters", "applies_to": "overall.width_x" },
+    { "name": "overall_width", "target_value": 0.6, "unit": "meters", "applies_to": "overall.depth_y" },
+    { "name": "overall_height", "target_value": 0.4, "unit": "meters", "applies_to": "overall.height_z" }
+  ],
+  "constraints": [
+    { "type": "ground_contact", "parts": ["leg_fl", "leg_fr", "leg_bl", "leg_br"] }
+  ]
+}

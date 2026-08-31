@@ -1,0 +1,61 @@
+{
+  "schema_name": "threed-objectspec",
+  "schema_version": "2.0.0",
+  "name": "Counter Stool",
+  "description": "Four-legged wooden counter stool with round seat. Seat height 0.66 m falls in the dimensions.com counter-stool range (58-71 cm seat height for 89-94 cm counters).",
+  "units": "meters",
+  "tolerance_m": 0.001,
+  "parts": [
+    {
+      "name": "seat",
+      "shape": "cylinder",
+      "dimensions": [0.38, 0.38, 0.05],
+      "position": [0, 0, 0.635],
+      "smooth_shade": true,
+      "material": {
+        "preset": "walnut_wood",
+        "roughness": 0.5
+      }
+    },
+    {
+      "name": "leg_fl",
+      "shape": "tapered_extrude",
+      "dimensions": [0.04, 0.04, 0.61],
+      "position": [-0.13, -0.13, 0.0],
+      "top_scale": [0.75, 0.75],
+      "material": { "preset": "oak_wood" }
+    },
+    {
+      "name": "leg_fr",
+      "shape": "tapered_extrude",
+      "dimensions": [0.04, 0.04, 0.61],
+      "position": [0.13, -0.13, 0.0],
+      "top_scale": [0.75, 0.75],
+      "material": { "preset": "oak_wood" }
+    },
+    {
+      "name": "leg_bl",
+      "shape": "tapered_extrude",
+      "dimensions": [0.04, 0.04, 0.61],
+      "position": [-0.13, 0.13, 0.0],
+      "top_scale": [0.75, 0.75],
+      "material": { "preset": "oak_wood" }
+    },
+    {
+      "name": "leg_br",
+      "shape": "tapered_extrude",
+      "dimensions": [0.04, 0.04, 0.61],
+      "position": [0.13, 0.13, 0.0],
+      "top_scale": [0.75, 0.75],
+      "material": { "preset": "oak_wood" }
+    }
+  ],
+  "measurements": [
+    { "name": "seat_height", "target_value": 0.66, "unit": "meters", "applies_to": "overall.height_z" },
+    { "name": "seat_diameter", "target_value": 0.38, "unit": "meters", "applies_to": "seat.width_x" },
+    { "name": "leg_height", "target_value": 0.61, "unit": "meters", "applies_to": "leg_fl.height_z" }
+  ],
+  "constraints": [
+    { "type": "ground_contact", "parts": ["leg_fl", "leg_fr", "leg_bl", "leg_br"] }
+  ]
+}

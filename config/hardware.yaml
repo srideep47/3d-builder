@@ -1,0 +1,11 @@
+# Hardware roles (see PLAN.md §1).
+#   standalone     — one PC does everything (default)
+#   agent_host     — runs the agent/CLI/MCP, calls a remote img3d service
+#   inference_host — additionally runs the img3d GPU service (PC 1 "Forge")
+role: standalone
+
+img3d:
+  enabled: false
+  base_url: http://127.0.0.1:8501
+  # LAN token, only needed when the service is exposed beyond localhost.
+  token_env: THREED_IMG3D_TOKEN

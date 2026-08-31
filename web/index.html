@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>3D Builder Studio</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3 29 10v12L16 29 3 22V10z' fill='none' stroke='%234cc2ff' stroke-width='2.4'/%3E%3Cpath d='M16 3v13m0 0L3 10m13 6 13-6M16 16v13' stroke='%234cc2ff' stroke-width='1.6' opacity='.65'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/css/app.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/vendor/three.module.js",
+        "three/addons/": "/vendor/addons/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="logo">
+        <span class="logo-mark">◆</span>
+        <div class="logo-text">
+          <span class="logo-title">3D Builder</span>
+          <span class="logo-sub">studio</span>
+        </div>
+      </div>
+
+      <nav id="nav">
+        <button class="nav-item active" data-view="build">
+          <span class="nav-ico">▦</span> Build
+        </button>
+        <button class="nav-item" data-view="runs">
+          <span class="nav-ico">≡</span> Runs <span id="runs-count" class="nav-badge"></span>
+        </button>
+        <button class="nav-item" data-view="system">
+          <span class="nav-ico">⚙</span> System
+        </button>
+      </nav>
+
+      <div id="health-mini" class="health-mini">
+        <div class="health-row"><span class="dot" id="dot-blender"></span> Blender</div>
+        <div class="health-row"><span class="dot" id="dot-ai"></span> GLM-5.3</div>
+        <div class="health-row"><span class="dot" id="dot-vision"></span> Vision</div>
+      </div>
+
+      <div class="sidebar-foot">
+        <div id="active-run-chip" class="active-run-chip hidden"></div>
+      </div>
+    </aside>
+
+    <main id="main">
+      <!-- ══════════════ BUILD VIEW ══════════════ -->
+      <section id="view-build" class="view">
+        <div class="input-col">
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Create</h2>
+              <div class="mode-switch" id="mode-switch">
+                <button class="mode-btn active" data-mode="ai">AI Build</button>
+                <button class="mode-btn" data-mode="spec">From Spec</button>
+              </div>
+            </div>
+
+            <div id="form-ai" class="form-body">
+              <label class="field">
+                <span class="field-label">Describe the object</span>
+                <textarea id="inp-prompt" rows="4" placeholder="e.g. A modern wooden office desk with four tapered legs and a beveled top"></textarea>
+              </label>
+
+              <label class="field">
+                <span class="field-label">Exact measurements <em>— the accuracy contract</em></span>
+                <textarea id="inp-measurements" rows="3" placeholder="one per line or comma separated&#10;e.g. overall width 1.4 m, overall height 0.76 m"></textarea>
+              </label>
+
+              <div class="field-row">
+                <label class="field">
+                  <span class="field-label">Material preset</span>
+                  <select id="inp-material"><option value="">— default —</option></select>
+                </label>
+                <label class="field">
+                  <span class="field-label">Example</span>
+                  <select id="inp-example">
+                    <option value="">— load —</option>
+                    <option value="desk">Office desk</option>
+                    <option value="stool">Counter stool</option>
+                    <option value="table">Coffee table</option>
+                    <option value="mug">Coffee mug</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="field">
+                <span class="field-label">Reference images <em id="vision-note"></em></span>
+                <div id="dropzone" class="dropzone">
+                  <input type="file" id="inp-images" accept="image/*" multiple hidden>
+                  <div class="dz-empty">
+                    <span class="dz-ico">🖼</span>
+                    <span>Drop reference images here<br><small>or click to browse</small></span>
+                  </div>
+                  <div id="dz-thumbs" class="dz-thumbs"></div>
+                </div>
+              </div>
+            </div>
+
+            <div id="form-spec" class="form-body hidden">
+              <label class="field">
+                <span class="field-label">ObjectSpec v2 JSON</span>
+                <textarea id="inp-spec" rows="16" spellcheck="false" class="mono" placeholder='{ "schema_name": "threed-objectspec", ... }'></textarea>
+              </label>
+              <div class="spec-actions">
+                <button id="btn-spec-file" class="btn ghost">Open file…</button>
+                <button id="btn-spec-validate" class="btn ghost">Validate</button>
+                <span id="spec-validate-msg" class="spec-msg"></span>
+              </div>
+              <input type="file" id="spec-file-input" accept=".json" hidden>
+            </div>
+
+            <div class="form-actions">
+              <button id="btn-build" class="btn primary lg">⚡ Build</button>
+              <span id="build-note" class="build-note"></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="output-col">
+          <div class="panel output-panel">
+            <div class="panel-header">
+              <h2 id="output-title">Output</h2>
+              <div class="output-header-right">
+                <span id="run-status" class="chip hidden"></span>
+                <span id="run-timer" class="run-timer hidden"></span>
+                <button id="btn-cancel" class="btn danger sm hidden">Cancel</button>
+                <a id="btn-download" class="btn accent sm hidden" download>⬇ GLB</a>
+              </div>
+            </div>
+
+            <div id="empty-state" class="empty-state">
+              <div class="empty-ico">◆</div>
+              <p>Nothing built yet.</p>
+              <p class="dim">Describe an object, give it exact measurements,<br>and watch it get built, measured and verified.</p>
+            </div>
+
+            <div id="output-body" class="hidden">
+              <div id="timeline" class="timeline"></div>
+
+              <div class="tabs" id="output-tabs">
+                <button class="tab active" data-tab="view3d">3D View</button>
+                <button class="tab" data-tab="renders">Renders</button>
+                <button class="tab" data-tab="gates">Gates</button>
+                <button class="tab" data-tab="spec">Spec</button>
+                <button class="tab" data-tab="log">Log</button>
+              </div>
+
+              <div class="tab-panes">
+                <div id="pane-view3d" class="tab-pane active">
+                  <div id="viewer-toolbar">
+                    <button id="btn-reset-view" class="btn ghost sm" title="Reset camera">⌂ Reset</button>
+                    <button id="btn-wireframe" class="btn ghost sm" title="Toggle wireframe">◫ Wireframe</button>
+                    <button id="btn-autorotate" class="btn ghost sm" title="Toggle rotation">↻ Rotate</button>
+                    <div id="viewer-dims" class="viewer-dims"></div>
+                  </div>
+                  <div id="viewer-container"></div>
+                </div>
+                <div id="pane-renders" class="tab-pane"><div id="renders-grid" class="renders-grid"></div></div>
+                <div id="pane-gates" class="tab-pane"><div id="gates-body"></div></div>
+                <div id="pane-spec" class="tab-pane"><pre id="spec-json" class="mono json-view"></pre></div>
+                <div id="pane-log" class="tab-pane"><pre id="log-view" class="mono log-view"></pre></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════════ RUNS VIEW ══════════════ -->
+      <section id="view-runs" class="view hidden">
+        <div class="panel">
+          <div class="panel-header"><h2>Runs</h2><button id="btn-refresh-runs" class="btn ghost sm">↻ Refresh</button></div>
+          <div class="table-wrap">
+            <table class="runs-table">
+              <thead><tr>
+                <th>Run</th><th>Object</th><th>Status</th><th>Dims (m)</th>
+                <th>Iters</th><th>Tris</th><th>Created</th><th></th>
+              </tr></thead>
+              <tbody id="runs-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════════ SYSTEM VIEW ══════════════ -->
+      <section id="view-system" class="view hidden">
+        <div class="system-grid">
+          <div class="panel" id="sys-blender"><div class="panel-header"><h2>Blender</h2></div><div class="sys-body"></div></div>
+          <div class="panel" id="sys-ai"><div class="panel-header"><h2>AI Provider</h2></div><div class="sys-body"></div></div>
+          <div class="panel" id="sys-agent"><div class="panel-header"><h2>Agent</h2></div><div class="sys-body"></div></div>
+          <div class="panel" id="sys-vision"><div class="panel-header"><h2>Vision</h2></div><div class="sys-body"></div></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="lightbox" class="lightbox hidden"><img id="lightbox-img" alt=""></div>
+  <div id="toasts" class="toasts"></div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

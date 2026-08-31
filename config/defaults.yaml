@@ -1,0 +1,18 @@
+# 3D Builder Default Geometric & Pipeline Configuration
+units: "meters"
+default_tolerance_m: 0.001       # 1 mm precision gate
+default_tri_budget: 50000        # target triangle count for meshes
+
+render:
+  resolution: [1024, 1024]
+  views: ["front", "side", "top", "iso"]
+  samples: 64
+  engine: "BLENDER_EEVEE_NEXT"   # EEVEE for fast headless preview renders
+  background: "studio"           # studio lighting with neutral backdrop
+
+cleanup:
+  auto_smooth: true
+  generate_uvs: true
+  center_origin_bottom: true
+  remove_doubles_distance: 0.0001
+  export_format: "glb"           # primary delivery format

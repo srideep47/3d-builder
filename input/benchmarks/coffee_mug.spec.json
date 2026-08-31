@@ -1,0 +1,49 @@
+{
+  "schema_name": "threed-objectspec",
+  "schema_version": "2.0.0",
+  "name": "Coffee Mug",
+  "description": "Standard ~350 ml ceramic coffee mug: 0.095 m body diameter, 0.10 m tall, hollowed interior, torus handle.",
+  "units": "meters",
+  "tolerance_m": 0.001,
+  "parts": [
+    {
+      "name": "body",
+      "shape": "cylinder",
+      "dimensions": [0.095, 0.095, 0.1],
+      "position": [0, 0, 0.05],
+      "smooth_shade": true,
+      "modifiers": {
+        "boolean": { "operation": "difference", "target_part": "inner_cut" }
+      },
+      "material": {
+        "preset": "white_ceramic",
+        "roughness": 0.25
+      }
+    },
+    {
+      "name": "inner_cut",
+      "shape": "cylinder",
+      "dimensions": [0.083, 0.083, 0.088],
+      "position": [0, 0, 0.058]
+    },
+    {
+      "name": "handle",
+      "shape": "torus",
+      "dimensions": [0.064, 0.064, 0.016],
+      "position": [0.055, 0, 0.05],
+      "rotation": [0, 90, 0],
+      "smooth_shade": true,
+      "material": {
+        "preset": "white_ceramic",
+        "roughness": 0.25
+      }
+    }
+  ],
+  "measurements": [
+    { "name": "overall_height", "target_value": 0.1, "unit": "meters", "applies_to": "overall.height_z" },
+    { "name": "body_diameter", "target_value": 0.095, "unit": "meters", "applies_to": "body.width_x" }
+  ],
+  "constraints": [
+    { "type": "ground_contact", "parts": ["body"] }
+  ]
+}

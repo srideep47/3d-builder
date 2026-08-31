@@ -1,0 +1,42 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Virtual Environment
+.venv/
+env/
+venv/
+ENV/
+
+# Output and run artifacts (regenerable: GLBs, renders, manifests, uploads,
+# inference log)
+output/
+
+# Agent session state
+.zcode/
+
+# Portable Blender + downloaded model weights (setup-blender, img3d)
+tools/
+models/
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# Local configuration overrides
+config/local.yaml
+.env

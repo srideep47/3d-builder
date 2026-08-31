@@ -1,0 +1,163 @@
+"""ObjectSpec v2 — Industrial CAD & 3D Model Specification Schema.
+
+Defines:
+- Advanced geometric shapes (rounded_box, tapered_extrude, revolve_lathe, cylinder, sphere, etc.)
+- Modifiers: bevel, subdivision, radial_array, mirror, boolean cuts
+- Procedural & Texture-Mapped PBR Materials
+- Hierarchical Measurements & Tolerances
+- Assembly Constraints (ground_contact, coaxial, aligned, touching)
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import Any, Literal
+from pydantic import BaseModel, Field
+
+
+class Unit(str, Enum):
+    METERS = "meters"
+    CENTIMETERS = "cm"
+    MILLIMETERS = "mm"
+    INCHES = "inches"
+    FEET = "feet"
+
+    def to_meters(self, val: float) -> float:
+        """Convert a value in this unit to meters."""
+        if self == Unit.METERS:
+            return float(val)
+        elif self == Unit.CENTIMETERS:
+            return float(val) * 0.01
+        elif self == Unit.MILLIMETERS:
+            return float(val) * 0.001
+        elif self == Unit.INCHES:
+            return float(val) * 0.0254
+        elif self == Unit.FEET:
+            return float(val) * 0.3048
+        return float(val)
+
+
+class ShapeType(str, Enum):
+    BOX = "box"
+    ROUNDED_BOX = "rounded_box"
+    CYLINDER = "cylinder"
+    TAPERED_CYLINDER = "tapered_cylinder"
+    SPHERE = "sphere"
+    CONE = "cone"
+    TORUS = "torus"
+    TAPERED_EXTRUDE = "tapered_extrude"
+    REVOLVE_LATHE = "revolve_lathe"
+    EXTRUDE = "extrude"
+    SWEEP = "sweep"
+    ORGANIC = "organic"
+
+
+class GenerationMethod(str, Enum):
+    PARAMETRIC = "parametric"
+    IMAGE_TO_3D = "image_to_3d"
+    CUSTOM_SCRIPT = "custom_script"
+
+
+class PBRMaterial(BaseModel):
+    name: str = "default_pbr"
+    preset: str | None = None  # e.g. "oak_wood", "brushed_steel", "chrome", "leather_black"
+    color: list[float] = Field(default_factory=lambda: [0.8, 0.8, 0.8])  # [r, g, b] in 0..1 range
+    roughness: float = 0.5
+    metallic: float = 0.0
+    transmission: float = 0.0
+    emission: list[float] | None = None
+    texture_dir: str | None = None  # Folder path containing Albedo, Normal, Roughness, Metallic maps
+    triplanar: bool = False
+    procedural: bool = False  # Attach procedural node shaders (pair with bake_materials for export)
+
+
+class BevelModifier(BaseModel):
+    width: float = 0.005  # Bevel width in meters (e.g. 5mm)
+    segments: int = 3
+
+
+class SubdivisionModifier(BaseModel):
+    levels: int = 2
+
+
+class RadialArrayModifier(BaseModel):
+    count: int = 5
+    axis: Literal["x", "y", "z"] = "z"
+    center: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0])
+
+
+class LinearArrayModifier(BaseModel):
+    count: int = 2
+    direction: list[float] = Field(default_factory=lambda: [0.0, 0.0, 1.0])
+    spacing: float = 0.1
+
+
+class MirrorModifier(BaseModel):
+    axis: Literal["x", "y", "z", "xy", "xz", "yz"] = "x"
+
+
+class BooleanModifier(BaseModel):
+    operation: Literal["difference", "union", "intersect"] = "difference"
+    target_part: str
+
+
+class Modifiers(BaseModel):
+    bevel: BevelModifier | None = None
+    subdivision: SubdivisionModifier | None = None
+    radial_array: RadialArrayModifier | None = None
+    linear_array: LinearArrayModifier | None = None
+    mirror: MirrorModifier | None = None
+    boolean: BooleanModifier | None = None
+
+
+class PartSpec(BaseModel):
+    name: str
+    shape: ShapeType = ShapeType.ROUNDED_BOX
+    dimensions: list[float] = Field(default_factory=lambda: [1.0, 1.0, 1.0])  # [x, y, z] in meters
+    position: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0])   # [x, y, z] in meters
+    rotation: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0])   # degrees [rx, ry, rz]
+    top_scale: list[float] | None = None  # For tapered_extrude [sx, sy]
+    profile_points: list[list[float]] | None = None  # revolve_lathe [[r,z],...] or extrude [[x,y],...]
+    path_points: list[list[float]] | None = None  # sweep [[x, y, z], ...]
+    position_mode: Literal["center", "base"] | None = None  # None = auto per shape
+    method: GenerationMethod = GenerationMethod.PARAMETRIC
+    material: PBRMaterial | None = None
+    modifiers: Modifiers | None = None
+    smooth_shade: bool = False
+    segments: int | None = None
+    # image_to_3d parts: crop of the reference image, generated mesh, final size
+    image_crop: str | None = None
+    mesh_path: str | None = None
+    target_size: list[float] | None = None
+    # script method: agent-authored bpy code
+    code: str | None = None
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class MeasurementSpec(BaseModel):
+    name: str
+    target_value: float
+    unit: Unit = Unit.METERS
+    applies_to: str = "overall.height_z"  # e.g. "overall.width_x", "seat_cushion.height_z"
+    tolerance_m: float = 0.001            # Default 1mm tolerance in meters
+
+
+class ConstraintSpec(BaseModel):
+    type: Literal["ground_contact", "coaxial", "coplanar", "aligned", "touching", "symmetry"]
+    parts: list[str]
+    axis: Literal["x", "y", "z"] | None = None
+    offset: float = 0.0
+
+
+class ObjectSpec(BaseModel):
+    schema_name: str = "threed-objectspec"
+    schema_version: str = "2.0.0"
+    name: str = "Untitled Model"
+    description: str = ""
+    units: Unit = Unit.METERS
+    tolerance_m: float = 0.001
+    source_images: list[str] = Field(default_factory=list)
+    parts: list[PartSpec] = Field(default_factory=list)
+    measurements: list[MeasurementSpec] = Field(default_factory=list)
+    constraints: list[ConstraintSpec] = Field(default_factory=list)
+    tri_budget: int = 60000

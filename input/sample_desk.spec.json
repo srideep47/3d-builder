@@ -1,0 +1,72 @@
+{
+  "schema_name": "threed-objectspec",
+  "schema_version": "2.0.0",
+  "name": "Modern Wooden Office Desk",
+  "description": "Executive desk with oak wood tabletop and 4 tapered legs",
+  "units": "meters",
+  "tolerance_m": 0.001,
+  "parts": [
+    {
+      "name": "tabletop",
+      "shape": "rounded_box",
+      "dimensions": [1.4, 0.7, 0.04],
+      "position": [0, 0, 0.74],
+      "modifiers": {
+        "bevel": {"width": 0.004, "segments": 3}
+      },
+      "material": {
+        "preset": "oak_wood",
+        "roughness": 0.55,
+        "metallic": 0.0
+      }
+    },
+    {
+      "name": "leg_fl",
+      "shape": "tapered_extrude",
+      "dimensions": [0.06, 0.06, 0.72],
+      "position": [-0.62, -0.28, 0.0],
+      "top_scale": [0.65, 0.65],
+      "material": {
+        "preset": "walnut_wood"
+      }
+    },
+    {
+      "name": "leg_fr",
+      "shape": "tapered_extrude",
+      "dimensions": [0.06, 0.06, 0.72],
+      "position": [0.62, -0.28, 0.0],
+      "top_scale": [0.65, 0.65],
+      "material": {
+        "preset": "walnut_wood"
+      }
+    },
+    {
+      "name": "leg_bl",
+      "shape": "tapered_extrude",
+      "dimensions": [0.06, 0.06, 0.72],
+      "position": [-0.62, 0.28, 0.0],
+      "top_scale": [0.65, 0.65],
+      "material": {
+        "preset": "walnut_wood"
+      }
+    },
+    {
+      "name": "leg_br",
+      "shape": "tapered_extrude",
+      "dimensions": [0.06, 0.06, 0.72],
+      "position": [0.62, 0.28, 0.0],
+      "top_scale": [0.65, 0.65],
+      "material": {
+        "preset": "walnut_wood"
+      }
+    }
+  ],
+  "measurements": [
+    {"name": "overall_width", "target_value": 1.4, "unit": "meters", "applies_to": "overall.width_x"},
+    {"name": "overall_depth", "target_value": 0.7, "unit": "meters", "applies_to": "overall.depth_y"},
+    {"name": "overall_height", "target_value": 0.76, "unit": "meters", "applies_to": "overall.height_z"}
+  ],
+  "constraints": [
+    {"type": "ground_contact", "parts": ["leg_fl", "leg_fr", "leg_bl", "leg_br"]}
+  ]
+}
