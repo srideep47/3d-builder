@@ -4,8 +4,8 @@
 > the original plan, everything built so far, every hard-won technical finding,
 > and the exact runbook for moving/continuing work on a new machine. Any agent
 > (or human) picking this project up should read this document fully before
-> changing anything. Last updated: 2026-08-31, at the end of the M0–M3 + Web UI
-> phase, on the eve of transferring development to **Forge**.
+> changing anything. Last updated: 2026-09-01, on **Forge**, during **M4**
+> (img3d neural service live, vision plug points wired, GPU bake-off started).
 >
 > Companion doc: **`PLAN.md`** is the original Master Plan v2 (requirements,
 > full design rationale, ObjectSpec/harness/material/gate design, Appendix A
@@ -114,29 +114,41 @@ bottom-center `(0, 0, 0)`. All lengths are **meters** internally.
 | **M2 — Agent** | Aptos provider, tool loop, analyst/builder/verifier prompts, self-correction, live e2e | ✅ done (incl. reasoning-model taming, §7.1) |
 | **M3 — MCP + polish** | stdio MCP server (7 tools), materials/PBR, docs, golden benchmarks (dimensions.com) | ✅ done |
 | **M3.5 — Web studio UI** | FastAPI + WS + three.js studio: input → live progress → output | ✅ done (browser-verified e2e, §6) |
-| **M4 — Vision + image-to-3D** | Qwen2.5-VL local (owner-built) as analyst eye + visual gate; img3d provider bake-off; hybrid routing | ⬜ next (§13) |
+| **M4 — Vision + image-to-3D** | Qwen2.5-VL local (owner-built) as analyst eye + visual gate; img3d provider bake-off; hybrid routing | 🔶 **in progress** (§13): img3d service + hybrid routing ✅ done & live-verified; TripoSR GPU backend wired; vision plug points ✅ wired (awaiting owner's Qwen-VL server); TRELLIS/Hunyuan3D bake-off slots registered |
 
-## 6. Current verified state (as of 2026-08-31)
+## 6. Current verified state (as of 2026-09-01, on Forge)
 
-- **Tests: 51/51 pass** (`python -m pytest tests -q`, ~60 s):
-  - `test_schema.py` (5), `test_resolver.py` (6), `test_validation.py` (5),
-    `test_utils.py` (8) — unit
-  - `test_harness_smoke.py` (9) — real Blender subprocess ops
-  - `test_golden_benchmarks.py` (8) — golden specs build, pass both gates,
-    watertight, renders
-  - `test_webapp_api.py` (10) — FastAPI TestClient incl. a real spec-mode e2e
-    (GLB magic bytes, renders served, WS replay) and path-traversal containment
-- **AI benchmark** (`scripts/benchmark_golden.py`): **4/4 objects pass all
-  gates in a single iteration**, 13–16 s each — stool (seat 0.66 m, Ø 0.38),
-  coffee table (1.2 × 0.6 × 0.40), mug (height 0.10), desk (1.4 × 0.7 × 0.76).
-- **MCP server** verified over stdio: initialize handshake, 7 tools listed,
-  live tool call round-trip.
-- **Web studio** browser-verified end-to-end: boot, presets, health dots,
-  AI build with live correction loops in the timeline, cancel mid-analyst,
-  gates tables, 3D viewer (pixel-verified rendering), renders gallery,
-  download, run history reopen, spec mode (golden stool: all 3 measurements
-  +0.0 mm). Evidence: `docs/gui-screenshots/01…07*.png`.
-- Single AI build wall-clock: **~13 s** typical (was 315 s before reasoning
+- **Machine transfer executed**: Forge set up per §12 (uv venv 3.12.14,
+  Blender 4.5.13 portable in `tools/`), health green, **51/51 tests**, AI
+  benchmark **4/4** — parity with Scout confirmed before any M4 work.
+- **Tests: 68/68 pass** (`python -m pytest tests -q`):
+  - the original 51 (schema, resolver, validation, utils, harness smoke,
+    golden benchmarks, webapp API)
+  - `test_img3d.py` (13): service API + auth (TestClient), client e2e over a
+    live uvicorn thread, AgentLoop neural wiring (generate/cache/skip/normalize),
+    full hybrid Blender build (parametric pedestal + neural blob → gates green)
+  - `test_vlm.py` (4): LocalVLMClient against a mock OpenAI-compatible server,
+    visual-gate wiring, fail-soft when unconfigured
+- **AI benchmark**: still 4/4 in a single iteration after the M4 prompt changes.
+- **img3d service** (`services/img3d_service/`, PLAN.md §9): FastAPI,
+  single-job GPU queue, `/health` `/models` `/generate` `/result/<id>`
+  `/download/<id>`, optional bearer token for LAN. Backends: `mock`
+  (deterministic, live-verified), `tripo_sr` (GPU, wired — see §13.2),
+  `trellis` / `hunyuan3d` (registered slots for the bake-off).
+- **Hybrid routing live-verified end-to-end** (spec mode): spec with an
+  `image_to_3d` part → loop generates the mesh via the service → caches under
+  `run_dir/neural/` → harness imports + scales to `target_size` → dimension +
+  mesh gates green at 0.0 mm delta. AI mode: analyst routes organic parts to
+  `image_to_3d` (with deterministic normalization for missed routing, §7.7).
+- **Vision plug points wired** (§13.1): `src/ai/vlm.py` LocalVLMClient
+  (OpenAI-compatible), analyst enrichment + advisory visual gate + manifest
+  `metrics.visual_verdict` + web-UI timeline events. Inert until the owner
+  stands up Qwen2.5-VL and sets `vision.vlm.base_url`/`model` in ai.yaml.
+- MCP server: 8 tools (added `image_to_3d`; health now reports the img3d
+  service). CLI: new `img3d` command (live-verified against the service).
+- Carried over from M3.5 (still valid): MCP verified over stdio; web studio
+  browser-verified end-to-end (evidence: `docs/gui-screenshots/01…07*.png`);
+  single AI build wall-clock **~10–18 s** typical (was 315 s before reasoning
   tuning — see §7.1).
 
 ## 7. The gotchas ledger (hard-won knowledge — read before touching)
@@ -251,6 +263,54 @@ bottom-center `(0, 0, 0)`. All lengths are **meters** internally.
   finishes with status `cancelled` (loop `_finish(user_cancelled=…)`).
 - Render `<img loading="lazy">` inside hidden tab panes load only when the
   tab becomes visible — 0×0 natural size while hidden is expected, not a bug.
+- **Unknown progress events are safe by design**: the event switch falls
+  through to the timeline log. New events (`neural_part_*`, `neural_skipped`,
+  `visual_gate`) have proper step cases in `web/js/app.js` (STAGE_LABELS +
+  switch) — keep adding cases there when introducing events.
+
+### 7.7 img3d / neural parts / GPU service (M4)
+
+- **Two Python environments, never mixed** (3DGuy's rule, PLAN.md §1): main
+  env (agent, Blender runner, MCP — light deps) and the service env
+  `services/img3d_service/.venv` (Python 3.11 + torch 2.6 cu124 + model
+  deps). The service imports its backends lazily so the mock backend runs in
+  either env; torch-touching code only imports inside `load()`/`generate()`.
+- **torchmcubes does not build on Windows** (CUDA extension). TripoSR needs
+  it in exactly one place (marching cubes over a scalar grid). Fix:
+  `_install_torchmcubes_shim()` in `providers/tripo_sr.py` installs a
+  scikit-image-based module shim into `sys.modules` — only when the real
+  extension is absent. Do not "clean this up" by patching the vendored repo.
+- **`rembg` does not import without an onnxruntime backend** — plain
+  `pip install rembg` is not enough; `onnxruntime` (CPU build) must be
+  installed explicitly, or `import tsr.utils` fails at module level.
+- **`TSR.from_pretrained` has a fixed signature** (no cache_dir kwargs) and
+  pulls weights via `hf_hub_download`. Redirecting the cache into `models/`
+  requires `HF_HUB_CACHE` to be set **before `huggingface_hub` is first
+  imported** (it reads the env at import time) — the backend sets it in
+  `__init__` with `setdefault` (never override a user's env).
+- **Analyst routing variance**: the analyst sometimes sets `shape: "organic"`
+  but leaves `method: "parametric"` (default). The loop normalizes this
+  deterministically (`_normalize_spec_methods`: organic ⇒ image_to_3d) and
+  the harness degrades shape-organic-without-mesh to a warning skip instead
+  of the old hard "Unknown shape 'organic'" build error.
+- **The analyst hallucinates `image_crop` paths** (e.g.
+  `reference_image_1.jpg`). `_analyst_spec` now lists the REAL image paths in
+  the user message, and `_resolve_part_image` falls back to spec source
+  images → run images when `image_crop` doesn't exist. Never trust
+  `image_crop` alone.
+- **Corrector rewrites drop `mesh_path`** (it rewrites the whole spec JSON).
+  Neural meshes are cached by part name under `run_dir/neural/` and
+  re-attached at the top of every iteration (`_reattach_neural_meshes`) —
+  no regeneration. The harness re-scales imported meshes to the part's
+  CURRENT `target_size`, so dimension corrections on neural parts converge
+  without regeneration (the corrector prompt says: fix neural parts via
+  `target_size`).
+- **Progress-event signature split**: the public `progress` callback takes a
+  single dict; the loop-internal `emit(event, **data)` wraps it. Tests that
+  call `_prepare_neural_parts` directly must pass an emit-shaped callable
+  (`_collect()` in `tests/test_img3d.py`), not `list.append`.
+- **TripoSR expects RGB on white background**; the backend composites alpha
+  over white with PIL instead of pulling rembg into the inference path.
 
 ## 8. Web studio — structure & API surface
 
@@ -313,7 +373,8 @@ dimensions aligned (a mismatch once produced phantom "misses").
 ## 11. Known issues & limitations
 
 1. Endpoint is text-only → reference images are stored but not analyzed
-   (until Qwen VL lands, §13). UI shows an amber "text-only mode" dot.
+   (until Qwen VL lands, §13.1 — the LocalVLMClient integration is wired and
+   inert). UI shows an amber "text-only mode" dot.
 2. Analyst measurement-adherence variance (§7.1 last bullet) — mug-class
    objects (hollow interiors) are the hardest; gates catch it, corrector
    usually fixes it, occasionally ends `completed_with_warnings`.
@@ -321,8 +382,17 @@ dimensions aligned (a mismatch once produced phantom "misses").
    `cancelled` — by design, not a failure.
 4. The runs registry keeps every run in memory for the server session
    (needed for WS replay); fine for a studio tool, revisit if it ever matters.
-5. img3d (`src/img3d/`) is scaffolded (provider ABC + WSL client stubs) but
-   has no working backend yet — M4.
+5. img3d: `trellis` / `hunyuan3d` backends are registered slots only —
+   the bake-off (§13.2) installs them. `tripo_sr` is wired and GPU-verified.
+6. If the img3d service is down, specs with `image_to_3d` parts emit
+   `neural_skipped` and the harness skips those parts with a warning (gates
+   then fail on their measurements) — the run does not crash. A dead service
+   costs one short health probe per process.
+7. The mock backend's blob is a displaced icosphere — useful for pipeline
+   verification, NOT a quality reference. Real quality comes from tripo_sr+.
+8. Bake-off reference images in `input/bakeoff/` are synthetic placeholders;
+   replace with real object photos for a meaningful TRELLIS/Hunyuan/TripoSR
+   comparison.
 
 ## 12. Transfer runbook — setting up on Forge
 
@@ -357,84 +427,107 @@ powershell -ExecutionPolicy Bypass -File scripts/setup-blender.ps1
 Alternative to re-downloading Blender: copy the `tools/` folder from the old
 machine over LAN/USB — it is self-contained.
 
+**img3d GPU service (Forge only, optional for M4)**:
+```powershell
+uv venv services/img3d_service/.venv --python 3.11
+uv pip install -r services/img3d_service/requirements-gpu.txt -p services/img3d_service/.venv
+powershell -ExecutionPolicy Bypass -File scripts/setup-img3d-gpu.ps1   # vendors TripoSR
+scripts/start-img3d.ps1 tripo_sr          # weights download on first generation
+```
+
 No API keys are needed (Aptos endpoint is keyless for text). No secrets are
 committed; `config/ai.yaml` holds only endpoint/model/budgets.
 
-## 13. Roadmap — M4 (next phase)
+## 13. Roadmap — M4 (in progress)
 
 ### 13.1 Qwen2.5-VL vision model (owner-built, on Forge)
 
-Integration points already prepared:
+**Integration points are DONE and inert** — they activate the moment the
+owner stands up the model (no code changes needed):
 
-1. **Reference analysis** — `src/agent/vision.py`-style flow (see
-   `src/ai/vision_probe.py` + `AgentLoop` images plumbing): reference
-   images + measurements → analyst context. The UI already uploads images
-   (`POST /api/uploads`) and passes paths into runs; they are currently
-   stored for the future VLM. Serve Qwen-VL (e.g. vLLM/OpenAI-compatible on
-   the 4080 Super) and point the analyst at it.
-2. **Visual Tester / visual gate** — compare `render_views` output against
-   the reference image; record verdict in the manifest (advisory gate,
-   `dimension_gate`/`mesh_gate` pattern in `src/agent/verifier.py` +
-   `VerificationReport`). UI: add a visual-verdict chip to the Gates tab.
-3. **Config** — extend `config/ai.yaml` (`vision:` section) with the local
-   endpoint; the System view in the web UI already documents this plug point.
-4. Set `vision.mode` accordingly; `vision_probe` logic will then report
-   vision supported and the UI dot turns green.
+1. **Reference analysis** — `src/ai/vlm.py` `LocalVLMClient`
+   (OpenAI-compatible, httpx). `AgentLoop._analyst_spec` calls
+   `describe_reference_images()` when GLM vision is unavailable and the
+   local VLM answers; the description grounds the analyst's spec.
+2. **Visual Tester / visual gate** — `AgentLoop._run_visual_gate` runs on
+   the passing iteration, compares renders vs references, emits a
+   `visual_gate` event (web UI timeline step) and records the verdict in
+   `manifest.metrics.visual_verdict`. Advisory — never blocks a run.
+3. **Config** — `config/ai.yaml` `vision.vlm` section (`base_url`, `model`,
+   `api_key_env`, `timeout_sec`); `vision.mode` controls the GLM endpoint
+   probe as before. Set both `base_url` and `model` to activate.
+4. Serve Qwen2.5-VL (vLLM or any OpenAI-compatible server) on the 4080
+   Super; verified against a mock server in `tests/test_vlm.py`.
 
 ### 13.2 Image-to-3D (organic parts) — per PLAN.md §9
 
-- **Model bake-off at M4 on Forge's 4080 Super**, scored on the golden
-  benchmark set:
-  - **TRELLIS** — best geometry quality, textured output, fits 16 GB
-  - **Hunyuan3D-2.1** — strongest PBR textures, ~12 GB
-  - **TripoSR** — fastest/lightest (~6 GB), lower quality; low-VRAM fallback
-- **Service shape**: FastAPI on Forge (`/health`, `/generate` → job id,
-  `/result/<id>`), single-job GPU queue, model loaded once, weights cached
-  under `models/` (gitignored). The agent talks to it via httpx; Scout points
-  at Forge's LAN address. `config/hardware.yaml` selects the provider.
-- **Windows-native PyTorch/CUDA** preferred (both PCs are Win 11); WSL2 only
-  if a chosen model's dependencies force it (`src/img3d/local_wsl.py` sketches
-  that client). Heavy deps go in an optional `[img3d]` dependency group,
-  installed only on Forge.
-- Provider ABC in `src/img3d/provider.py`. **Neural mesh post-processing
-  (always)**: import → decimate to budget → smart UV →
-  `scale_to_exact_bounds(target_size)` → `center_origin` → material/bake.
-  Neural output is never shipped raw; `scale_to_size` enforces measured
-  dimensions.
-- Hybrid routing: spec parts with `method: image_to_3d` + `image_crop`
-  references route to the provider; parametric parts unchanged.
-- MCP tool `image_to_3d` already declared.
+**Done**: FastAPI service (`services/img3d_service/`) on Forge —
+`/health`, `/models`, `/generate` → job id, `/result/<id>`, `/download/<id>`,
+single-job GPU queue, model loaded once, weights under `models/` (gitignored),
+optional LAN token. `RemoteImg3DProvider` client (httpx, polling) +
+`get_img3d_provider()` factory in `src/img3d/`. Hybrid routing in the agent
+loop (§7.7). MCP `image_to_3d` tool + CLI `img3d` command. Bake-off harness:
+`scripts/bakeoff_img3d.py` (scores time / tris / watertightness / scale
+accuracy per backend, JSON report under `output/`).
 
-### 13.3 Smaller backlog
+**Backend status**:
+- `mock` ✅ (deterministic, CPU, pipeline verification)
+- `tripo_sr` ✅ wired (vendored repo + HF weights, torchmcubes scikit-image
+  shim for Windows, GPU env in `services/img3d_service/.venv`)
+- `trellis` ⬜ / `hunyuan3d` ⬜ registered slots — remaining M4 work:
+  install each on the GPU env, implement the backend, run the bake-off on
+  `input/bakeoff/` (replace synthetic images with real photos first).
 
+**Neural mesh post-processing (always)**: backends decimate to `max_tris`
+when the simplifier is available and scale to exact target bounds; the
+harness re-scales to the part's `target_size` on import and generates UVs
+(`generate_uvs: True` in the resolver). Neural output is never shipped raw.
+
+### 13.3 Remaining M4 backlog
+
+- Complete the TRELLIS / Hunyuan3D-2.1 legs of the bake-off; pick the
+  default `IMG3D_MODEL` based on the report.
+- Owner: serve Qwen2.5-VL and set `vision.vlm` in `config/ai.yaml` (§13.1).
 - Analyst measurement-adherence hardening (deterministic scale-to-target
   post-check) — see §7.1.
 - Multi-format export exposure in the UI (harness already supports it).
 - Benchmark growth from dimensions.com (more object classes).
+- Browser-verification pass of the web UI with neural events (evidence in
+  `docs/gui-screenshots/`).
 
 ## 14. File map
 
 ```
 src/ai/         aptos.py (GLM-5.3 client + role config + reasoning control),
-                provider.py (ABC), schemas.py, inference_log.py, vision_probe.py
-src/agent/      loop.py (instrumented run loop: progress/cancel/run_dir),
-                prompts.py, verifier.py (gates + load_merged_mesh), tools.py
+                provider.py (ABC), schemas.py, inference_log.py,
+                vision_probe.py, vlm.py (local Qwen-VL client + visual gate)
+src/agent/      loop.py (instrumented run loop: progress/cancel/run_dir +
+                neural-part generation + visual gate), prompts.py,
+                verifier.py (gates + load_merged_mesh), tools.py
 src/spec/       schema.py (ObjectSpec v2), resolver.py, validation.py
 src/blender/    locate.py, runner.py, harness_script.py (all Blender ops)
 src/materials/  pbr.py (12 presets)
-src/img3d/      provider.py (ABC), local_wsl.py (phase-2 stubs)
+src/img3d/      provider.py (ABC), client.py (RemoteImg3DProvider + factory)
 src/webapp/     server.py (FastAPI REST+WS+static), runner.py (RunRegistry)
 src/            pipeline.py, run_store.py, cli.py, mcp_server.py
+services/img3d_service/  app.py (FastAPI GPU service), providers/
+                (base, mock, tripo_sr, trellis, hunyuan3d), README.md,
+                requirements.txt (light) / requirements-gpu.txt (torch cu124),
+                .venv/ (GPU env, gitignored), vendor/TripoSR (gitignored)
 web/            index.html, css/app.css, js/app.js, js/viewer.js,
                 vendor/ (three.js r169 + addons — see §7.6)
-input/          benchmarks/*.spec.json (golden), sample_desk.spec.json
-config/         ai.yaml (endpoint/roles/budgets/reasoning_effort),
-                defaults.yaml, hardware.yaml
-scripts/        benchmark_golden.py, setup-blender.ps1, blender-smoke.ps1
-tests/          51 tests across 7 files (§6)
+input/          benchmarks/*.spec.json (golden), sample_desk.spec.json,
+                bakeoff/ (img3d bake-off reference images)
+config/         ai.yaml (endpoint/roles/budgets/reasoning_effort/vision.vlm),
+                defaults.yaml, hardware.yaml (role + img3d service)
+scripts/        benchmark_golden.py, bakeoff_img3d.py, setup-blender.ps1,
+                setup-img3d-gpu.ps1, start-img3d.ps1, blender-smoke.ps1
+tests/          68 tests across 9 files (§6)
 docs/           gui-screenshots/ (web UI browser-verification evidence)
 output/         (gitignored) runs/<id>/{final.glb, spec.json, manifest.json,
-                renders/, steps/}, uploads/, inference_log.jsonl
+                renders/, steps/, neural/}, uploads/, inference_log.jsonl,
+                bakeoff/ (bake-off artifacts)
+models/         (gitignored) img3d weights (HF cache redirect)
 tools/          (gitignored) portable Blender
 ```
 
@@ -446,12 +539,18 @@ tools/          (gitignored) portable Blender
 .venv/Scripts/python -m src.cli build --prompt "..." --measurements "overall height 0.45 m"
 .venv/Scripts/python -m src.cli measure output/runs/<id>/final.glb
 .venv/Scripts/python -m src.cli render  output/runs/<id>/final.glb
+.venv/Scripts/python -m src.cli img3d   input/ref.png --target 0.3,0.2,0.15
 .venv/Scripts/python -m src.cli runs list | runs show <id>
 .venv/Scripts/python -m src.cli presets                  # 12 material presets
 .venv/Scripts/python -m src.cli mcp                      # stdio MCP server
 .venv/Scripts/python -m src.cli ui                       # web studio (:8137)
-.venv/Scripts/python -m pytest tests -q                  # 51 tests
+.venv/Scripts/python -m pytest tests -q                  # 68 tests
 .venv/Scripts/python scripts/benchmark_golden.py         # AI benchmark
+.venv/Scripts/python scripts/bakeoff_img3d.py            # img3d backend bake-off
+
+# img3d service (start BEFORE builds with image_to_3d parts):
+scripts/start-img3d.ps1              # mock backend (main env)
+scripts/start-img3d.ps1 tripo_sr     # GPU backend (service venv, port 8501)
 ```
 
 ## 16. Rules for the next agent
