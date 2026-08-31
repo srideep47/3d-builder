@@ -265,6 +265,82 @@ def health():
     ))
 
 
+@app.command()
+def validate(
+    package_dir: str = typer.Argument(..., help="Package directory to validate, e.g. output/packages/<JOB>"),
+    job: str = typer.Option(..., "--job", "-j", help="Path to the job card (job.yaml)"),
+    json_out: bool = typer.Option(False, "--json", help="Print gate results as JSON instead of a table"),
+):
+    """Reproduce the client's validator panel against a package directory."""
+    from .client.gates import MeshFacts, run_all_gates
+    from .client.job import load_job
+
+    try:
+        job_card = load_job(Path(job))
+    except (FileNotFoundError, ValueError) as e:
+        console.print(f"[bold red]Error:[/] {e}")
+        raise typer.Exit(1)
+
+    pkg = Path(package_dir)
+    if not pkg.is_dir():
+        console.print(f"[bold red]Error:[/] Package directory not found: {package_dir}")
+        raise typer.Exit(1)
+
+    # Mesh facts: one fresh Blender process pointed at the packaged FBX
+    # (repo rule 1 — no shared scene state). Fail closed: without facts the
+    # mesh gates report "could not verify" and the command exits non-zero;
+    # we never learn about a failure from the client's validator.
+    facts: MeshFacts | None = None
+    fbx = pkg / f"{job_card.job_code}.fbx"
+    if fbx.is_file():
+        from .blender.runner import BlenderRunner
+
+        runner = BlenderRunner()
+        if runner.is_available:
+            try:
+                with console.status("[bold cyan]Measuring packaged FBX in Blender...[/]"):
+                    report = runner.execute_op("topology_report", {"model_path": str(fbx)})
+                facts = MeshFacts.from_topology_report(report)
+            except Exception as e:  # noqa: BLE001 — report and fail closed
+                console.print(f"[bold yellow]Warning:[/] topology measurement failed: {e}")
+        else:
+            console.print("[bold yellow]Warning:[/] Blender not found — mesh gates will fail as 'could not verify'.")
+    else:
+        console.print(f"[bold yellow]Warning:[/] {fbx.name} not found — mesh gates will fail as 'could not verify'.")
+
+    results = run_all_gates(pkg, job_card, facts)
+
+    if json_out:
+        console.print_json(json.dumps({
+            "job": job_card.job_code,
+            "package": str(pkg),
+            "gates": [r.to_dict() for r in results],
+            "all_passed": all(r.passed for r in results),
+        }))
+    else:
+        table = Table(title=f"Client Validator (local mirror) — {job_card.job_code}")
+        table.add_column("Gate", style="cyan")
+        table.add_column("Result")
+        table.add_column("Expected", style="dim")
+        table.add_column("Received", style="dim")
+        for r in results:
+            table.add_row(r.gate, "[green]PASS[/]" if r.passed else "[red]FAIL[/]",
+                          r.expected, r.received)
+        console.print(table)
+        for r in results:
+            if not r.passed:
+                console.print(f"  [red]✗ {r.gate}:[/] {r.message}")
+        failed = sum(1 for r in results if not r.passed)
+        console.print(Panel(
+            "[bold green]ALL GATES PASSED[/]" if not failed else f"[bold red]{failed} GATE(S) FAILED[/]",
+            title="Validation Result",
+            border_style="green" if not failed else "red",
+        ))
+
+    if any(not r.passed for r in results):
+        raise typer.Exit(1)
+
+
 @runs_app.command("list")
 def runs_list():
     """List recent generation runs and manifests."""

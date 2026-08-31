@@ -1092,6 +1092,109 @@ def op_measure(params):
     }
 
 
+def _count_face_kinds(meshes):
+    """(tris, quads, ngons, triangle_equivalent, faces_total, vertices) across
+    mesh objects. triangle_equivalent = Σ(max(verts−2, 0)) per face — the
+    triangulated polycount a client validator counts."""
+    tris = quads = ngons = tri_eq = faces = verts = 0
+    for m in meshes:
+        for p in m.data.polygons:
+            n = len(p.vertices)
+            faces += 1
+            if n == 3:
+                tris += 1
+            elif n == 4:
+                quads += 1
+            else:
+                ngons += 1
+            tri_eq += max(n - 2, 0)
+        verts += len(m.data.vertices)
+    return tris, quads, ngons, tri_eq, faces, verts
+
+
+def _topology_diagnostics(mesh_obj):
+    """(loose_vertices, loose_edges, boundary_edges, nonmanifold_edges) for
+    one mesh object. Loose = not part of any face; boundary = one face;
+    non-manifold = shared by more than two faces."""
+    import bmesh
+
+    bm = bmesh.new()
+    bm.from_mesh(mesh_obj.data)
+    loose_v = sum(1 for v in bm.verts if not v.link_faces)
+    loose_e = boundary = nonmanifold = 0
+    for e in bm.edges:
+        n = len(e.link_faces)
+        if n == 0:
+            loose_e += 1
+        elif n == 1:
+            boundary += 1
+        elif n > 2:
+            nonmanifold += 1
+    bm.free()
+    return loose_v, loose_e, boundary, nonmanifold
+
+
+def op_count_ngons(params):
+    """Count faces with more than 4 vertices (client n-gon gate)."""
+    model_path = params.get("model_path")
+    if not model_path:
+        raise ValueError("model_path is required")
+    reset_scene()
+    import_any(str(model_path))
+    meshes = mesh_objects()
+    if not meshes:
+        return {"success": False, "error": "No mesh objects in scene"}
+    ngons = sum(1 for m in meshes for p in m.data.polygons if len(p.vertices) > 4)
+    return {
+        "success": True,
+        "model_path": str(model_path),
+        "ngon_count": ngons,
+        "objects": len(meshes),
+        "units": "count",
+    }
+
+
+def op_topology_report(params):
+    """Full topology + bounds report for a model file: tri/quad/ngon counts,
+    triangle-equivalent polycount, loose geometry, non-manifold edges, and
+    overall world-space bounds in metres. Feeds the client gates
+    (n-gons, polycount, dimensions, orientation)."""
+    model_path = params.get("model_path")
+    if not model_path:
+        raise ValueError("model_path is required")
+    reset_scene()
+    import_any(str(model_path))
+    meshes = mesh_objects()
+    if not meshes:
+        return {"success": False, "error": "No mesh objects in scene"}
+    tris, quads, ngons, tri_eq, faces, verts = _count_face_kinds(meshes)
+    loose_v = loose_e = boundary = nonmanifold = 0
+    for m in meshes:
+        lv, le, be, nm = _topology_diagnostics(m)
+        loose_v += lv
+        loose_e += le
+        boundary += be
+        nonmanifold += nm
+    bounds = get_mesh_bounds(meshes)
+    return {
+        "success": True,
+        "model_path": str(model_path),
+        "units": "meters",
+        "objects": len(meshes),
+        "vertices": verts,
+        "faces_total": faces,
+        "triangles": tris,
+        "quads": quads,
+        "ngons": ngons,
+        "triangle_equivalent": tri_eq,
+        "loose_vertices": loose_v,
+        "loose_edges": loose_e,
+        "boundary_edges": boundary,
+        "nonmanifold_edges": nonmanifold,
+        "bounds": bounds,
+    }
+
+
 def setup_studio_lighting():
     import bpy
 
@@ -1467,6 +1570,8 @@ DISPATCH = {
     "info": op_info,
     "build_from_spec": op_build_from_spec,
     "measure": op_measure,
+    "count_ngons": op_count_ngons,
+    "topology_report": op_topology_report,
     "render_views": op_render_views,
     "run_script": op_run_script,
     "inspect": op_inspect,
