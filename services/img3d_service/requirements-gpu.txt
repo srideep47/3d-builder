@@ -8,12 +8,20 @@ torch>=2.4
 torchvision
 einops
 huggingface-hub
-transformers
+# TripoSR's checkpoint uses transformers-4.35 ViT weight naming; transformers
+# 5.x refactored ViT internals and load_state_dict fails — pin exactly.
+transformers==4.35.0
 diffusers
 accelerate
 omegaconf
 kornia
 fast-simplification
+# torchmcubes (CUDA marching cubes) is hard to build on Windows — the backend
+# installs a scikit-image shim when the real extension is absent.
+scikit-image
+imageio[ffmpeg]
+rembg
+onnxruntime
 fastapi>=0.111
 uvicorn[standard]>=0.30
 python-multipart>=0.0.9

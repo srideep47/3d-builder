@@ -8,6 +8,7 @@ on PyPI).
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -21,6 +22,42 @@ _VENDOR_CANDIDATES = [
 ]
 
 
+def _install_torchmcubes_shim() -> None:
+    """torchmcubes is a CUDA extension that is painful to build on Windows.
+    Its single call site (tsr/models/isosurface.py) is a plain marching-cubes
+    over a scalar grid — scikit-image does that on CPU. Install a compatible
+    module shim only when the real extension is absent."""
+    import sys
+    import types
+
+    try:
+        import torchmcubes  # noqa: F401
+
+        return  # real extension present
+    except ImportError:
+        pass
+
+    import numpy as np
+    import torch
+    from skimage.measure import marching_cubes as _sk_mc
+
+    def marching_cubes(grid: "torch.Tensor", isovalue: float):
+        volume = grid.detach().cpu().numpy()
+        if volume.min() > isovalue or volume.max() < isovalue:
+            empty_v = torch.zeros(0, 3, dtype=torch.float32)
+            empty_f = torch.zeros(0, 3, dtype=torch.long)
+            return empty_v, empty_f
+        verts, faces, _, _ = _sk_mc(volume, level=float(isovalue))
+        return (
+            torch.from_numpy(verts.astype(np.float32)),
+            torch.from_numpy(faces.astype(np.int64)),
+        )
+
+    shim = types.ModuleType("torchmcubes")
+    shim.marching_cubes = marching_cubes
+    sys.modules["torchmcubes"] = shim
+
+
 class TripoSRBackend(NeuralBackend):
     name = "tripo_sr"
 
@@ -28,6 +65,12 @@ class TripoSRBackend(NeuralBackend):
         self.models_dir = models_dir
         self.device = device
         self.model = None
+        # huggingface_hub reads HF_HUB_CACHE at import time — set it BEFORE
+        # anything imports it (TSR.from_pretrained has no cache_dir kwarg).
+        if models_dir:
+            cache = Path(models_dir) / "hf"
+            cache.mkdir(parents=True, exist_ok=True)
+            os.environ.setdefault("HF_HUB_CACHE", str(cache))
 
     def _vendor_path(self) -> Path | None:
         for cand in _VENDOR_CANDIDATES:
@@ -42,6 +85,7 @@ class TripoSRBackend(NeuralBackend):
         if str(vendor) not in sys.path:
             sys.path.insert(0, str(vendor))
         try:
+            _install_torchmcubes_shim()
             import torch  # noqa: F401
             from tsr.system import TSR  # noqa: F401
 
@@ -59,17 +103,15 @@ class TripoSRBackend(NeuralBackend):
         if not available:
             raise RuntimeError(f"TripoSR backend unavailable: {reason}")
 
+        _install_torchmcubes_shim()
         import torch
         from tsr.system import TSR
 
         if self.device.startswith("cuda") and not torch.cuda.is_available():
             self.device = "cpu"
 
-        kwargs = {}
-        if self.models_dir:
-            kwargs["cache_dir"] = str(self.models_dir)
         self.model = TSR.from_pretrained(
-            HF_MODEL_ID, config_name="config.yaml", weight_name="model.ckpt", **kwargs
+            HF_MODEL_ID, config_name="config.yaml", weight_name="model.ckpt"
         )
         self.model.renderer.set_chunk_size(8192)
         self.model.to(self.device)
