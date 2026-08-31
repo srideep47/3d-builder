@@ -3,12 +3,16 @@
 Orchestration lives here, never in the harness (rule 10); no product nouns
 (rule 11) — this module knows file names, formats and the job card only.
 
-T2 PLACEHOLDERS (owner amendment 3) — visible, never silent:
-- Until T3 builds the real HP/LP split, ``<JOB>_LP.glb`` and ``<JOB>_HP.glb``
-  are byte-identical copies of the source GLB.
-- Until T3 bakes real maps, the five texture PNGs are synthetic flat fills.
-Both facts are recorded in qa_report.json (``placeholders`` block + per-file
-``placeholder`` flags) and logged by the caller's log callback.
+Two entry points:
+- ``package_delivery`` (T2): assemble from an already-verified source GLB.
+  LP/HP/textures are PLACEHOLDERS until a real bake — visible, never silent
+  (qa_report ``placeholders`` block + per-file ``placeholder`` flags).
+- ``finish_delivery`` (T3): the full-quality chain — build → quad-verify +
+  UV atlas → bake the real 5-map texture set from a high-poly detail shell →
+  decimate the LP to the tier budget → export the deliverable FBX from the
+  LIVE QUAD-CLEAN SCENE (owner decision, not the triangulated GLB) →
+  assemble + audit. Bake stats and UV diagnostics travel in qa_report.json
+  as mechanical evidence (the operator is text-only: numbers, not eyeballs).
 
 qa_report.json is a complete audit record (owner amendment 4): job card as
 loaded, every gate result with expected/received, the axis convention
@@ -23,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
+import shutil
 import sys
 import zipfile
 from datetime import datetime, timezone
@@ -31,7 +36,7 @@ from typing import Any, Callable
 
 from PIL import Image
 
-from .contract import OPEN_QUESTIONS
+from .contract import OPEN_QUESTIONS, TIER_TRI_CEILINGS
 from .fbx_inspect import read_fbx_info
 from .gates import MeshFacts, run_all_gates
 from .job import JobCard
@@ -85,86 +90,37 @@ def _write_placeholder_textures(package_dir: Path, job_code: str) -> None:
         Image.new("RGB", (64, 64), color).save(path, format="PNG")
 
 
-def package_delivery(
+def _assemble_and_audit(
     job: JobCard,
-    source_glb: Path,
-    out_root: Path | str = Path("output/packages"),
-    runner=None,
-    log: Callable[[str], None] | None = None,
+    package_dir: Path,
+    runner,
+    log: Callable[[str], None],
+    files: list[dict[str, Any]],
+    fbx_path: Path,
+    usdz_path: Path,
+    usdz_method: str | None,
+    usdz_direct_error: str | None,
+    source_note: str,
+    extra_sections: dict[str, Any] | None = None,
+    placeholders: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Assemble output/packages/<JOB>/ per §4.1, run every gate, write
-    qa_report.json. Returns the report dict. Raises loudly on export or
-    parse failures — a package that cannot be audited must not ship."""
-    log = log or (lambda msg: None)
-    source_glb = Path(source_glb)
-    if not source_glb.is_file():
-        raise FileNotFoundError(f"source GLB not found: {source_glb}")
-    if runner is None:
-        from ..blender.runner import BlenderRunner
-
-        runner = BlenderRunner()
-
-    package_dir = Path(out_root) / job.job_code
-    package_dir.mkdir(parents=True, exist_ok=True)
-    files: list[dict[str, Any]] = []
-
-    def _record(path: Path, placeholder: bool = False, note: str = "") -> None:
-        files.append({
-            "name": path.name,
-            "size_bytes": path.stat().st_size,
-            "sha256": _sha256(path),
-            "placeholder": placeholder,
-            "note": note,
-        })
-
-    # ── Model deliverables ──────────────────────────────────────────────────
-    fbx_path = package_dir / f"{job.job_code}.fbx"
-    fbx_res = runner.execute_op("export_fbx", {
-        "input": str(source_glb),
-        "path": str(fbx_path),
-        "axis_up": FBX_AXIS_UP,
-        "axis_forward": FBX_AXIS_FORWARD,
-    })
-    _record(fbx_path, note="binary FBX exported from the source GLB "
-                           "(triangulated: glTF stores triangles only)")
+    """Shared tail of both delivery paths: gates, the independent FBX parse,
+    cross-checks, qa_report.json. ``files`` is the already-recorded manifest
+    (name/size/sha256/placeholder/note per deliverable)."""
+    topology = runner.execute_op("topology_report", {"model_path": str(fbx_path)})
+    facts = MeshFacts.from_topology_report(topology)
+    results = run_all_gates(package_dir, job, facts)
 
     # Independent, non-Blender verification of what was actually written
     # (owner amendment 1). A Blender re-import is self-consistent even when
     # the file is wrong for a third party — this parse is the third party.
     fbx_info = read_fbx_info(fbx_path)
 
-    usdz_path = package_dir / f"{job.job_code}_LP.usdz"
-    usdz_res = runner.execute_op("export_usdz", {
-        "input": str(source_glb),
-        "path": str(usdz_path),
-    })
-    _record(usdz_path, note=f"export method: {usdz_res.get('method', '?')}")
-
-    # ── PLACEHOLDERS until T3 (owner amendment 3) — logged, never silent ────
-    log(f"PLACEHOLDER: LP and HP GLBs are byte-identical copies of the source "
-        f"until T3 builds the real high/low-poly split ({job.job_code})")
-    for suffix in ("_LP.glb", "_HP.glb"):
-        glb_copy = package_dir / (job.job_code + suffix)
-        glb_copy.write_bytes(source_glb.read_bytes())
-        _record(glb_copy, placeholder=True,
-                note="placeholder: identical to source GLB until T3 (HP/LP bake)")
-    log(f"PLACEHOLDER: texture PNGs are synthetic flat fills until T3 bakes "
-        f"real maps ({job.job_code})")
-    _write_placeholder_textures(package_dir, job.job_code)
-    for suffix in _PLACEHOLDER_TEXTURES:
-        _record(package_dir / (job.job_code + suffix), placeholder=True,
-                note="placeholder: synthetic flat fill until T3 (bake)")
-
-    # ── Gates (same facts path as the validate CLI) ─────────────────────────
-    topology = runner.execute_op("topology_report", {"model_path": str(fbx_path)})
-    facts = MeshFacts.from_topology_report(topology)
-    results = run_all_gates(package_dir, job, facts)
-
-    # ── Cross-checks: harness vs the independent FBX parse ──────────────────
-    # The independent parse resolves world space in the FILE's declared axis
-    # system; the harness re-import reports Blender Z-up. Extents are compared
-    # as a sorted multiset (axis-direction proof lives in the chiral export
-    # test, which owns the signed-permutation machinery).
+    # Cross-checks: harness vs the independent FBX parse. The independent
+    # parse resolves world space in the FILE's declared axis system; the
+    # harness re-import reports Blender Z-up. Extents are compared as a
+    # sorted multiset (axis-direction proof lives in the chiral export test,
+    # which owns the signed-permutation machinery).
     harness_extents = sorted((round(facts.extent_m(a), 6) for a in "xyz"), reverse=True)
     independent_extents = [round(e, 6) for e in fbx_info.world_extents_m()]
     cross_checks = {
@@ -191,7 +147,7 @@ def package_delivery(
         "job_code": job.job_code,
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "package_dir": str(package_dir),
-        "source_glb": str(source_glb),
+        "source": source_note,
         "all_passed": all(r.passed for r in results),
         "job_card": job.model_dump(mode="json"),
         "gates": [r.to_dict() for r in results],
@@ -203,8 +159,8 @@ def package_delivery(
             "verified_by": "independent binary-FBX header parse (src/client/fbx_inspect.py), not a Blender round trip",
         },
         "usdz": {
-            "method": usdz_res.get("method"),
-            "direct_error": usdz_res.get("direct_error") or None,
+            "method": usdz_method,
+            "direct_error": usdz_direct_error,
             "structure": usdz_structure_report(usdz_path),
         },
         "cross_checks": cross_checks,
@@ -216,17 +172,282 @@ def package_delivery(
             "platform": platform.platform(),
         },
         "files": files,
-        "placeholders": {
+        "open_questions": [dict(q) for q in OPEN_QUESTIONS],
+    }
+    if placeholders is not None:
+        report["placeholders"] = placeholders
+    if extra_sections:
+        report.update(extra_sections)
+
+    report_path = package_dir / "qa_report.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    log(f"qa_report.json written: {report_path}")
+    return report
+
+
+def package_delivery(
+    job: JobCard,
+    source_glb: Path,
+    out_root: Path | str = Path("output/packages"),
+    runner=None,
+    log: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Assemble output/packages/<JOB>/ per §4.1, run every gate, write
+    qa_report.json. Returns the report dict. Raises loudly on export or
+    parse failures — a package that cannot be audited must not ship."""
+    log = log or (lambda msg: None)
+    source_glb = Path(source_glb)
+    if not source_glb.is_file():
+        raise FileNotFoundError(f"source GLB not found: {source_glb}")
+    if runner is None:
+        from ..blender.runner import BlenderRunner
+
+        runner = BlenderRunner()
+
+    # Absolute from here down (see finish_delivery: relative paths make the
+    # harness's Blender subprocess resolve image outputs blend-relative).
+    package_dir = Path(out_root).resolve() / job.job_code
+    package_dir.mkdir(parents=True, exist_ok=True)
+    files: list[dict[str, Any]] = []
+
+    def _record(path: Path, placeholder: bool = False, note: str = "") -> None:
+        files.append({
+            "name": path.name,
+            "size_bytes": path.stat().st_size,
+            "sha256": _sha256(path),
+            "placeholder": placeholder,
+            "note": note,
+        })
+
+    # ── Model deliverables ──────────────────────────────────────────────────
+    fbx_path = package_dir / f"{job.job_code}.fbx"
+    fbx_res = runner.execute_op("export_fbx", {
+        "input": str(source_glb),
+        "path": str(fbx_path),
+        "axis_up": FBX_AXIS_UP,
+        "axis_forward": FBX_AXIS_FORWARD,
+    })
+    _record(fbx_path, note="binary FBX exported from the source GLB "
+                           "(triangulated: glTF stores triangles only)")
+
+    usdz_path = package_dir / f"{job.job_code}_LP.usdz"
+    usdz_res = runner.execute_op("export_usdz", {
+        "input": str(source_glb),
+        "path": str(usdz_path),
+    })
+    _record(usdz_path, note=f"export method: {usdz_res.get('method', '?')}")
+
+    # ── PLACEHOLDERS until T3 (owner amendment 3) — logged, never silent ────
+    log(f"PLACEHOLDER: LP and HP GLBs are byte-identical copies of the source "
+        f"until T3 builds the real high/low-poly split ({job.job_code})")
+    for suffix in ("_LP.glb", "_HP.glb"):
+        glb_copy = package_dir / (job.job_code + suffix)
+        glb_copy.write_bytes(source_glb.read_bytes())
+        _record(glb_copy, placeholder=True,
+                note="placeholder: identical to source GLB until T3 (HP/LP bake)")
+    log(f"PLACEHOLDER: texture PNGs are synthetic flat fills until T3 bakes "
+        f"real maps ({job.job_code})")
+    _write_placeholder_textures(package_dir, job.job_code)
+    for suffix in _PLACEHOLDER_TEXTURES:
+        _record(package_dir / (job.job_code + suffix), placeholder=True,
+                note="placeholder: synthetic flat fill until T3 (bake)")
+
+    return _assemble_and_audit(
+        job, package_dir, runner, log, files, fbx_path, usdz_path,
+        usdz_method=usdz_res.get("method"),
+        usdz_direct_error=usdz_res.get("direct_error") or None,
+        source_note=str(source_glb),
+        placeholders={
             "lp_hp_single_source": True,
             "textures_synthetic": True,
             "detail": "T3 (UV + HP/LP bake) not yet built: the LP and HP GLBs are "
                       "byte-identical copies of the source, and the texture PNGs are "
                       "synthetic flat fills. Replace before any real delivery.",
         },
-        "open_questions": [dict(q) for q in OPEN_QUESTIONS],
+    )
+
+
+# Baked map name -> client deliverable suffix (contract §4.1 texture set).
+_BAKE_MAP_FILES: dict[str, str] = {
+    "basecolor": "_BaseColor.png",
+    "normal": "_Normal.png",
+    "roughness": "_Roughness.png",
+    "metallic": "_Metallic.png",
+    "ao": "_AO.png",
+}
+
+
+def finish_delivery(
+    job: JobCard,
+    spec,
+    out_root: Path | str = Path("output"),
+    runner=None,
+    log: Callable[[str], None] | None = None,
+    work_dir: Path | str | None = None,
+    resolution: int = 1024,
+    review_renders: bool = True,
+) -> dict[str, Any]:
+    """T3 full-quality finishing chain for a verified spec.
+
+    prepare (quad-verify + UV atlas) → bake the real 5-map set from a
+    high-poly detail shell → decimate the LP to the tier budget → export the
+    deliverable FBX + USDZ → assemble the package + qa_report.json.
+
+    Owner decision (recorded in PROGRESS.md): the deliverable FBX is exported
+    from the LIVE QUAD-CLEAN SCENE (scene.blend), not the triangulated GLB —
+    the client n-gon gate is only meaningful on a non-triangulated mesh,
+    triangulating would double the polycount against the tier ceiling, and
+    their human QA judges artist topology. The LP GLB is the decimated
+    export; the HP GLB is the pre-deletion detail shell.
+
+    Mechanical evidence (bake stats, UV diagnostics, HP/LP tri counts)
+    travels in qa_report.json under ``finish`` — the operator is text-only:
+    numbers, not eyeballs. Returns the report dict; raises loudly on any
+    step failure (a package that cannot be audited must not ship).
+    """
+    log = log or (lambda msg: None)
+    if runner is None:
+        from ..blender.runner import BlenderRunner
+
+        runner = BlenderRunner()
+
+    from ..spec.resolver import resolve_spec_to_build_params
+
+    # Absolute from here down: the harness runs Blender in a subprocess whose
+    # image-path resolution is blend-relative — a relative out_root makes
+    # bakes silently write nowhere (empirical, see _save_map in the harness).
+    out_root = Path(out_root).resolve()
+    work = Path(work_dir).resolve() if work_dir else out_root / "finish" / job.job_code
+    maps_dir = work / "maps"
+    scene_blend = work / "scene.blend"
+    hp_glb = work / "hp.glb"
+    lp_glb = work / "lp.glb"
+    review_dir = work / "review"
+
+    def _require(res: dict[str, Any], step: str) -> dict[str, Any]:
+        if not res.get("success"):
+            raise RuntimeError(f"finish_delivery step {step!r} failed: {res.get('error')}")
+        return res
+
+    # ── 1. prepare: build, verify quads, UV atlas, save the live scene ──────
+    build_params = resolve_spec_to_build_params(spec)
+    prep = _require(runner.execute_op("prepare_delivery_scene", {
+        "build": build_params,
+        "out_blend": str(scene_blend),
+    }), "prepare_delivery_scene")
+    log(f"prepared quad-clean scene: {scene_blend} "
+        f"(atlas pack_scale {prep.get('uv_atlas', {}).get('pack_scale', '?')})")
+
+    # ── 2. bake: real 5-map texture set from the HP detail shell ────────────
+    detail_map = {p["name"]: p["detail"] for p in build_params["spec"]["parts"]
+                  if p.get("detail")}
+    bake = _require(runner.execute_op("bake_maps", {
+        "input": str(scene_blend),
+        "out_dir": str(maps_dir),
+        "maps": None,
+        "resolution": resolution,
+        "detail": detail_map,
+        "hp_glb": str(hp_glb),
+        "save_blend": str(scene_blend),
+    }), "bake_maps")
+    log(f"baked maps: {sorted(k for k, v in bake.get('maps', {}).items() if isinstance(v, dict) and 'stats' in v)}")
+
+    # ── 3. LP: decimate the delivery scene to the tier budget ───────────────
+    budget = TIER_TRI_CEILINGS.get(job.complexity)
+    if budget is None:
+        budget = int(getattr(spec, "tri_budget", 60_000))
+    dec = _require(runner.execute_op("decimate_to_budget", {
+        "input": str(scene_blend),
+        "output": str(lp_glb),
+        "budget": budget,
+    }), "decimate_to_budget")
+    log(f"LP exported: {dec.get('triangle_equivalent')} tri-eq "
+        f"(budget {budget}, decimated={dec.get('decimated')})")
+
+    # ── 4. assemble deliverables ────────────────────────────────────────────
+    package_dir = out_root / "packages" / job.job_code
+    package_dir.mkdir(parents=True, exist_ok=True)
+    files: list[dict[str, Any]] = []
+
+    def _record(path: Path, placeholder: bool = False, note: str = "") -> None:
+        files.append({
+            "name": path.name,
+            "size_bytes": path.stat().st_size,
+            "sha256": _sha256(path),
+            "placeholder": placeholder,
+            "note": note,
+        })
+
+    fbx_path = package_dir / f"{job.job_code}.fbx"
+    _require(runner.execute_op("export_fbx", {
+        "input": str(scene_blend),
+        "path": str(fbx_path),
+        "axis_up": FBX_AXIS_UP,
+        "axis_forward": FBX_AXIS_FORWARD,
+    }), "export_fbx")
+    _record(fbx_path, note="exported from the LIVE QUAD-CLEAN SCENE (owner "
+                           "decision): quads preserved, n-gon gate meaningful, "
+                           "polycount counted as authored")
+
+    usdz_path = package_dir / f"{job.job_code}_LP.usdz"
+    usdz_res = _require(runner.execute_op("export_usdz", {
+        "input": str(lp_glb),
+        "path": str(usdz_path),
+    }), "export_usdz")
+    _record(usdz_path, note=f"export method: {usdz_res.get('method', '?')} "
+                            f"(from the decimated LP GLB)")
+
+    lp_pkg = package_dir / f"{job.job_code}_LP.glb"
+    shutil.copy2(lp_glb, lp_pkg)
+    _record(lp_pkg, note=f"decimated delivery mesh ({dec.get('triangle_equivalent')} "
+                         f"tri-eq, budget {budget})")
+    shutil.copy2(hp_glb, package_dir / f"{job.job_code}_HP.glb")
+    _record(package_dir / f"{job.job_code}_HP.glb",
+            note=f"high-poly detail shell ({bake.get('hp_triangle_equivalent')} tri-eq)")
+
+    for map_name, suffix in _BAKE_MAP_FILES.items():
+        src = maps_dir / f"{map_name}.png"
+        if not src.is_file():
+            raise FileNotFoundError(f"bake did not produce {map_name}.png "
+                                    f"(expected at {src})")
+        dst = package_dir / (job.job_code + suffix)
+        shutil.copy2(src, dst)
+        stats = bake.get("maps", {}).get(map_name, {}).get("stats", {})
+        _record(dst, note=f"baked map ({map_name}): {json.dumps(stats)}")
+
+    # ── 5. review renders for the owner (valid T3 output: awaits review) ────
+    review_files: list[str] = []
+    if review_renders:
+        rv = _require(runner.execute_op("render_views", {
+            "model_path": str(lp_glb),
+            "output_dir": str(review_dir),
+            "prefix": job.job_code,
+        }), "render_views")
+        review_files = sorted(str(p) for p in review_dir.glob("*.png"))
+        log(f"review renders awaiting owner review: {review_files}")
+
+    finish_section = {
+        "fbx_source": "live_quad_scene",
+        "lp_tri_equivalent": dec.get("triangle_equivalent"),
+        "hp_tri_equivalent": bake.get("hp_triangle_equivalent"),
+        "lp_budget": budget,
+        "lp_decimated": dec.get("decimated"),
+        "texture_resolution": resolution,
+        "detail_parts": detail_map,
+        "uv_atlas": prep.get("uv_atlas"),
+        "uv_diagnostics": prep.get("uv"),
+        "bake": bake.get("maps"),
+        "ao_method": bake.get("maps", {}).get("ao_method"),
+        "review_renders": review_files,
+        "review_note": "Renders await owner review (T3 protocol: a list of "
+                       "renders awaiting review is a valid output).",
     }
 
-    report_path = package_dir / "qa_report.json"
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    log(f"qa_report.json written: {report_path}")
-    return report
+    return _assemble_and_audit(
+        job, package_dir, runner, log, files, fbx_path, usdz_path,
+        usdz_method=usdz_res.get("method"),
+        usdz_direct_error=usdz_res.get("direct_error") or None,
+        source_note=f"spec: {getattr(spec, 'name', '?')} via finish_delivery "
+                    f"(scene: {scene_blend})",
+        extra_sections={"finish": finish_section},
+    )

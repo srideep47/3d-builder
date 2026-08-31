@@ -110,6 +110,40 @@ class Modifiers(BaseModel):
     boolean: BooleanModifier | None = None
 
 
+class DisplacementSpec(BaseModel):
+    """Generic surface-displacement pattern for the high-poly detail pass.
+
+    Patterns are pure geometry functions. Product knowledge — WHICH part gets
+    WHICH pattern at what proportion — belongs only in
+    templates/<product_class>.yaml, never in pipeline code (GLM_BRIEF: "the
+    mattress is not the point"). All lengths are in the spec's unit like every
+    other part length; the resolver converts them to meters.
+    """
+    pattern: Literal["noise", "waves", "grid_diamond", "grid_square", "bumps"]
+    amplitude: float                       # peak displacement, spec units
+    frequency: float = 8.0                 # repeats across the part's largest horizontal span
+    axis: Literal["x", "y", "z"] = "z"     # travel direction (waves)
+    seed: int = 0                          # deterministic noise seed
+    exponent: float = 1.0                  # grid puffiness: 1=soft sine, 2=boxy
+    # Only displace vertices whose local-space normal points along +z ("up")
+    # or -z ("down"); "none" displaces the whole surface. Puff patterns on
+    # panels (e.g. quilted tops) need "up" or the side walls distort too.
+    restrict: Literal["none", "up", "down"] = "none"
+
+
+class DetailSpec(BaseModel):
+    """Optional per-part HIGH-POLY detail instructions (T3).
+
+    Consumed by the harness bake pass (`bake_maps` op): the low-poly geometry
+    is untouched (dimensions/gates stay exact); detail only shapes the HP copy
+    the normal map is baked from. Without a detail block the bake uses the
+    default bevel + subdivision shell.
+    """
+    bevel_width: float | None = None       # spec units; None = bake default
+    subdivision_levels: int | None = None  # HP subsurf levels
+    displacement: DisplacementSpec | None = None
+
+
 class PartSpec(BaseModel):
     name: str
     shape: ShapeType = ShapeType.ROUNDED_BOX
@@ -131,6 +165,8 @@ class PartSpec(BaseModel):
     target_size: list[float] | None = None
     # script method: agent-authored bpy code
     code: str | None = None
+    # optional high-poly detail instructions for the bake pass (DetailSpec)
+    detail: DetailSpec | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
 
 

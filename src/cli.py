@@ -355,18 +355,19 @@ def validate(
 
 @app.command()
 def package(
-    source_glb: str = typer.Argument(..., help="Verified source GLB, e.g. output/runs/<id>/final.glb"),
+    source_glb: str = typer.Argument(None, help="Verified source GLB, e.g. output/runs/<id>/final.glb (omit with --spec)"),
     job: str = typer.Option(..., "--job", "-j", help="Path to the job card (job.yaml)"),
     out_root: str = typer.Option("output/packages", "--out-root", help="Root directory for packages"),
+    spec: str = typer.Option(None, "--spec", help="ObjectSpec JSON instead of a source GLB: run the full T3 finish chain (build → UV atlas → bake → decimate → live-quad FBX)"),
+    resolution: int = typer.Option(1024, "--res", help="Texture resolution for --spec bakes"),
 ):
-    """Assemble the client delivery package (§4.1) + qa_report.json, then validate it."""
-    from .client.package import package_delivery
+    """Assemble the client delivery package (§4.1) + qa_report.json, then validate it.
 
+    With --spec, runs finish_delivery: the real bake pipeline (quad-clean
+    scene, 5-map texture set, LP decimation, FBX from the live quad scene).
+    Without --spec, packages an already-verified source GLB (T2 flow —
+    placeholder HP/LP/textures)."""
     job_card = _load_job_or_exit(job)
-    source = Path(source_glb)
-    if not source.is_file():
-        console.print(f"[bold red]Error:[/] Source GLB not found: {source_glb}")
-        raise typer.Exit(1)
 
     from .blender.runner import BlenderRunner
 
@@ -375,10 +376,43 @@ def package(
         console.print("[bold red]Error:[/] Blender not found — packaging requires the export ops.")
         raise typer.Exit(1)
 
+    if spec and source_glb:
+        console.print("[bold red]Error:[/] Pass either a source GLB or --spec, not both.")
+        raise typer.Exit(1)
+    if not spec and not source_glb:
+        console.print("[bold red]Error:[/] A source GLB or --spec is required.")
+        raise typer.Exit(1)
+
     try:
-        with console.status("[bold cyan]Assembling delivery package...[/]"):
-            report = package_delivery(job_card, source, out_root=Path(out_root),
-                                      runner=runner, log=console.print)
+        if spec:
+            from .client.package import finish_delivery
+            from .spec.schema import ObjectSpec
+
+            spec_path = Path(spec)
+            if not spec_path.is_file():
+                console.print(f"[bold red]Error:[/] Spec not found: {spec}")
+                raise typer.Exit(1)
+            try:
+                object_spec = ObjectSpec.model_validate_json(spec_path.read_text(encoding="utf-8"))
+            except Exception as e:  # noqa: BLE001 — spec errors are terminal
+                console.print(f"[bold red]Error:[/] Invalid ObjectSpec {spec}: {e}")
+                raise typer.Exit(1)
+            with console.status("[bold cyan]Finishing delivery (build → atlas → bake → decimate → export)...[/]"):
+                report = finish_delivery(job_card, object_spec, out_root=Path(out_root),
+                                         runner=runner, log=console.print,
+                                         resolution=resolution)
+        else:
+            from .client.package import package_delivery
+
+            source = Path(source_glb)
+            if not source.is_file():
+                console.print(f"[bold red]Error:[/] Source GLB not found: {source_glb}")
+                raise typer.Exit(1)
+            with console.status("[bold cyan]Assembling delivery package...[/]"):
+                report = package_delivery(job_card, source, out_root=Path(out_root),
+                                          runner=runner, log=console.print)
+    except typer.Exit:
+        raise
     except Exception as e:  # noqa: BLE001 — packaging failures are terminal
         console.print(f"[bold red]Error:[/] packaging failed: {e}")
         raise typer.Exit(1)
@@ -387,13 +421,29 @@ def package(
     gate_row = namedtuple("GateRow", ["gate", "passed", "expected", "received", "message"])
     _print_gate_results([gate_row(**g) for g in report["gates"]],
                         f"Client Validator (local mirror) — {job_card.job_code}")
-    if report["placeholders"]["lp_hp_single_source"] or report["placeholders"]["textures_synthetic"]:
+    placeholders = report.get("placeholders")
+    if placeholders and (placeholders["lp_hp_single_source"] or placeholders["textures_synthetic"]):
         console.print(Panel(
             "[bold yellow]T3 placeholders in this package:[/]\n"
             "- LP and HP GLBs are byte-identical copies of the source\n"
             "- Texture PNGs are synthetic flat fills\n"
             "Recorded in qa_report.json (placeholders block + per-file flags).",
             title="Placeholder Warning", border_style="yellow"))
+    finish = report.get("finish")
+    if finish:
+        uv = finish.get("uv_diagnostics") or {}
+        td = (uv.get("texel_density_texels_per_m") or {})
+        console.print(Panel(
+            f"fbx source: {finish['fbx_source']}\n"
+            f"LP: {finish['lp_tri_equivalent']} tri-eq (budget {finish['lp_budget']}, "
+            f"decimated={finish['lp_decimated']})\n"
+            f"HP: {finish['hp_tri_equivalent']} tri-eq\n"
+            f"UV islands: {uv.get('islands_total')} | in bounds: {uv.get('in_bounds')} | "
+            f"overlaps: {uv.get('overlapping_island_pairs')} | "
+            f"texel ratio: {td.get('ratio')}\n"
+            f"review renders: {len(finish['review_renders'])} awaiting owner review "
+            f"({finish['review_renders'][0] if finish['review_renders'] else '-'})",
+            title="Finish Pipeline (T3)", border_style="green"))
     console.print(f"[bold]qa_report.json:[/] [cyan]{report['package_dir']}/qa_report.json[/]")
 
     if not report["all_passed"]:

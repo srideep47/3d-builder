@@ -76,6 +76,26 @@ def _resolve_part(part: PartSpec, unit: Unit) -> dict[str, Any]:
     if part.code:
         p_dict["code"] = part.code
 
+    if part.detail:
+        d = part.detail
+        detail: dict[str, Any] = {}
+        if d.bevel_width is not None:
+            detail["bevel_width"] = unit.to_meters(d.bevel_width)
+        if d.subdivision_levels is not None:
+            detail["subdivision_levels"] = int(d.subdivision_levels)
+        if d.displacement:
+            disp = d.displacement
+            detail["displacement"] = {
+                "pattern": disp.pattern,
+                "amplitude_m": unit.to_meters(disp.amplitude),
+                "frequency": float(disp.frequency),
+                "axis": disp.axis,
+                "seed": int(disp.seed),
+                "exponent": float(disp.exponent),
+                "restrict": disp.restrict,
+            }
+        p_dict["detail"] = detail
+
     if part.material:
         p_dict["material"] = _resolve_material(part.material)
 

@@ -156,6 +156,11 @@ def export_any(path, selected_only=False, apply_modifiers=True):
             bpy.ops.export_mesh.stl(filepath=path, use_selection=selected_only)
     elif ext in (".usd", ".usda", ".usdc", ".usdz"):
         bpy.ops.wm.usd_export(filepath=path, selected_objects_only=selected_only)
+    elif ext == ".blend":
+        # Saving the live scene preserves quads/n-gons and UVs exactly — the
+        # intermediate format for the T3 finishing pipeline (a GLB round trip
+        # would triangulate; owner decision at T2 review).
+        bpy.ops.wm.save_as_mainfile(filepath=path)
     else:
         raise ValueError(f"Unsupported export format: {ext}")
     return path
@@ -1670,6 +1675,1046 @@ def op_bake_materials(params):
     return result
 
 
+# ── T3 finishing pipeline: UV atlas, bake, decimate ─────────────────────────
+#
+# Owner decisions baked into this section:
+# - The deliverable FBX comes from the LIVE QUAD-CLEAN SCENE, saved as a
+#   .blend intermediate (a GLB round trip triangulates; T2 review decision).
+# - Zero-n-gon strategy: quad-clean by construction, verified after build;
+#   triangulate only as an explicit last-resort net, recorded loudly.
+# - UVs live in ONE shared 0-1 atlas across all parts (the client gets a
+#   single 5-map texture set), packed for ~uniform texel density with no
+#   cross-object overlap by construction — and re-verified independently.
+# - Bakes are verified with MECHANICAL evidence (per-channel stats,
+#   coverage, cavity contrast); the harness is blind, so numbers are the
+#   proof. Semantic assertions live in tests/test_client_export.py against
+#   assets whose correct bake is analytically predictable.
+
+
+def _face_world_areas(obj):
+    """{face_index: world-space area} via a world-transformed bmesh copy."""
+    import bmesh
+
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.transform(obj.matrix_world)
+    areas = {f.index: f.calc_area() for f in bm.faces}
+    bm.free()
+    return areas
+
+
+def _uv_face_groups(me):
+    """Face-index groups whose UVs are continuous across shared mesh edges
+    (within 1e-5) — the UV islands of one mesh. Shared by the atlas packer
+    (per-island scaling) and the islands report."""
+    import bmesh
+
+    if not me.polygons:
+        return []
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    bm.faces.ensure_lookup_table()
+    uv_lay = bm.loops.layers.uv.active
+    if uv_lay is None:
+        n = len(bm.faces)
+        bm.free()
+        return [list(range(n))]
+
+    parent = {f.index: f.index for f in bm.faces}
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    eps = 1e-5
+    for edge in bm.edges:
+        linked = edge.link_faces
+        if len(linked) < 2:
+            continue
+        per_face = []
+        for face in linked:
+            coords = []
+            for loop in face.loops:
+                if loop.edge == edge:
+                    u = loop[uv_lay].uv
+                    coords.append((u.x, u.y))
+            per_face.append((face.index, coords))
+        for a in range(len(per_face)):
+            for b in range(a + 1, len(per_face)):
+                fi, ci = per_face[a]
+                fj, cj = per_face[b]
+                if len(ci) != len(cj) or not ci:
+                    continue
+                if all(any(abs(p[0] - q[0]) < eps and abs(p[1] - q[1]) < eps for q in cj)
+                       for p in ci):
+                    union(fi, fj)
+
+    groups: dict[int, list[int]] = {}
+    for f in bm.faces:
+        groups.setdefault(find(f.index), []).append(f.index)
+    bm.free()
+    return list(groups.values())
+
+
+def _uv_area_and_bbox(uv_layer, loop_indices):
+    """(uv_bbox, uv_area) of one face's UV polygon (fan triangulation)."""
+    coords = [(uv_layer.data[li].uv.x, uv_layer.data[li].uv.y) for li in loop_indices]
+    minx = miny = 1e9
+    maxx = maxy = -1e9
+    for cx, cy in coords:
+        minx = min(minx, cx)
+        maxx = max(maxx, cx)
+        miny = min(miny, cy)
+        maxy = max(maxy, cy)
+    uv_area = 0.0
+    for i in range(1, len(coords) - 1):
+        x1, y1 = coords[i][0] - coords[0][0], coords[i][1] - coords[0][1]
+        x2, y2 = coords[i + 1][0] - coords[0][0], coords[i + 1][1] - coords[0][1]
+        uv_area += abs(x1 * y2 - x2 * y1) / 2.0
+    return (minx, miny, maxx, maxy), uv_area
+
+
+def _shelf_pack(widths, heights, margin):
+    """Shelf-pack boxes into [margin, 1-margin]^2. Returns (placements,
+    scale): placements[i] = (x, y) lower-left corner for box i after a
+    uniform `scale` (scale < 1 only when boxes overflow and everything is
+    shrunk together, which preserves relative sizes and texel density)."""
+    order = sorted(range(len(widths)), key=lambda i: heights[i], reverse=True)
+    placements = [None] * len(widths)
+    scale = 1.0
+    for _attempt in range(6):
+        cursor_x = margin
+        cursor_y = margin
+        row_h = 0.0
+        ok = True
+        for i in order:
+            w = widths[i] * scale
+            h = heights[i] * scale
+            if cursor_x + w > 1.0 - margin + 1e-9:
+                cursor_x = margin
+                cursor_y += row_h + margin
+                row_h = 0.0
+            if h > 1.0 - 2.0 * margin or cursor_y + h > 1.0 - margin + 1e-9:
+                ok = False
+                break
+            placements[i] = (cursor_x, cursor_y)
+            cursor_x += w + margin
+            row_h = max(row_h, h)
+        if ok:
+            return placements, scale
+        scale *= 0.75
+    return placements, scale  # best effort — the UV diagnostics catch overflow
+
+
+def _pack_uv_atlas(objects, margin=0.01, utilization=0.8):
+    """Rescale every UV ISLAND for uniform texel density (uv_area ∝ world
+    surface area per island), then shelf-pack all islands into the shared
+    0-1 atlas.
+
+    Islands — not whole objects — are the scaling unit: smart-project can
+    assign very different uv-area-per-world-area to small bevel strips vs
+    large faces of the SAME object (empirical: the coffee-table tabletop
+    measured a 1.46x island density ratio under per-object scaling; per-
+    island scaling converges it to ~1.0). Per-island scaling is seam-safe:
+    islands are separated by UV seams by definition. The shelf packer's
+    uniform overflow shrink preserves the uniformity (everything shrinks
+    together). `_uv_diagnostics` re-verifies the result independently,
+    island by island, with an exact rasterized overlap test."""
+    entries = []
+    for obj in objects:
+        me = obj.data
+        uv_layer = me.uv_layers.active
+        if not uv_layer or not me.polygons:
+            continue
+        world_area = _face_world_areas(obj)
+        for face_ids in _uv_face_groups(me):
+            minx = miny = 1e9
+            maxx = maxy = -1e9
+            uv_area = 0.0
+            w_area = 0.0
+            for fi in face_ids:
+                poly = me.polygons[fi]
+                (b0x, b0y, b1x, b1y), area = _uv_area_and_bbox(uv_layer, poly.loop_indices)
+                minx, miny = min(minx, b0x), min(miny, b0y)
+                maxx, maxy = max(maxx, b1x), max(maxy, b1y)
+                uv_area += area
+                w_area += world_area.get(fi, 0.0)
+            if w_area <= 1e-12 or uv_area <= 1e-12:
+                continue
+            entries.append({"obj": obj, "face_ids": face_ids,
+                            "bbox": (minx, miny, maxx, maxy),
+                            "uv_area": uv_area, "world_area": w_area})
+    if not entries:
+        return {"objects_packed": 0, "islands_packed": 0,
+                "note": "no UV data to pack"}
+
+    avail = 1.0 - 2.0 * margin
+    total_world = sum(e["world_area"] for e in entries)
+    # target uv-area per m^2 so the whole model uses `utilization` of the atlas
+    rho = (avail * avail * utilization) / total_world
+    widths, heights = [], []
+    for e in entries:
+        target = rho * e["world_area"]
+        e["f"] = math.sqrt(target / e["uv_area"])
+        (b0x, b0y, b1x, b1y) = e["bbox"]
+        widths.append(max((b1x - b0x) * e["f"], 1e-6))
+        heights.append(max((b1y - b0y) * e["f"], 1e-6))
+
+    placements, pack_scale = _shelf_pack(widths, heights, margin)
+    for idx, e in enumerate(entries):
+        spot = placements[idx]
+        if spot is None:
+            continue
+        px, py = spot
+        f = e["f"] * pack_scale
+        (b0x, b0y, _b1x, _b1y) = e["bbox"]
+        me = e["obj"].data
+        uv_layer = me.uv_layers.active
+        for fi in e["face_ids"]:
+            for li in me.polygons[fi].loop_indices:
+                uv = uv_layer.data[li]
+                uv.uv[0] = px + (uv.uv[0] - b0x) * f
+                uv.uv[1] = py + (uv.uv[1] - b0y) * f
+
+    return {
+        "objects_packed": len({e["obj"].name for e in entries}),
+        "islands_packed": len(entries),
+        "target_uv_area_per_m2": rho,
+        "pack_scale": pack_scale,
+        "cells": [{"object": e["obj"].name, "faces": len(e["face_ids"]),
+                   "x": placements[i][0], "y": placements[i][1],
+                   "w": widths[i] * pack_scale, "h": heights[i] * pack_scale}
+                  for i, e in enumerate(entries) if placements[i] is not None],
+    }
+
+
+def _uv_islands_report(objects, resolution=1024):
+    """Per-island UV facts across all objects: uv bbox/area, world area,
+    texel density at `resolution`. Islands (via _uv_face_groups) are faces
+    connected across mesh edges whose UVs are continuous within 1e-5 (seams
+    split islands). `face_indices` is internal bookkeeping for the exact
+    overlap rasterization — _uv_diagnostics strips it from the report."""
+    islands = []
+    for obj in objects:
+        me = obj.data
+        uv_layer = me.uv_layers.active
+        if not uv_layer or not me.polygons:
+            continue
+        world_area = _face_world_areas(obj)
+        for face_ids in _uv_face_groups(me):
+            minx = miny = 1e9
+            maxx = maxy = -1e9
+            uv_area = 0.0
+            w_area = 0.0
+            for fi in face_ids:
+                poly = me.polygons[fi]
+                (b0x, b0y, b1x, b1y), area = _uv_area_and_bbox(uv_layer, poly.loop_indices)
+                minx, miny = min(minx, b0x), min(miny, b0y)
+                maxx, maxy = max(maxx, b1x), max(maxy, b1y)
+                uv_area += area
+                w_area += world_area.get(fi, 0.0)
+            density = resolution * math.sqrt(uv_area / w_area) if w_area > 1e-12 else 0.0
+            islands.append({
+                "object": obj.name, "faces": len(face_ids),
+                "face_indices": face_ids,
+                "uv_bbox": [minx, miny, maxx, maxy],
+                "uv_area": uv_area, "world_area_m2": w_area,
+                "texels_per_m": density,
+            })
+    return islands
+
+
+def _rasterize_uv_triangle(p0, p1, p2, resolution, island_id, claims):
+    """Mark texel centers covered by one UV triangle (point-in-triangle,
+    barycentric). Feeds the exact island-overlap test."""
+    minx = max(int(math.floor(min(p0[0], p1[0], p2[0]) * resolution)), 0)
+    maxx = min(int(math.ceil(max(p0[0], p1[0], p2[0]) * resolution)), resolution - 1)
+    miny = max(int(math.floor(min(p0[1], p1[1], p2[1]) * resolution)), 0)
+    maxy = min(int(math.ceil(max(p0[1], p1[1], p2[1]) * resolution)), resolution - 1)
+    if minx > maxx or miny > maxy:
+        return
+    (x0, y0), (x1, y1), (x2, y2) = p0, p1, p2
+    d = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
+    if abs(d) < 1e-12:
+        return
+    for ty in range(miny, maxy + 1):
+        py = (ty + 0.5) / resolution
+        for tx in range(minx, maxx + 1):
+            px = (tx + 0.5) / resolution
+            a = ((y1 - y2) * (px - x2) + (x2 - x1) * (py - y2)) / d
+            if a < 0.0:
+                continue
+            b = ((y2 - y0) * (px - x2) + (x0 - x2) * (py - y2)) / d
+            if b < 0.0 or a + b > 1.0:
+                continue
+            claims.setdefault((tx, ty), set()).add(island_id)
+
+
+def _island_overlap_exact(objects, islands, resolution):
+    """EXACT island-overlap test: rasterize every island's UV triangles at
+    `resolution` and count texels claimed by more than one island. Bbox
+    intersection is only a prefilter — concave islands (bevels, smart
+    project) commonly have overlapping bboxes with zero real overlap
+    (empirical: the coffee-table atlas shows 8 bbox-intersecting pairs and
+    0 rasterized). Returns (overlapping_island_pairs, overlapping_texels)."""
+    face_island: dict[tuple[str, int], int] = {}
+    for idx, isl in enumerate(islands):
+        for fi in isl["face_indices"]:
+            face_island[(isl["object"], fi)] = idx
+
+    claims: dict[tuple[int, int], set[int]] = {}
+    for obj in objects:
+        me = obj.data
+        uv_layer = me.uv_layers.active
+        if not uv_layer or not me.polygons:
+            continue
+        for fi, poly in enumerate(me.polygons):
+            island_id = face_island.get((obj.name, fi))
+            if island_id is None:
+                continue
+            coords = [(uv_layer.data[li].uv.x, uv_layer.data[li].uv.y)
+                      for li in poly.loop_indices]
+            for i in range(1, len(coords) - 1):
+                _rasterize_uv_triangle(coords[0], coords[i], coords[i + 1],
+                                       resolution, island_id, claims)
+
+    pairs: set[tuple[int, int]] = set()
+    overlapping_texels = 0
+    for ids in claims.values():
+        if len(ids) > 1:
+            overlapping_texels += 1
+            for a in ids:
+                for b in ids:
+                    if a < b:
+                        pairs.add((a, b))
+    return pairs, overlapping_texels
+
+
+def _uv_diagnostics(objects, resolution=1024):
+    """Mechanical UV evidence (owner T3 brief): zero overlapping islands,
+    all UVs inside 0-1, texel-density variance within a stated bound."""
+    islands = _uv_islands_report(objects, resolution=resolution)
+    if not islands:
+        return {"islands_total": 0, "verified": False,
+                "reason": "no UV islands — scene has no unwrapped mesh data"}
+
+    minx = min(i["uv_bbox"][0] for i in islands)
+    miny = min(i["uv_bbox"][1] for i in islands)
+    maxx = max(i["uv_bbox"][2] for i in islands)
+    maxy = max(i["uv_bbox"][3] for i in islands)
+    eps = 1e-4
+    in_bounds = (minx >= -eps and miny >= -eps and maxx <= 1.0 + eps and maxy <= 1.0 + eps)
+
+    # Prefilter (cheap, conservative): bbox-intersecting island pairs.
+    bbox_overlaps = []
+    for a in range(len(islands)):
+        for b in range(a + 1, len(islands)):
+            (ax0, ay0, ax1, ay1) = islands[a]["uv_bbox"]
+            (bx0, by0, bx1, by1) = islands[b]["uv_bbox"]
+            if max(ax0, bx0) < min(ax1, bx1) - eps and max(ay0, by0) < min(ay1, by1) - eps:
+                bbox_overlaps.append([islands[a]["object"], islands[b]["object"]])
+
+    # Exact test: rasterized texel claims (see _island_overlap_exact).
+    overlap_pairs, overlapping_texels = _island_overlap_exact(objects, islands, resolution)
+    overlaps = [[islands[a]["object"], islands[b]["object"]] for a, b in sorted(overlap_pairs)]
+
+    # face_indices were needed for the rasterization; drop them from the
+    # reportable payload (they are internal bookkeeping, not audit evidence).
+    for isl in islands:
+        isl.pop("face_indices", None)
+
+    densities = [i["texels_per_m"] for i in islands if i["texels_per_m"] > 0]
+    density_ratio = (max(densities) / min(densities)) if len(densities) >= 2 and min(densities) > 0 else 1.0
+
+    return {
+        "islands_total": len(islands),
+        "uv_bounds": {"min": [minx, miny], "max": [maxx, maxy]},
+        "in_bounds": bool(in_bounds),
+        "overlapping_island_pairs": len(overlaps),
+        "overlapping_texels": overlapping_texels,
+        "bbox_overlapping_pairs_prefilter": len(bbox_overlaps),
+        "overlap_examples": overlaps[:10],
+        "texel_density_texels_per_m": {
+            "resolution": resolution,
+            "min": min(densities) if densities else 0.0,
+            "max": max(densities) if densities else 0.0,
+            "ratio": density_ratio,
+        },
+        "islands": islands,
+        "verified": bool(in_bounds and not overlaps),
+    }
+
+
+def op_prepare_delivery_scene(params):
+    """T3 step 1 — build the live QUAD-CLEAN delivery scene and save it as a
+    .blend (the intermediate that preserves quads for the FBX, owner
+    decision at T2 review). Verifies zero n-gons (triangulating only as a
+    last-resort net when `allow_triangulate` is set — recorded loudly, never
+    silently), UV-unwraps every part into one shared 0-1 atlas packed for
+    ~uniform texel density, and reports mechanical UV diagnostics."""
+    import bpy
+
+    build_params = dict(params.get("build") or {})
+    build_params.pop("output_path", None)  # the .blend is the artifact here
+    result = op_build_from_spec(build_params)
+    if not result.get("success"):
+        return result
+
+    obj_list = [bpy.data.objects[n] for n in result.get("part_names", []) if n in bpy.data.objects]
+    obj_list = [o for o in obj_list if o.type == "MESH"]
+
+    # ── zero-n-gon strategy ─────────────────────────────────────────────────
+    tris, quads, ngons, tri_eq, faces, verts = _count_face_kinds(obj_list)
+    triangulated = False
+    if ngons > 0:
+        if params.get("allow_triangulate"):
+            for obj in obj_list:
+                select_only([obj])
+                bpy.ops.object.mode_set(mode="EDIT")
+                bpy.ops.mesh.select_all(action="SELECT")
+                bpy.ops.mesh.triangulate()
+                bpy.ops.object.mode_set(mode="OBJECT")
+            triangulated = True
+            tris, quads, ngons, tri_eq, faces, verts = _count_face_kinds(obj_list)
+        else:
+            return {
+                "success": False,
+                "error": (
+                    f"scene contains {ngons} n-gon(s) — the client gate is strict "
+                    f"(Count: 0). Fix the build (quad-clean by construction) or pass "
+                    f"allow_triangulate=true to triangulate as a last resort "
+                    f"(recorded loudly in the result and qa_report)"
+                ),
+            }
+
+    resolution = int(params.get("resolution", 1024))  # density-reporting resolution
+    atlas = _pack_uv_atlas(obj_list, margin=float(params.get("uv_margin", 0.01)))
+    diag = _uv_diagnostics(obj_list, resolution=resolution)
+
+    out_blend = params.get("out_blend")
+    if out_blend:
+        export_any(str(out_blend))
+    if params.get("output_path"):
+        export_any(str(params["output_path"]))
+
+    return {
+        "success": True,
+        "part_names": result.get("part_names", []),
+        "warnings": result.get("warnings", []),
+        "triangulated_as_last_resort": triangulated,
+        "topology": {"triangles": tris, "quads": quads, "ngons": ngons,
+                     "triangle_equivalent": tri_eq, "faces_total": faces, "vertices": verts},
+        "uv_atlas": atlas,
+        "uv": diag,
+        "out_blend": str(out_blend) if out_blend else None,
+        "overall_bounds": get_mesh_bounds(obj_list),
+    }
+
+
+# ── Bake ─────────────────────────────────────────────────────────────────────
+
+# map name -> (how to bake it, image colourspace tag)
+# "emit:<socket>" bakes the value driving that Principled input through a
+# temporary Emission shader — the generic way to get Roughness/Metallic/
+# Base Color out of any (procedural or flat) material as pixel data.
+_BAKE_MAP_SPECS = {
+    "normal": ("tangent-normal", "Non-Color"),
+    "ao": ("ao", "Non-Color"),
+    "basecolor": ("emit:Base Color", "sRGB"),
+    "roughness": ("emit:Roughness", "Non-Color"),
+    "metallic": ("emit:Metallic", "Non-Color"),
+}
+
+
+def _image_stats(image, map_name=None):
+    """Mechanical per-map evidence from the baked pixels (the harness is
+    blind — numbers are the proof). Linear float pixels, 0-1."""
+    import numpy as np
+
+    w, h = image.size
+    ch = image.channels
+    px = np.asarray(image.pixels[:], dtype=np.float64).reshape(-1, ch)
+    rgb = px[:, :3]
+    stats = {
+        "size": [w, h],
+        "mean": [round(float(v), 5) for v in rgb.mean(axis=0)],
+        "std": [round(float(v), 5) for v in rgb.std(axis=0)],
+        "min": [round(float(v), 5) for v in rgb.min(axis=0)],
+        "max": [round(float(v), 5) for v in rgb.max(axis=0)],
+    }
+    if map_name == "normal":
+        # tangent-space: flat surface = (0.5, 0.5, 1.0); +Z (blue) dominant
+        stats["frac_blue_dominant"] = round(float(np.mean(rgb[:, 2] >= rgb[:, 0] + 1e-6)), 5)
+        stats["coverage"] = round(float(np.mean(rgb.sum(axis=1) > 0.05)), 5)
+    if map_name == "ao":
+        stats["frac_below_half"] = round(float(np.mean(rgb.mean(axis=1) < 0.5)), 5)
+        stats["coverage"] = round(float(np.mean(rgb.sum(axis=1) > 0.05)), 5)
+    return stats
+
+
+def _with_active_image(objects, image):
+    """Temporarily add a TexImage node holding `image` to every material on
+    `objects` and make it the ACTIVE node (the bake target), returning
+    cleanup state. Without an active image node Blender bakes NOWHERE —
+    silently (empirically verified the hard way)."""
+    import bpy
+
+    setups = []
+    mats = []
+    for obj in objects:
+        for slot in obj.material_slots:
+            if slot.material and slot.material.use_nodes and slot.material not in mats:
+                mats.append(slot.material)
+    for mat in mats:
+        nt = mat.node_tree
+        tex = nt.nodes.new("ShaderNodeTexImage")
+        tex.image = image
+        nt.nodes.active = tex
+        setups.append((nt, tex))
+    return setups
+
+
+def _bake_emit_channel(objects, image, socket_name, margin_px):
+    """Bake the value driving `socket_name` (Principled input) of every
+    material into `image` via a temporary Emission shader. Handles both
+    texture-driven (procedural) and constant inputs; restores the original
+    node wiring afterwards."""
+    import bpy
+
+    setups = []
+    mats = []
+    for obj in objects:
+        for slot in obj.material_slots:
+            if slot.material and slot.material.use_nodes and slot.material not in mats:
+                mats.append(slot.material)
+    for mat in mats:
+        nt = mat.node_tree
+        bsdf = nt.nodes.get("Principled BSDF")
+        out = nt.nodes.get("Material Output")
+        if bsdf is None or out is None or socket_name not in bsdf.inputs:
+            continue
+        emission = nt.nodes.new("ShaderNodeEmission")
+        src_link = next((l for l in nt.links if l.to_socket == bsdf.inputs[socket_name]), None)
+        if src_link is not None:
+            src_from = src_link.from_socket
+            nt.links.new(src_from, emission.inputs["Color"])
+        else:
+            default = bsdf.inputs[socket_name].default_value
+            if hasattr(default, "__len__"):
+                emission.inputs["Color"].default_value = tuple(default)
+            else:
+                v = float(default)
+                emission.inputs["Color"].default_value = (v, v, v, 1.0)
+        prev = next((l for l in nt.links if l.to_socket == out.inputs["Surface"]), None)
+        prev_from, prev_to = (prev.from_socket, prev.to_socket) if prev else (None, None)
+        nt.links.new(emission.outputs["Emission"], out.inputs["Surface"])
+        tex = nt.nodes.new("ShaderNodeTexImage")
+        tex.image = image
+        nt.nodes.active = tex
+        setups.append((nt, emission, tex, prev_from, prev_to))
+    try:
+        for i, obj in enumerate(objects):
+            if not any(s.material for s in obj.material_slots):
+                continue
+            select_only([obj])
+            bpy.ops.object.bake(type="EMIT", use_clear=(i == 0), margin=margin_px)
+    finally:
+        for (nt, emission, tex, prev_from, prev_to) in setups:
+            if prev_from is not None and prev_to is not None:
+                nt.links.new(prev_from, prev_to)
+            nt.nodes.remove(emission)
+            nt.nodes.remove(tex)
+
+
+def _wire_baked_maps(materials, images):
+    """Wire the baked maps into each material with standard PBR connections
+    (BaseColor -> Base Color, Normal via Normal Map node, Roughness,
+    Metallic, AO -> Ambient Occlusion) so GLB/USDZ/FBX exports carry the
+    baked texture set."""
+    for mat in materials:
+        if not mat or not mat.use_nodes:
+            continue
+        nt = mat.node_tree
+        bsdf = nt.nodes.get("Principled BSDF")
+        if bsdf is None:
+            continue
+        links = {
+            "Base Color": ("basecolor", None),
+            "Normal": ("normal", "normal_map"),
+            "Roughness": ("roughness", None),
+            "Metallic": ("metallic", None),
+            "Ambient Occlusion": ("ao", None),
+        }
+        for socket_name, (map_name, via) in links.items():
+            if map_name not in images or socket_name not in bsdf.inputs:
+                continue
+            tex = nt.nodes.new("ShaderNodeTexImage")
+            tex.image = images[map_name]
+            tex.interpolation = "Closest" if map_name in ("roughness", "metallic") else "Linear"
+            target_socket = bsdf.inputs[socket_name]
+            if via == "normal_map":
+                nmap = nt.nodes.new("ShaderNodeNormalMap")
+                nt.links.new(tex.outputs["Color"], nmap.inputs["Color"])
+                nt.links.new(nmap.outputs["Normal"], target_socket)
+            else:
+                nt.links.new(tex.outputs["Color"], target_socket)
+
+
+def _displace_along_normals(obj, distance):
+    """Move every vertex along its (local) normal by `distance` — used to
+    lift the HP a hair above the LP so selected-to-active rays connect.
+    Flat regions stay flat (normals unchanged); the bevel gradient just
+    shifts outward by a negligible amount."""
+    import bmesh
+
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    for v in bm.verts:
+        if v.normal.length > 1e-9:
+            v.co = v.co + v.normal * distance
+    bm.to_mesh(obj.data)
+    bm.free()
+
+
+def _pattern_value(pattern, u, v, seed, exponent):
+    """Deterministic pattern value at normalized coords u, v ∈ [0, 1].
+
+    Puff patterns (grid_diamond, grid_square, bumps) return values in
+    [0, 1]: 0 = seam/valley (vertex stays on the surface), 1 = puff peak
+    (vertex lifts by the full amplitude). waves and noise are bipolar,
+    returning [-1, 1]. Pure math — no random state, same input ⇒ same
+    output across processes (test-assertable).
+    """
+    if pattern == "waves":
+        return math.sin(2.0 * math.pi * u)
+    if pattern == "noise":
+        # Classic GLSL-style hash: stable across runs/platforms.
+        h = math.sin(u * 127.1 + v * 311.7 + seed * 74.7) * 43758.5453
+        return (h - math.floor(h)) * 2.0 - 1.0
+    if pattern == "grid_diamond":
+        a = math.sin(math.pi * (u + v))
+        b = math.sin(math.pi * (u - v))
+        return (abs(a * b)) ** exponent
+    if pattern == "grid_square":
+        return (abs(math.sin(math.pi * u)) * abs(math.sin(math.pi * v))) ** exponent
+    if pattern == "bumps":
+        # Radial cosine dome per cell, centred at (0.5, 0.5) of the cell.
+        du, dv = u - math.floor(u) - 0.5, v - math.floor(v) - 0.5
+        r = 2.0 * math.sqrt(du * du + dv * dv)
+        if r >= 1.0:
+            return 0.0
+        return (0.5 + 0.5 * math.cos(math.pi * r)) ** exponent
+    raise ValueError(f"unknown displacement pattern {pattern!r}")
+
+
+def _apply_pattern_displacement(hp, disp):
+    """Displace an HP copy's vertices along their normals by a deterministic
+    pattern (DetailSpec.displacement via the resolver). Coordinates are the
+    object's LOCAL x/y, normalized by the mesh's own bbox, so the pattern is
+    anchored to the part regardless of world position and stays continuous
+    across UV seams. `restrict` limits displacement to vertices whose local
+    normal points up (+z) or down (-z) — puff panels need that or their side
+    walls distort. Runs AFTER the bevel/subsurf/lift, so amplitudes are
+    measured from the lifted shell."""
+    pattern = disp["pattern"]
+    amplitude = float(disp["amplitude_m"])
+    frequency = max(float(disp.get("frequency", 8.0)), 0.25)
+    seed = int(disp.get("seed", 0))
+    exponent = max(float(disp.get("exponent", 1.0)), 0.05)
+    axis = str(disp.get("axis", "z"))
+    restrict = str(disp.get("restrict", "none"))
+
+    me = hp.data
+    if not me.vertices:
+        return
+    xs = [v.co.x for v in me.vertices]
+    ys = [v.co.y for v in me.vertices]
+    span_x = max(max(xs) - min(xs), 1e-9)
+    span_y = max(max(ys) - min(ys), 1e-9)
+    for v in me.vertices:
+        if restrict == "up" and v.normal.z < 0.3:
+            continue
+        if restrict == "down" and v.normal.z > -0.3:
+            continue
+        u = (v.co.x - min(xs)) / span_x * frequency
+        w = (v.co.y - min(ys)) / span_y * frequency
+        if pattern == "waves":
+            coord = {"x": v.co.x, "y": v.co.y, "z": v.co.z}[axis]
+            span = {"x": span_x, "y": span_y, "z": span_x}[axis]
+            u = (coord / span) * frequency if span > 1e-9 else 0.0
+            w = 0.0
+        value = _pattern_value(pattern, u, w, seed, exponent)
+        if v.normal.length > 1e-9:
+            v.co = v.co + v.normal * (amplitude * value)
+
+
+def op_bake_maps(params):
+    """T3 step 2 — bake the client texture set from a high-poly source onto
+    the delivery scene's UVs.
+
+    Loads the quad-clean .blend (from op_prepare_delivery_scene), builds HP
+    copies (subdivision, smooth-shaded), bakes the requested maps
+    (tangent-space NORMAL selected-to-active from HP, AO, and
+    BaseColor/Roughness/Metallic via the emission channel trick), wires the
+    baked set into the materials, exports the HP GLB, then DELETES the HP
+    copies and re-saves the .blend so the FBX/USDZ sources stay quad-clean.
+
+    `normal_g` ("POS"/"NEG") controls the baked green-channel sign: POS is
+    Blender's native output; the ramp test in tests/test_client_export.py
+    pins whichever setting produces the OpenGL convention the client
+    expects. Report-only here — the delivered map must be OpenGL either way.
+    """
+    import bpy
+
+    in_path = params.get("input")
+    if not in_path:
+        raise ValueError("input (the prepared .blend) is required")
+    out_dir = params.get("out_dir")
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    maps = params.get("maps") or list(_BAKE_MAP_SPECS.keys())
+    resolution = int(params.get("resolution", 1024))
+    margin_px = int(params.get("margin", 16))
+    samples = int(params.get("samples", 16))
+    hp_levels = int(params.get("hp_levels", 2))
+    normal_g = str(params.get("normal_g", "POS"))
+    ray_distance_factor = float(params.get("ray_distance_factor", 0.1))
+    # hp_mode: "bevel" (default, automatic HP shells) or "script" — the caller
+    # supplies hp_script, executed with bpy in scope, which must create its own
+    # high-poly objects named *__HP. Used by the ramp/known-shape normal-map
+    # verification tests (and T4 detail work) where the correct bake is
+    # analytically predictable.
+    hp_mode = str(params.get("hp_mode", "bevel"))
+    hp_script = params.get("hp_script")
+    # Per-part detail overrides (PartSpec.detail -> resolver -> caller):
+    # {part_name: {"bevel_width": m, "subdivision_levels": n,
+    #              "displacement": {...}}}. Used by both the HP construction
+    # and the cage-inset sizing below.
+    detail_map = params.get("detail") or {}
+
+    reset_scene()
+    import_any(str(in_path))
+    lp_objs = [o for o in mesh_objects() if o.data and o.data.polygons]
+    if not lp_objs:
+        return {"success": False, "error": "no mesh objects in the input scene"}
+
+    warnings = []
+    # Bakes need materials and UVs; add/smart-project only what is missing.
+    for obj in lp_objs:
+        if not any(s.material for s in obj.material_slots):
+            mat = build_flat_pbr_material(f"{obj.name}__default", color=None,
+                                          roughness=0.5, metallic=0.0)
+            obj.data.materials.append(mat)
+            warnings.append(f"default material added to '{obj.name}' (part had none)")
+        if not obj.data.uv_layers:
+            select_only([obj])
+            bpy.ops.object.mode_set(mode="EDIT")
+            bpy.ops.mesh.select_all(action="SELECT")
+            bpy.ops.uv.smart_project(angle_limit=math.radians(66.0), island_margin=0.02)
+            bpy.ops.object.mode_set(mode="OBJECT")
+            warnings.append(f"smart-project UVs generated for '{obj.name}' in bake op "
+                            f"(prepare op should have made them — atlas not applied)")
+
+    scene = bpy.context.scene
+    scene.render.engine = "CYCLES"
+    scene.cycles.samples = samples
+    scene.cycles.device = "CPU"
+
+    bounds = get_mesh_bounds(lp_objs)
+    max_dim = max(bounds["dimensions"]) if bounds else 1.0
+    ray_distance = max(ray_distance_factor * max_dim, 1e-3)
+
+    images = {}
+    map_results = {}
+
+    def _new_image(map_name):
+        _how, colorspace = _BAKE_MAP_SPECS[map_name]
+        img = bpy.data.images.new(f"{map_name}_bake", width=resolution, height=resolution,
+                                  alpha=False)
+        img.colorspace_settings.name = colorspace
+        images[map_name] = img
+        return img
+
+    def _save_map(map_name):
+        img = images[map_name]
+        map_results[map_name] = {"stats": _image_stats(img, map_name=map_name)}
+        if out_dir:
+            # abspath() is load-bearing: Blender resolves RELATIVE image paths
+            # against the current .blend file, not the process CWD — a relative
+            # out_dir makes img.save() silently write nowhere (empirical).
+            path = os.path.abspath(os.path.join(out_dir, f"{map_name}.png"))
+            img.filepath_raw = path
+            img.file_format = "PNG"
+            img.save()
+            map_results[map_name]["path"] = path
+
+    # ── AO FIRST, from the delivery scene itself ────────────────────────────
+    # EMPIRICAL: AO baked selected-to-active from HP shells covers only ~19%
+    # of texels (Blender's ray correspondence is unreliable for closed lifted
+    # shells), and lifted shells would occlude everything anyway. Self-AO of
+    # the LP scene covers every texel and keeps cross-part contact shadows
+    # (all LP objects stay render-visible during each per-object bake). The
+    # HP-driven detail channel is the NORMAL map.
+    if "ao" in maps:
+        image = _new_image("ao")
+        ao_method = "AO"
+        setups = _with_active_image(lp_objs, image)
+        try:
+            for i, obj in enumerate(lp_objs):
+                select_only([obj])
+                try:
+                    bpy.ops.object.bake(type="AO", use_clear=(i == 0), margin=margin_px)
+                except Exception:  # noqa: BLE001 — enum without a plain AO type
+                    ao_method = "COMBINED(AO-only)"
+                    bpy.ops.object.bake(
+                        type="COMBINED", use_pass_direct=False, use_pass_indirect=False,
+                        use_pass_diffuse=False, use_pass_glossy=False, use_pass_transmission=False,
+                        use_pass_ambient_occlusion=True,
+                        use_clear=(i == 0), margin=margin_px,
+                    )
+        finally:
+            for (nt, tex) in setups:
+                nt.nodes.remove(tex)
+        map_results["ao_method"] = ao_method
+        map_results["ao_source"] = ("delivery_scene_self_ao — cross-part contact shadows "
+                                    "included; HP shells must not occlude (empirical)")
+        _save_map("ao")
+
+    # ── HP copies: bevel + subdivision + smooth shading, lifted a hair ──────
+    # The HP must WRAP the LP for selected-to-active rays to connect: a plain
+    # subsurf of a box shrinks INSIDE it (empirically: all-black bakes).
+    # Bevel rounds the edges, subsurf smooths them, and a tiny lift along
+    # normals puts face interiors just above the LP surface.
+    hp_objs = []
+    if hp_mode == "script":
+        if not hp_script:
+            return {"success": False, "error": "hp_mode='script' requires hp_script"}
+        if "normal" not in maps:
+            return {"success": False,
+                    "error": "hp_mode='script' only makes sense when 'normal' is baked"}
+        ns = {"bpy": bpy, "RESULT": None}
+        exec(compile(hp_script, "<hp_script>", "exec"), ns, ns)  # noqa: S102 — harness op
+        hp_objs = [o for o in mesh_objects() if o.name.endswith("__HP")]
+        if not hp_objs:
+            return {"success": False,
+                    "error": "hp_script created no *__HP objects"}
+        for hp in hp_objs:
+            hp.hide_render = False
+            hp.hide_set(False)
+        map_results["hp_source"] = "script"
+    elif "normal" in maps and hp_levels > 0:
+        bevel_width = float(params.get("bevel_width", 0.003))
+        # Optional per-part detail (hoisted detail_map): overrides the
+        # defaults per object so e.g. one part can carry a quilt displacement
+        # while the rest get the plain bevel shell.
+        for obj in lp_objs:
+            part_detail = detail_map.get(obj.name) or {}
+            bb = world_bbox([obj])
+            min_dim = min(bb[1][i] - bb[0][i] for i in range(3)) if bb else bevel_width
+            part_bevel = part_detail.get("bevel_width")
+            width = max(min(part_bevel if part_bevel else bevel_width, 0.05 * min_dim), 1e-5)
+            part_levels = int(part_detail.get("subdivision_levels") or hp_levels)
+            select_only([obj])
+            bpy.ops.object.duplicate()
+            hp = bpy.context.active_object
+            hp.name = f"{obj.name}__HP"
+            bev = hp.modifiers.new(name="ThreedHPBevel", type="BEVEL")
+            bev.width = width
+            bev.segments = max(2, part_levels + 1)
+            bev.limit_method = "ANGLE"
+            bev.angle_limit = math.radians(40.0)
+            select_only([hp])
+            bpy.ops.object.shade_smooth()
+            bpy.ops.object.modifier_apply(modifier=bev.name)
+            sub = hp.modifiers.new(name="ThreedHPSubdiv", type="SUBSURF")
+            sub.levels = part_levels
+            sub.render_levels = part_levels
+            bpy.ops.object.modifier_apply(modifier=sub.name)
+            _displace_along_normals(hp, max(0.002 * min_dim, 1e-5))
+            if part_detail.get("displacement"):
+                _apply_pattern_displacement(hp, part_detail["displacement"])
+            hp.hide_render = False
+            hp.hide_set(False)
+            hp_objs.append(hp)
+
+    # ── NORMAL: tangent-space, HP -> LP selected-to-active ──────────────────
+    # EMPIRICAL (Blender 4.5 bake.cc, calc_point_from_barycentric_extrusion):
+    # selected-to-active WITHOUT a cage casts each ray along the NEGATED
+    # low-poly normal (negate_v3) — INWARD. An enclosing HP shell then bakes
+    # its FAR side with the hit normal flipped to face the ray (verified with
+    # tilted-plane probes: anything above the LP misses entirely, anything
+    # below hits). With a CUSTOM cage the direction is low_point − cage_point,
+    # so a cage shrunk slightly INSIDE the LP shoots OUTWARD rays that hit the
+    # NEAR side of the HP shell — the detail that actually belongs to the
+    # texel. The cage is a topology-identical duplicate (vertex-normal inset);
+    # it must be created AFTER the AO bake (a visible cage would occlude) and
+    # deleted with the HPs before the scene is re-saved.
+    cage_objs = []
+    if "normal" in maps:
+        image = _new_image("normal")
+        # Blender 4.5 enum: normal_r/g/b take POS_X/NEG_X/... axis names.
+        # The semantic switch we care about is the green-channel sign:
+        # POS_Y = Blender's native output = the OpenGL convention (glTF
+        # bitangent +V); NEG_Y = flipped (DirectX-style). Verified with a
+        # tilted-plane probe: a -Y-tilting normal over a v=+Y UV ramp bakes
+        # G = 0.145 < 0.5 under POS_Y — exactly the OpenGL encoding.
+        green = "NEG_Y" if normal_g.upper().startswith("NEG") else "POS_Y"
+        cage_inset = float(params.get("cage_inset", 0.0))
+        for obj in lp_objs:
+            bb = world_bbox([obj])
+            dims = [bb[1][i] - bb[0][i] for i in range(3)] if bb else [0.01, 0.01, 0.01]
+            if cage_inset > 0:
+                inset = cage_inset
+            elif hp_mode == "script":
+                # A caller-supplied HP is not a bevel shell; any small inset
+                # that keeps the origin inside the LP works.
+                inset = max(0.005 * max(dims), 1e-5)
+            else:
+                # Must exceed the bevel shell's inward dip near edges
+                # (~bevel width) plus the normal lift, or edge texels miss.
+                part_bevel = (detail_map.get(obj.name) or {}).get("bevel_width")
+                bevel_used = max(min(part_bevel or bevel_width, 0.05 * min(dims)), 1e-5) \
+                    if hp_levels > 0 else 0.0
+                inset = max(1.2 * bevel_used + 0.002 * min(dims), 1e-5)
+            select_only([obj])
+            bpy.ops.object.duplicate()
+            cage = bpy.context.active_object
+            cage.name = f"{obj.name}__CAGE"
+            for v in cage.data.vertices:
+                v.co -= v.normal * inset
+            cage_objs.append(cage)
+        setups = _with_active_image(lp_objs, image)
+        try:
+            for i, obj in enumerate(lp_objs):
+                bpy.ops.object.select_all(action="DESELECT")
+                for hp in hp_objs:
+                    hp.select_set(True)
+                obj.select_set(True)
+                bpy.context.view_layer.objects.active = obj
+                bpy.ops.object.bake(
+                    type="NORMAL", normal_space="TANGENT",
+                    normal_r="POS_X", normal_g=green, normal_b="POS_Z",
+                    use_selected_to_active=True, max_ray_distance=ray_distance,
+                    use_clear=(i == 0), margin=margin_px,
+                    use_cage=True, cage_object=cage_objs[i].name,
+                )
+        finally:
+            for (nt, tex) in setups:
+                nt.nodes.remove(tex)
+        _save_map("normal")
+
+    # ── data channels via the emission trick ────────────────────────────────
+    for map_name in ("basecolor", "roughness", "metallic"):
+        if map_name not in maps:
+            continue
+        image = _new_image(map_name)
+        socket_name = _BAKE_MAP_SPECS[map_name][0].split(":", 1)[1]
+        _bake_emit_channel(lp_objs, image, socket_name, margin_px)
+        _save_map(map_name)
+
+    # ── wire the baked set into the delivery materials ──────────────────────
+    mats = []
+    for obj in lp_objs:
+        for slot in obj.material_slots:
+            if slot.material and slot.material not in mats:
+                mats.append(slot.material)
+    _wire_baked_maps(mats, images)
+
+    # ── HP GLB (selected HP objects only) ────────────────────────────────────
+    hp_glb = params.get("hp_glb")
+    hp_tris = 0
+    if hp_objs and hp_glb:
+        _, _, _, hp_tris, _, _ = _count_face_kinds(hp_objs)
+        bpy.ops.object.select_all(action="DESELECT")
+        for hp in hp_objs:
+            hp.select_set(True)
+        bpy.context.view_layer.objects.active = hp_objs[0]
+        export_any(str(hp_glb), selected_only=True)
+
+    _, _, _, lp_tris, _, _ = _count_face_kinds(lp_objs)
+
+    # ── remove HP copies AND cages, re-save the quad-clean .blend ────────────
+    for hp in hp_objs:
+        bpy.data.objects.remove(hp, do_unlink=True)
+    for cage in cage_objs:
+        bpy.data.objects.remove(cage, do_unlink=True)
+    if params.get("save_blend"):
+        export_any(str(params["save_blend"]))
+
+    return {
+        "success": True,
+        "warnings": warnings,
+        "maps": map_results,
+        "normal_g": normal_g,
+        "hp_levels": hp_levels,
+        "hp_glb": str(hp_glb) if hp_glb and hp_objs else None,
+        "hp_triangle_equivalent": int(hp_tris),
+        "lp_triangle_equivalent": int(lp_tris),
+        "ray_distance_m": ray_distance,
+        "resolution": resolution,
+        "samples": samples,
+    }
+
+
+def op_decimate_to_budget(params):
+    """T3 step 3 — decimate the delivery scene to a triangle budget and
+    export the LP GLB. If the scene is already under budget (the usual case
+    for parametric quad builds), it exports as-is and says so — decimation
+    is never applied silently."""
+    import bpy
+
+    in_path = params.get("input")
+    out_path = params.get("output")
+    budget = int(params.get("budget", 50000))
+    if not in_path or not out_path:
+        raise ValueError("input and output are required")
+
+    reset_scene()
+    import_any(str(in_path))
+    objs = [o for o in mesh_objects() if o.data and o.data.polygons]
+    if not objs:
+        return {"success": False, "error": "no mesh objects in the input scene"}
+
+    _, _, _, total, _, _ = _count_face_kinds(objs)
+    decimated = False
+    iterations = 0
+    ratio = 1.0
+    while total > budget and iterations < 6:
+        ratio = max(0.01, (budget / total) * 0.97)
+        for obj in objs:
+            mod = obj.modifiers.new(name="ThreedDecimate", type="DECIMATE")
+            mod.ratio = ratio
+            select_only([obj])
+            bpy.ops.object.modifier_apply(modifier=mod.name)
+        _, _, _, total, _, _ = _count_face_kinds(objs)
+        decimated = True
+        iterations += 1
+    if total > budget:
+        return {
+            "success": False,
+            "error": f"could not decimate under the {budget} budget in {iterations} "
+                     f"iterations (still {total} triangle-equivalent)",
+        }
+
+    export_any(str(out_path))
+    return {
+        "success": True,
+        "path": str(out_path),
+        "budget": budget,
+        "triangle_equivalent": int(total),
+        "decimated": decimated,
+        "last_ratio": round(ratio, 4),
+        "iterations": iterations,
+    }
+
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 
@@ -1693,6 +2738,9 @@ DISPATCH = {
     "center_origin": op_center_origin,
     "apply_material": op_apply_material,
     "bake_materials": op_bake_materials,
+    "prepare_delivery_scene": op_prepare_delivery_scene,
+    "bake_maps": op_bake_maps,
+    "decimate_to_budget": op_decimate_to_budget,
 }
 
 

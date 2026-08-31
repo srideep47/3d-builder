@@ -44,6 +44,20 @@
   false non-watertightness.
 - **Procedural node shaders do not survive GLB export.** Default materials are
   flat PBR values; use the `bake_materials` op when procedural detail is needed.
+- **Selected-to-active bakes cast rays INWARD (Blender `bake.cc` negate_v3).**
+  Without a custom cage, HP geometry above the LP is invisible to the bake, an
+  enclosing HP shell bakes its FAR side (hit normal flipped), and a ray miss
+  writes neutral (128,128,255) — not black — so a dead bake looks clean. The
+  `bake_maps` op therefore builds a cage shrunk inside each LP (outward rays,
+  near-side detail), after the AO pass and deleted before re-save. The
+  ramp proof (`tests/test_delivery_finish.py`) pins the baked normals to the
+  analytic prediction within 1 LSB and proves `normal_g="POS_Y"` = OpenGL.
+- **Blender resolves relative image paths against the .blend file**, not the
+  process CWD — `img.save()` with a relative out_dir silently writes nothing.
+  Bake outputs are `abspath`'d in the harness; package roots `.resolve()`d in
+  `package.py`.
+- **Bakes need an ACTIVE TexImage node in every baked material** — without
+  one Blender silently bakes nothing (`_with_active_image` owns this).
 - **Boolean-consumed parts have freed RNA structs.** After `apply_boolean`
   removes the tool object, filter object lists by identity (`is not`), never by
   `.name`.
@@ -64,11 +78,15 @@
   (backend `__init__`).
 
 ## Verification
-- `python -m pytest tests -q` — 148 tests; `blender`-marked tests auto-skip
+- `python -m pytest tests -q` — 164 tests; `blender`-marked tests auto-skip
   when no Blender is found.
-- Client packages: `python -m src.cli package <source_glb> --job job.yaml`
-  assembles `output/packages/<JOB>/` + `qa_report.json` (audit record:
-  gates, axis convention as independently parsed, hashes, placeholders);
+- Client packages: `python -m src.cli package --spec <spec.json> --job
+  job.yaml` runs the full T3 finish chain (build → quad-verify + per-island
+  UV atlas → 5-map bake → LP decimation → FBX from the live quad-clean scene
+  → gates + qa_report with bake/UV evidence + review renders); `package
+  <source_glb> --job job.yaml` is the T2 placeholder flow (assembles
+  `output/packages/<JOB>/` + `qa_report.json`: gates, axis convention as
+  independently parsed, hashes, placeholders);
   `python -m src.cli validate <package_dir> --job job.yaml` re-checks a
   package on disk (local mirror of the MetaZtech validator panel).
 - FBX axis/handedness is verified WITHOUT a Blender round trip

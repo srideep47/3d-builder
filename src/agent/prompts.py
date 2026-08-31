@@ -45,6 +45,18 @@ MODIFIERS (per part, "modifiers": {...})
 - "boolean": {"operation": "difference", "target_part": "<other part name>"} — cuts a
   slot/hole part out of this part. Define the tool part too; it is removed after cutting.
 
+DETAIL (per part, "detail": {...}) — high-poly baking instructions. The part's
+real geometry and dimensions stay EXACTLY as built; detail only shapes the
+high-poly copy the normal map is baked from, so it never risks a dimension gate.
+- "bevel_width": 0.003 (meters) — rounds HP edges for the normal map.
+- "subdivision_levels": 2 — HP smoothness.
+- "displacement": {"pattern": "...", "amplitude": 0.004, "frequency": 8,
+  "restrict": "up"} — deterministic surface relief baked into the normal map.
+  Patterns: "grid_diamond" (quilted/padded look), "grid_square" (button-tufted
+  grid), "bumps" (domes), "waves" (ripples), "noise" (organic grain).
+  amplitude = peak height in meters, frequency = repeats across the part.
+  Use "restrict": "up" for panels so side walls stay clean.
+
 MATERIALS (flat PBR values export correctly to GLB)
 - Presets: "oak_wood", "walnut_wood", "brushed_steel", "chrome", "gold",
   "matte_black_plastic", "white_ceramic", "leather_black", "leather_brown",

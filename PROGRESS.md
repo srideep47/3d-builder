@@ -236,9 +236,149 @@ default), `op_decimate_to_budget`, per-part detail block in ObjectSpec v2
 → verify → triangulate only as last resort, loud logging), decide the FBX
 source (finding 4 above).
 
+**OWNER DECISION (T2 review, recorded 2026-09-01):** the deliverable FBX
+is exported from the **LIVE QUAD-CLEAN SCENE**, not the triangulated GLB.
+Rationale (owner): their validator checks n-gon count at all, which only
+makes sense if they expect a non-triangulated mesh — on a triangulated
+mesh that gate is trivially zero and pointless; triangulating also doubles
+polycount against a tier ceiling, and a human QA judges artist-quality
+topology. N-gon correctness is ours, which is what T3's "quad-clean by
+construction" already requires. Implementation: the finishing pipeline
+saves the quad-clean scene as an intermediate .blend; `export_fbx` loads
+the .blend (preserves quads) instead of importing the GLB (triangulates).
+T2's GLB-sourced FBX path remains for the legacy placeholder flow but the
+T3 pipeline (`finish_delivery`) uses the live scene.
+
+**MAYA00053153 dimensions: NOT SUPPLIED** (owner message carried the blank
+placeholder). T4 therefore runs the placeholder-dimension refusal path
+(`dims_placeholder: true` in the job card; `package_delivery` refuses to
+emit a deliverable package; loud logging) and ends with
+"T4 BLOCKED — owner must supply dimensions". A standard queen size is
+never inferred (rule 9).
+
 ---
 
-## T3 — UV + HP/LP bake pipeline ⬜ (not started)
+## T3 — UV + HP/LP bake pipeline ✅ (2026-09-01)
+
+**Landed:**
+- `src/blender/harness_script.py` — three new ops + support machinery:
+  - `prepare_delivery_scene`: build → n-gon verify (raise unless zero;
+    triangulate only with `allow_triangulate`, recorded loudly) → smart-project
+    UVs per object → **per-ISLAND atlas pack** (uv_area ∝ world area per
+    island, shelf-packed, uniform overflow shrink) → mechanical UV
+    diagnostics → saves the live quad-clean `.blend` (FBX source, owner
+    decision above)
+  - `bake_maps`: AO **self-scene** FIRST (cross-part contact shadows; HP
+    shells would occlude — empirical), then per-part HP shells (bevel +
+    subsurf + micro-lift, or `hp_mode="script"` for caller-authored HPs),
+    then tangent NORMAL selected-to-active **through a custom cage**, then
+    BaseColor/Roughness/Metallic via the Emission-channel trick; wires the
+    baked set into the delivery materials; exports the HP GLB; deletes
+    HPs+**cages**; re-saves the .blend. `detail` param gives per-part
+    bevel/subsurf/displacement overrides (PartSpec.detail)
+  - `decimate_to_budget`: iterative collapse to the tier ceiling, fail-loud
+  - `_apply_pattern_displacement` + `_pattern_value`: deterministic
+    displacement patterns (grid_diamond, grid_square, bumps, waves, noise) —
+    pure math, same input ⇒ same output across processes
+  - `_uv_islands_report` / `_uv_diagnostics`: islands via UV-continuity
+    union-find; **exact rasterized island-overlap test** (texel claims, not
+    bbox intersection); texel-density min/max/ratio per island
+- `src/spec/schema.py` + `src/spec/resolver.py` — `DetailSpec` +
+  `DisplacementSpec` (detail shapes the HP only; LP dimensions can never
+  move); resolver converts spec units → metres (verified: mm 1.5 →
+  0.0015 m) and passes `restrict` through
+- `src/agent/prompts.py` — DETAIL section added to the analyst prompt
+  (rule 7: shape enum, prompt, and harness stay in sync)
+- `src/client/package.py` — `finish_delivery()`: the full T3 chain
+  (prepare → bake → decimate → FBX from the LIVE QUAD-CLEAN SCENE → USDZ
+  from the LP GLB → real 5-map texture set → gates → qa_report) with the
+  `finish` evidence section (bake stats, UV diagnostics, HP/LP counts,
+  review renders). `package_delivery()` (T2 placeholder flow) refactored
+  onto the shared `_assemble_and_audit` core — behaviour unchanged, tests
+  unchanged
+- `src/cli.py` — `package --spec <spec.json>` runs `finish_delivery`;
+  prints the finish summary panel
+- Tests: `tests/test_delivery_finish.py` (9 blender-marked) +
+  `tests/test_spec_detail.py` (7 pure). **Suite: 164 passed** (baseline 148
+  + 16, nothing skipped except blender-without-Blender)
+
+**Mechanical evidence per map (the operator is text-only — numbers, not
+eyeballs; all pinned in tests):**
+- **Normal**: the ramp proof — flat LP (UVs u=x+0.5, v=y+0.5, so +V is +Y
+  world) under a bent HP (z = 0.6·y² for y>0, normal tilts −Y). Measured G
+  matches the analytic prediction `0.5 − 0.5·s/√(1+s²)` to **1 LSB** at
+  y=0.15/0.30/0.45 (e.g. y=0.45: predicted 67/255, measured 68/255). G < 0.5
+  for a −Y tilt with +V = +Y ⇒ **Blender's default `normal_g="POS_Y"` IS
+  the OpenGL convention (glTF bitangent +V)** — the delivered default stays
+  POS, no flip. R pinned at 128 (no X tilt), flat region pinned at
+  (128,128,255). Distribution-level: std > 0.02, blue-dominant > 0.9,
+  coverage 1.0 (chiral: mean (0.503, 0.503, 0.982), edge gradients to
+  R/G 0.16/0.85 ≈ the 45° bevel prediction)
+- **AO**: cavity proof — plane with a box standing on it; texel under the
+  box bakes < 0.3, exposed texel > 0.6, contrast > 0.4. Range spans
+  (min 0 / max 1). Coffee showcase: coverage 0.678, min 0, max 1
+- **UV**: zero overlapping islands by **exact rasterization** (bbox
+  intersection is only a prefilter — the coffee atlas has concave islands
+  whose bboxes intersect with zero real overlap), all islands in 0-1,
+  texel-density ratio **1.00006** on the coffee table (122 islands)
+- **FBX**: from the live quad scene — independent parse sees polygon sizes
+  {4: 12} (pure quads, zero triangles) and extents 20 × 12 × 11 in exactly
+
+**Empirical findings banked (do not regress):**
+1. **Blender's selected-to-active bake casts rays INWARD.**
+   `bake.cc: calc_point_from_barycentric_extrusion` ends with
+   `negate_v3(dir)` — without a cage, every ray leaves the LP surface along
+   **−N**. Consequences (all reproduced with tilted-plane probes): (a) any
+   HP geometry above the LP is INVISIBLE to the bake; (b) an enclosing HP
+   shell bakes its **far** side with the hit normal flipped to face the
+   ray (our chiral bake "worked" this way — symmetric bevels made it look
+   right, but an asymmetric HP e.g. top-only quilt would bake the WRONG
+   side's detail); (c) a ray miss writes the LP's own flat normal
+   (**neutral 128,128,255 — NOT black**), so a dead bake looks "clean".
+   Fix: a **custom cage** — `calc_point_from_barycentric_cage` sets ray
+   dir = low_point − cage_point, so a cage shrunk slightly INSIDE the LP
+   shoots outward rays that hit the NEAR side of the HP shell. The bake op
+   builds cages automatically (vertex-normal inset; must exceed the bevel
+   shell's inward dip near edges, hence inset ≈ 1.2·bevel + lift), creates
+   them only AFTER the AO pass (a visible cage would occlude), and deletes
+   them before the scene is re-saved
+2. **Blender resolves RELATIVE image paths against the .blend file, not
+   the process CWD.** `img.save()` with a relative out_dir silently writes
+   nowhere (no error, no file — the chiral CLI smoke caught it because
+   finish_delivery refuses to package a missing map). All bake outputs and
+   package paths are `abspath`/`resolve`d at every layer now
+3. **Bakes need an ACTIVE TexImage node** in every baked material — with
+   none, Blender silently bakes nothing (kept from earlier finding;
+   `_with_active_image` owns this)
+4. **Tangent-space selected-to-active with a shared-UV HP cancels out**:
+   a bent sheet whose UVs parametrize its own geometry bakes neutral even
+   when rays connect — this is a red herring once the cage fix is in (the
+   real issue was the inward rays), but explains why early ramp probes
+   looked "flat yet covered"
+5. **Smart-project stretches unevenly within an object** (bevel strips vs
+   large faces): per-OBJECT atlas scaling left the coffee tabletop at a
+   1.46× island texel-density ratio. Per-ISLAND scaling (seam-safe by
+   definition) converges it to 1.00006
+6. AO selected-to-active from HP shells covers only ~19% of texels (ray
+   correspondence unreliable for lifted closed shells) — AO stays
+   self-scene per object with all parts render-visible (contact shadows
+   included), baked BEFORE any HP exists
+7. `bpy.ops.object.bake` normal_r/g/b enums want POS_X/NEG_X-style axis
+   names (4.5); semantic normal_g "POS"/"NEG" maps to POS_Y/NEG_Y
+
+**Verified:** `python -m pytest tests -q` → **164 passed** (94.8s, full
+suite including blender-marked). Chiral CLI smoke: `package --spec
+input/fixtures/chiral_test.spec.json --job <20/12/11 in>` → ALL GATES
+PASSED, zero placeholders. Coffee showcase (durable, for owner review):
+`output/packages/COFFEE0001/` (all six gates green, qa_report with the
+finish evidence section) + **review renders awaiting owner review** at
+`output/finish/COFFEE0001/review/COFFEE0001_{front,side,top,iso}.png`
+(LP 236 tri-eq, HP 15360 tri-eq, textures 1024²).
+
+**Not verified:** perceived visual quality of the baked maps (operator is
+text-only — that is exactly what the review renders are for; nothing in
+the map set is hand-tuned yet). The USDZ still exports from the LP GLB
+(triangulated; no quad requirement there).
 
 ## T4 — Reference implementation (mattress MAYA00053153) ⬜ (blocked on owner-supplied dimensions — never infer, rule 9)
 
