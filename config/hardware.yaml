@@ -2,10 +2,15 @@
 #   standalone     — one PC does everything (default)
 #   agent_host     — runs the agent/CLI/MCP, calls a remote img3d service
 #   inference_host — additionally runs the img3d GPU service (PC 1 "Forge")
+#
+# Forge (this machine) runs the service locally: start it with
+#   scripts/start-img3d.ps1            (mock backend)
+#   scripts/start-img3d.ps1 tripo_sr   (GPU backend, service venv)
+# Scout overrides base_url with Forge's LAN address + sets THREED_IMG3D_TOKEN.
 role: standalone
 
 img3d:
-  enabled: false
+  enabled: true
   base_url: http://127.0.0.1:8501
   # LAN token, only needed when the service is exposed beyond localhost.
   token_env: THREED_IMG3D_TOKEN

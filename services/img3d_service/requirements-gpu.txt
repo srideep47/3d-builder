@@ -1,0 +1,22 @@
+# img3d service — GPU dependencies (TripoSR backend, Windows-native CUDA).
+# Install into the SEPARATE service venv (never the main env — 3DGuy's rule):
+#   uv venv services/img3d_service/.venv --python 3.11
+#   uv pip install -r requirements-gpu.txt -p services/img3d_service/.venv
+#   powershell -ExecutionPolicy Bypass -File scripts/setup-img3d-gpu.ps1
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch>=2.4
+torchvision
+einops
+huggingface-hub
+transformers
+diffusers
+accelerate
+omegaconf
+kornia
+fast-simplification
+fastapi>=0.111
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+trimesh>=4.0
+numpy>=1.26,<3
+pillow>=10.0

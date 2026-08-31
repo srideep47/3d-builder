@@ -869,7 +869,10 @@ def op_build_from_spec(params):
                 warnings.append(f"Script part '{name}' created no object named '{name}'")
             continue
 
-        if method == "image_to_3d":
+        if method == "image_to_3d" or str(part.get("shape", "")).lower() == "organic":
+            # 'organic' shapes are only ever neural — route them through the
+            # same import path so a spec without a generated mesh degrades to
+            # a warning instead of an 'Unknown shape' build error.
             mesh_path = part.get("mesh_path")
             if not mesh_path or not os.path.exists(str(mesh_path)):
                 warnings.append(

@@ -21,10 +21,17 @@ from ..ai.schemas import ChatMessage
 from ..blender.runner import BlenderRunner
 from ..run_store import RunManifest, RunStore
 from ..spec.resolver import resolve_spec_to_build_params
-from ..spec.schema import ObjectSpec
+from ..spec.schema import GenerationMethod, ObjectSpec, ShapeType
 from ..spec.validation import validate_spec_structure
 from .prompts import ANALYST_SYSTEM_PROMPT, CORRECTOR_SYSTEM_PROMPT
 from .verifier import VerificationReport, Verifier
+
+
+def _safe_filename(name: str) -> str:
+    """Windows-safe, collision-free-ish file stem for a part name."""
+    keep = [c if (c.isalnum() or c in "-_") else "_" for c in name.strip()]
+    stem = "".join(keep).strip("_") or "part"
+    return stem[:80]
 
 
 @dataclass
@@ -56,6 +63,139 @@ class AgentLoop:
         agent_cfg = self.provider.config.get("agent", {}) or {}
         self.max_iterations = max_iterations or int(agent_cfg.get("max_iterations", 5))
         self.wall_clock_budget_s = float(agent_cfg.get("wall_clock_budget_s", 900))
+        # img3d (neural image-to-3D) provider — resolved lazily on first use so
+        # builds without organic parts never touch the service.
+        self._img3d_provider = None
+        self._img3d_checked = False
+
+    # ── Neural parts (image_to_3d) ───────────────────────────────────────────
+
+    def _get_img3d_provider(self):
+        """The configured img3d provider, or None. Cached for the process."""
+        if not self._img3d_checked:
+            self._img3d_checked = True
+            try:
+                from ..img3d import get_img3d_provider
+
+                self._img3d_provider = get_img3d_provider()
+            except Exception:
+                self._img3d_provider = None
+        return self._img3d_provider
+
+    def _normalize_spec_methods(self, spec: ObjectSpec) -> None:
+        """Deterministic routing fix: 'organic' shapes cannot be built
+        parametrically — if the analyst/corrector left method as 'parametric'
+        on one, route it to image_to_3d (the harness would otherwise fail with
+        'Unknown shape organic')."""
+        for p in spec.parts:
+            if p.shape == ShapeType.ORGANIC and p.method != GenerationMethod.IMAGE_TO_3D:
+                p.method = GenerationMethod.IMAGE_TO_3D
+
+    def _resolve_part_image(self, spec: ObjectSpec, part, image_paths: list[Path]) -> Path | None:
+        """Best reference image for an image_to_3d part: its declared crop,
+        then the spec's source images, then the run's uploaded images."""
+        candidates: list[str] = []
+        if part.image_crop:
+            candidates.append(str(part.image_crop).split("#")[0])
+        candidates.extend(str(s) for s in (spec.source_images or []))
+        candidates.extend(str(p) for p in image_paths)
+        for c in candidates:
+            p = Path(c)
+            if p.exists():
+                return p
+        return None
+
+    def _prepare_neural_parts(
+        self,
+        spec: ObjectSpec,
+        run_dir: Path,
+        image_paths: list[Path],
+        emit=None,
+        cancelled=None,
+    ) -> None:
+        """Generate meshes for image_to_3d parts via the local neural service
+        and attach mesh_path so build_from_spec imports them.
+
+        Cached by part name under run_dir/neural/ — corrector rewrites of the
+        spec reuse the files instead of regenerating (and the harness re-scales
+        to the part's current target_size on import, so dimension corrections
+        still converge without regeneration)."""
+        neural_parts = [p for p in spec.parts if p.method == GenerationMethod.IMAGE_TO_3D]
+        if not neural_parts:
+            return
+
+        def fire(event: str, **data) -> None:
+            if emit is not None:
+                try:
+                    emit(event, **data)
+                except Exception:
+                    pass
+
+        provider = self._get_img3d_provider()
+        if provider is None:
+            fire("neural_skipped", reason="img3d disabled in config/hardware.yaml", parts=[p.name for p in neural_parts])
+            return
+        if not provider.is_available():
+            fire("neural_skipped", reason=f"img3d service unreachable at {provider.base_url}", parts=[p.name for p in neural_parts])
+            return
+
+        neural_dir = run_dir / "neural"
+        for part in neural_parts:
+            if cancelled and cancelled():
+                break
+            if part.mesh_path and Path(part.mesh_path).exists():
+                continue
+            cache_path = neural_dir / f"{_safe_filename(part.name)}.glb"
+            if cache_path.exists():
+                part.mesh_path = str(cache_path)
+                if not part.target_size:
+                    part.target_size = [float(d) for d in part.dimensions]
+                continue
+
+            image = self._resolve_part_image(spec, part, image_paths)
+            if image is None:
+                fire(
+                    "neural_part_error",
+                    part=part.name,
+                    error="no reference image found — set the part's image_crop or pass reference images",
+                )
+                continue
+
+            target = [float(v) for v in (part.target_size or part.dimensions)]
+            fire("neural_part_started", part=part.name, image=str(image), target_size_m=target)
+            result = provider.generate_mesh_from_image(image, neural_dir, target)
+            if result.success and result.output_glb_path and Path(result.output_glb_path).exists():
+                neural_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(result.output_glb_path, cache_path)
+                part.mesh_path = str(cache_path)
+                if not part.target_size:
+                    part.target_size = target
+                fire(
+                    "neural_part_done",
+                    part=part.name,
+                    glb=str(cache_path),
+                    tri_count=result.tri_count,
+                    duration_s=round(result.duration_sec, 2),
+                )
+            else:
+                fire("neural_part_error", part=part.name, error=(result.error or "generation failed")[:500])
+
+    def _reattach_neural_meshes(self, spec: ObjectSpec, run_dir: Path) -> None:
+        """Cache-only pass run at the top of every iteration: the corrector
+        rewrites the whole spec JSON and may drop mesh_path — repopulate it
+        from run_dir/neural/ without hitting the service again."""
+        neural_parts = [p for p in spec.parts if p.method == GenerationMethod.IMAGE_TO_3D]
+        if not neural_parts:
+            return
+        neural_dir = run_dir / "neural"
+        for part in neural_parts:
+            if part.mesh_path and Path(part.mesh_path).exists():
+                continue
+            cache_path = neural_dir / f"{_safe_filename(part.name)}.glb"
+            if cache_path.exists():
+                part.mesh_path = str(cache_path)
+                if not part.target_size:
+                    part.target_size = [float(d) for d in part.dimensions]
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -85,9 +225,11 @@ class AgentLoop:
         if measurements_text:
             user_text += f"\nExact Measurements Required:\n{measurements_text}\n"
         if images:
+            paths = ", ".join(str(p) for p in images)
             user_text += (
-                f"\nReference images are attached ({len(images)} image(s)). "
+                f"\nReference images (file paths, in order): {paths}\n"
                 "Analyze their structure, proportions, and part decomposition.\n"
+                "For any image_to_3d part, set image_crop to one of these exact paths.\n"
             )
 
         use_vision = bool(images) and self.provider.supports_vision()
@@ -218,6 +360,11 @@ class AgentLoop:
                 spec=json.loads(current_spec.model_dump_json()),
             )
 
+        # Neural parts: generate meshes via the local img3d service before the
+        # build loop (parametric parts need nothing here — zero overhead).
+        self._normalize_spec_methods(current_spec)
+        self._prepare_neural_parts(current_spec, run_dir, image_paths, emit, cancelled)
+
         # Step 2: iterative build-measure-verify loop.
         iteration = 0
         latest_verification: VerificationReport | None = None
@@ -247,6 +394,11 @@ class AgentLoop:
                 if fixed:
                     current_spec = fixed
                     emit("correction_done", fixed=True)
+
+            # The corrector rewrites the whole spec; restore neural mesh_path
+            # from this run's cache before building.
+            self._normalize_spec_methods(current_spec)
+            self._reattach_neural_meshes(current_spec, run_dir)
 
             build_params = resolve_spec_to_build_params(current_spec, output_glb_path=str(step_glb.resolve()))
             emit("build_started", index=iteration, parts=[p.name for p in current_spec.parts])

@@ -1,0 +1,8 @@
+# img3d service — light dependencies (mock backend, API only).
+# Runs in the main 3D Builder environment or any venv with these packages.
+fastapi>=0.111
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+trimesh>=4.0
+numpy>=1.26,<3
+pillow>=10.0

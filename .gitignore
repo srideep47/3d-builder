@@ -40,3 +40,7 @@ htmlcov/
 # Local configuration overrides
 config/local.yaml
 .env
+
+# img3d service artifacts (job files, vendored model repos, service venv)
+services/img3d_service/data/
+services/img3d_service/vendor/

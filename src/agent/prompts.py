@@ -64,8 +64,15 @@ CONSTRAINTS
   sit exactly on Z = 0.
 
 METHODS
-- Default "parametric". Use "image_to_3d" only for organic parts when a generated
-  mesh path will be supplied later. Use "script" with "code" only as a last resort.
+- Default "parametric". The shape "organic" REQUIRES "method": "image_to_3d" —
+  it cannot be built parametrically. Use "image_to_3d" ONLY for organic parts
+  that cannot be expressed with the shape vocabulary (freeform cushions,
+  plants, sculptures) AND a reference image exists. For such a part set:
+  "image_crop": "<reference image path from the user message>", "target_size":
+  [x, y, z] (its exact dimensions — the generated mesh is rescaled to this on
+  import), and "dimensions" equal to target_size. Everything expressible with
+  the shape vocabulary stays "parametric". Use "script" with "code" only as a
+  last resort.
 
 OUTPUT: ONLY a valid JSON object conforming to ObjectSpec v2. No prose, no code fences.
 """
@@ -86,6 +93,9 @@ Your task:
   is 40mm short, lengthen the supporting part by exactly 0.04m.
 - Remember position semantics: center for box/cylinder/sphere-family shapes,
   bottom-center for tapered_extrude/revolve_lathe/extrude/sweep.
+- Parts with "method": "image_to_3d": fix measurement deltas by adjusting that
+  part's "target_size" (and keep "dimensions" equal to it) — the generated mesh
+  is rescaled to target_size on import. Do NOT drop "target_size" or "image_crop".
 - Keep every part name stable — measurements reference parts by name.
 - Return the complete corrected ObjectSpec JSON and nothing else.
 """

@@ -101,10 +101,54 @@ def list_recent_runs() -> str:
 
 
 @mcp.tool()
+def image_to_3d(
+    image_path: str,
+    target_size: list[float] | None = None,
+    output_dir: str | None = None,
+) -> str:
+    """Generate a 3D mesh (GLB) from a single reference image via the local
+    neural img3d service (TripoSR/TRELLIS class models). target_size is
+    [x, y, z] in meters — the mesh is scaled to exactly those bounds."""
+    from .img3d import get_img3d_provider
+
+    p = Path(image_path)
+    if not p.exists():
+        return json.dumps({"success": False, "error": f"Image not found: {image_path}"})
+
+    provider = get_img3d_provider()
+    if provider is None:
+        return json.dumps({"success": False, "error": "img3d disabled in config/hardware.yaml"})
+    if not provider.is_available():
+        return json.dumps({
+            "success": False,
+            "error": f"img3d service unreachable at {provider.base_url} — start it with scripts/start-img3d.ps1",
+        })
+
+    out_dir = Path(output_dir) if output_dir else p.parent / "img3d_output"
+    result = provider.generate_mesh_from_image(p, out_dir, target_size)
+    return json.dumps({
+        "success": result.success,
+        "glb_path": str(result.output_glb_path) if result.output_glb_path else None,
+        "tri_count": result.tri_count,
+        "duration_sec": round(result.duration_sec, 2),
+        "error": result.error,
+    }, indent=2)
+
+
+@mcp.tool()
 def check_system_health() -> str:
-    """Check Blender installation and Aptos GLM-5.3 AI provider connectivity."""
+    """Check Blender installation, Aptos GLM-5.3 AI provider connectivity, and the img3d neural service."""
     ai_h = _pipeline.provider.health()
     blender_ok = _pipeline.runner.is_available
+    img3d_status = "disabled"
+    try:
+        from .img3d import get_img3d_provider
+
+        provider = get_img3d_provider()
+        if provider is not None:
+            img3d_status = "available" if provider.is_available() else "unreachable"
+    except Exception:
+        img3d_status = "error"
     return json.dumps({
         "blender_available": blender_ok,
         "blender_path": _pipeline.runner.install.executable if blender_ok and _pipeline.runner.install else None,
@@ -112,6 +156,7 @@ def check_system_health() -> str:
         "ai_model": ai_h.model,
         "ai_endpoint": ai_h.endpoint,
         "tool_calling_supported": ai_h.tools_supported,
+        "img3d_service": img3d_status,
     }, indent=2)
 
 
