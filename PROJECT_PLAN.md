@@ -331,7 +331,7 @@ The GitHub repo contains **everything except** `tools/` (Blender, 1.3 GB),
 
 ```powershell
 # 1. Clone (private repo, owner account)
-git clone https://github.com/srideepalla/3d-builder.git
+git clone https://github.com/srideep47/3d-builder.git
 cd 3d-builder
 
 # 2. Python env (requires uv; https://docs.astral.sh/uv/)
