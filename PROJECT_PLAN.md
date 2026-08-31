@@ -6,6 +6,11 @@
 > (or human) picking this project up should read this document fully before
 > changing anything. Last updated: 2026-08-31, at the end of the M0–M3 + Web UI
 > phase, on the eve of transferring development to **Forge**.
+>
+> Companion doc: **`PLAN.md`** is the original Master Plan v2 (requirements,
+> full design rationale, ObjectSpec/harness/material/gate design, Appendix A
+> "delta vs the Gemini draft"). This file is the living status + handoff;
+> `PLAN.md` is the why. AGENTS.md is the quick operational summary.
 
 ---
 
@@ -32,8 +37,8 @@ back and gated against the requested dimensions before it is accepted.
 
 | Machine | Hardware | Role |
 |---|---|---|
-| **Scout** (current dev PC) | — | Where M0–M3 + Web UI were built and verified. |
-| **Forge** (target) | RTX 4080 Super, Ryzen 9 9950x, 64 GB RAM | Takes over development. Will host the **local Qwen2.5-VL** vision model and later the image-to-3D backends (TripoSR / TRELLIS). |
+| **Forge** (PC 1, target) | RTX 4080 Super (16 GB VRAM), Ryzen 9 9950X, 64 GB RAM, Win 11 | Primary dev machine + **local inference host**. Takes over development now. Will host the img3d neural service (TRELLIS / Hunyuan3D / TripoSR bake-off) and the **local Qwen2.5-VL** vision model. |
+| **Scout** (PC 2, current dev) | Ryzen 5 4600H, 40 GB DDR4, GTX 1650 Ti (4 GB VRAM), Win 11 | Where M0–M3 + Web UI were built and verified. Runs the full stack (Blender is CPU-bound); can call Forge's img3d service over LAN. Its 4 GB VRAM **cannot** run quality image-to-3D — never schedule it there. |
 | Phone client | — | **Deferred. Do not plan around it yet** (explicit owner decision). |
 
 The owner builds the vision model themselves (Qwen with VL): it will serve as
@@ -376,14 +381,26 @@ Integration points already prepared:
 4. Set `vision.mode` accordingly; `vision_probe` logic will then report
    vision supported and the UI dot turns green.
 
-### 13.2 Image-to-3D (organic parts)
+### 13.2 Image-to-3D (organic parts) — per PLAN.md §9
 
-- Bake-off on Forge: **TripoSR** (lighter) vs **TRELLIS** (higher quality),
-  served over HTTP (the original plan used WSL2; on Forge native Windows or
-  WSL2 both viable — `src/img3d/local_wsl.py` sketches the client).
-- Provider ABC in `src/img3d/provider.py`; organic meshes flow through the
-  cleanup chain (decimate → UV → `scale_to_size` → `center_origin`) and
-  **`scale_to_size` enforces measured dimensions**.
+- **Model bake-off at M4 on Forge's 4080 Super**, scored on the golden
+  benchmark set:
+  - **TRELLIS** — best geometry quality, textured output, fits 16 GB
+  - **Hunyuan3D-2.1** — strongest PBR textures, ~12 GB
+  - **TripoSR** — fastest/lightest (~6 GB), lower quality; low-VRAM fallback
+- **Service shape**: FastAPI on Forge (`/health`, `/generate` → job id,
+  `/result/<id>`), single-job GPU queue, model loaded once, weights cached
+  under `models/` (gitignored). The agent talks to it via httpx; Scout points
+  at Forge's LAN address. `config/hardware.yaml` selects the provider.
+- **Windows-native PyTorch/CUDA** preferred (both PCs are Win 11); WSL2 only
+  if a chosen model's dependencies force it (`src/img3d/local_wsl.py` sketches
+  that client). Heavy deps go in an optional `[img3d]` dependency group,
+  installed only on Forge.
+- Provider ABC in `src/img3d/provider.py`. **Neural mesh post-processing
+  (always)**: import → decimate to budget → smart UV →
+  `scale_to_exact_bounds(target_size)` → `center_origin` → material/bake.
+  Neural output is never shipped raw; `scale_to_size` enforces measured
+  dimensions.
 - Hybrid routing: spec parts with `method: image_to_3d` + `image_crop`
   references route to the provider; parametric parts unchanged.
 - MCP tool `image_to_3d` already declared.
@@ -430,6 +447,7 @@ tools/          (gitignored) portable Blender
 .venv/Scripts/python -m src.cli measure output/runs/<id>/final.glb
 .venv/Scripts/python -m src.cli render  output/runs/<id>/final.glb
 .venv/Scripts/python -m src.cli runs list | runs show <id>
+.venv/Scripts/python -m src.cli presets                  # 12 material presets
 .venv/Scripts/python -m src.cli mcp                      # stdio MCP server
 .venv/Scripts/python -m src.cli ui                       # web studio (:8137)
 .venv/Scripts/python -m pytest tests -q                  # 51 tests
