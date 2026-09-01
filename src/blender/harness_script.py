@@ -2186,6 +2186,35 @@ def _uv_diagnostics(objects, resolution=1024):
     densities = [i["texels_per_m"] for i in islands if i["texels_per_m"] > 0]
     density_ratio = (max(densities) / min(densities)) if len(densities) >= 2 and min(densities) > 0 else 1.0
 
+    # Per-object rollup (standing diagnostic): the whole-model density figure
+    # can look healthy while the single largest visible surface starves, and
+    # an object's atlas share only means something next to its share of world
+    # area (hidden geometry — internal caps, coincident faces — inflates the
+    # denominator and eats the atlas budget). Worst texel density first so
+    # the starving surface is the first entry read.
+    total_uv_area = sum(i["uv_area"] for i in islands)
+    total_world_area = sum(i["world_area_m2"] for i in islands)
+    per_object = {}
+    for isl in islands:
+        e = per_object.setdefault(isl["object"], {
+            "islands": 0, "uv_area": 0.0, "world_area_m2": 0.0,
+            "texels_per_m_island_min": None, "texels_per_m_island_max": 0.0})
+        e["islands"] += 1
+        e["uv_area"] += isl["uv_area"]
+        e["world_area_m2"] += isl["world_area_m2"]
+        d = isl["texels_per_m"]
+        if e["texels_per_m_island_min"] is None or d < e["texels_per_m_island_min"]:
+            e["texels_per_m_island_min"] = d
+        e["texels_per_m_island_max"] = max(e["texels_per_m_island_max"], d)
+    for e in per_object.values():
+        e["atlas_share"] = e["uv_area"] / total_uv_area if total_uv_area > 0 else 0.0
+        e["world_area_share"] = (e["world_area_m2"] / total_world_area
+                                 if total_world_area > 0 else 0.0)
+        e["texels_per_m"] = (resolution * math.sqrt(e["uv_area"] / e["world_area_m2"])
+                             if e["world_area_m2"] > 1e-12 else 0.0)
+    per_object = dict(sorted(per_object.items(),
+                             key=lambda kv: kv[1]["texels_per_m"]))
+
     return {
         "islands_total": len(islands),
         "uv_bounds": {"min": [minx, miny], "max": [maxx, maxy]},
@@ -2200,6 +2229,7 @@ def _uv_diagnostics(objects, resolution=1024):
             "max": max(densities) if densities else 0.0,
             "ratio": density_ratio,
         },
+        "texel_density_per_object": per_object,
         "islands": islands,
         "verified": bool(in_bounds and not overlaps),
     }

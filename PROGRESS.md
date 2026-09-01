@@ -783,3 +783,119 @@ templates/mattress.yaml` (4K bake for the real delivery); owner reviews
 the four queen renders at `output/finish/TEST-QUEEN/review/` and tunes
 `height_fraction`s in `templates/mattress.yaml` if the band proportions
 need adjusting (owner-tunable numbers, no code change).
+
+---
+
+## Session log — 2026-09-01 (round 2: reviewer follow-ups on the quilt)
+
+Reviewer follow-ups answered in order. **No quilt-path code was changed**
+(report-first, per instruction); the only code change is the standing
+per-object texel diagnostic (follow-up #3).
+
+### 1. THE ABSENT QUILT — cause identified: neither (a) nor (b)
+
+The reviewer's decision tree assumed texel starvation (a) or pattern
+collapse (b). It is **(c): the quilt is present, correctly oriented, and
+correctly wired end-to-end — but its rendered contrast is ~1 grey level**,
+and what the reviewer saw as "6 soft horizontal stripes" was never quilt
+content at all. Evidence chain (TEST-QUEEN, 1K before-state preserved at
+`output/finish/TEST-QUEEN/maps_1K/` + `review_1K_quilt_absent/`):
+
+- **(b) excluded:** the baked normal map's crown island carries the exact
+  diamond signature — FFT peaks at the corner (6 cycles along world Y,
+  8 along world X — `frequency_y=6`/`frequency=8` as designed, confirmed
+  by a mesh probe: island UV-U ↔ world Y at 0.096 UV/m, UV-V ↔ world X).
+  The second harmonic (16 along X) is present too. A one-axis collapse
+  cannot produce this.
+- **(a) excluded:** the quilt corner amplitude is **±0.032 G at 1K and
+  ±0.029 G at 4K** — resolution-independent. 25 texels/cell at 1K, ~98 at
+  4K. Re-baking at `--res 4096` did NOT make the quilt appear (render
+  quilt-corner power 2.5e9 at 4K vs 2.9e9 at 1K).
+- **amplitude chain:** analytic synthesis of the exact pattern
+  (`grid_diamond`, exponent 1.6, 17.8 mm over 254 mm cells) on the exact
+  island grid puts only **±0.057 G** in the fundamental — the 1.6
+  exponent concentrates the geometry into sharp crests whose energy sits
+  in harmonics. The bake delivers 55% of even that (±0.032) because the
+  HP vertex grid (~7 vertices per cell after subsurf-2) smooths the
+  crests. A ±0.03 G tilt is ~3.7° → ~±1.2 grey levels under the studio
+  sun rig — literally invisible next to the fabric weave.
+- **the "6 stripes" were basecolor aliasing:** the baked basecolor's crown
+  island is dominated by 8 soft bands along world Y (~190 mm period, ±16
+  grey levels). The source albedo is flat at that scale (row-mean ±2) —
+  the bands are a bake-time aliasing beat of the sub-texel fabric detail:
+  the knit weft (9.6 mm period) and the chevron print lines (4 mm thick)
+  against the crown's 10.2 mm bake texel. At 4K the fabric resolves (weft
+  at 3.8 texels/cycle now renders; the 190 mm beat band dropped to ~43%
+  amplitude and is no longer dominant) — and the chevron print itself is
+  now in the map, though still sub-pixel in a 1024 render.
+- **render path exonerated:** with basecolor flattened to grey, the
+  normal-map-only render's crown power is 31% concentrated at the quilt
+  diamond corner — the normal map renders correctly; the quilt is simply
+  ~13× fainter than the albedo stripes were.
+
+**Gemini verdicts (advisory, verbatim recorded):** BEFORE (1K renders):
+defect inspection PASS (tape ~1/35 H thin binding, bands coherent);
+render-vs-reference **4/10** — "Missing detailed top tufting and diamond
+quilting pattern". AFTER (4K renders): defect inspection PASS but flags
+"Minor dark edge artifacts along top perimeter boundary" (see #2);
+render-vs-reference still **4/10** — "Missing top diamond quilted
+pattern", "Flat top surface detailing". Independent confirmation that 4K
+did not fix the quilt — consistent with the amplitude diagnosis.
+
+**Fix direction (NOT implemented — for owner review):** raise the quilt's
+fundamental amplitude — lower `exponent` (1.6 → ~1.0 puts the energy back
+in the fundamental), and/or raise `amplitude_fraction` (0.07), and/or add
+HP subdivision for the crown (`subdivision_levels` in the part detail).
+Separately, the basecolor aliasing says the fabric detail needs to be
+pre-filtered to the bake texel size (or the basecolor baked at higher
+resolution than the geometric maps). 1K stays the iteration default.
+
+### 2. Residual perimeter speckles — NOT the old bleed
+
+Mechanical figures: smallest island-to-island gap is exactly the packer's
+0.01 UV margin (10.2 px at 1K / 41 px at 4K) vs the bake margin max(4,
+res//128) = 8 px at 1K / 32 px at 4K — margins stay under the gaps at
+both resolutions; islands sit 10.2 px off the atlas border; the maps'
+crown rim content is mild (AO 227-244 vs 255 inner, basecolor 224 vs 231)
+— nothing black to bleed.
+
+The speckles (210-380 dark blobs hugging the silhouette, 3-15 px inside)
+**grow with render resolution**: 441 dark px per 1000 rim px at a 1024
+render vs 3775 at 4096 — the opposite of mip-bleed behaviour. They are
+grazing-angle shading of the micro-weave normal detail on the dome's
+near-vertical rim (normal tilts blow up as cos θ → 0), deepened by the
+rim's AO. Same at 1K and 4K bakes (proportional margins). New
+phenomenon, not the old root cause; also independently flagged by Gemini
+("dark edge artifacts along top perimeter"). Fix direction if wanted:
+suppress the detail-normal blend near silhouette grazing angles, or
+soften the weave bump strength — cosmetic, owner's call.
+
+### 3. Standing per-object texel-density diagnostic — implemented
+
+`_uv_diagnostics` now emits `texel_density_per_object` (worst density
+first): per object — islands, uv_area, atlas_share, world_area_m2,
+world_area_share, texels_per_m (area-weighted) plus island min/max. The
+whole-model ratio can read a healthy 1.000 while a surface starves;
+now the per-object line shows it directly. Pinned by
+`test_chiral_uv_diagnostics` (shares sum to 1, per-object figures match
+the island list, worst-first ordering). Suite: **241 passed**.
+
+Queen figures (reference resolution 1024 — the 1K iteration default):
+every object 96.5 tex/m, ratio 1.000; crown 2 islands, 12.17% atlas
+share, 12.17% world share, 24.5 texels per 254 mm quilt cell. The
+mattress's hidden band caps inflate total world area to 48.7 m² (~8 m²
+visible) — the atlas share is spent proportionally, so nothing starves
+on texels; the quilt starves on amplitude (see #1).
+
+### Operational finding — 4K bake timeout
+
+`bake_maps` inherits the generic 300 s op timeout; a 4096² mattress bake
+takes ~19 min on Scout's CPU. The one-off diagnostic used a
+`_LongBakeRunner` subclass (`output/run_4k_diagnostic.py`, gitignored).
+**If 4K becomes a delivery path, the bake timeout must become a real
+parameter of `finish_delivery`** — not fixed in this round (1K stays the
+default; run_4k_diagnostic.py is the workaround).
+
+**Committed** (wip/defect-fixes, no push): per-object diagnostic + test.
+Quilt amplitude/aliasing fixes await owner/reviewer decision on the
+direction above. MAYA00053153 dims still blocked on the owner (rule 9).
