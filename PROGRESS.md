@@ -8,6 +8,23 @@
 > task's exit criteria before writing code. Context is finite: T3 is expected
 > to span sessions.
 
+## ⛔ OPEN OWNER QUESTIONS (HANDOFF_GLM §7 — keep visible until answered)
+
+1. **MAYA00053153 real dimensions** — L × W × H with explicit unit. Blocks
+   every deliverable package (rule 9; the refusal machinery is active and
+   tested).
+2. Is `.spp` mandatory, or are baked PNG sets acceptable?
+3. Simple-tier polycount ceiling (Medium = 200,000; we use 50k provisional).
+4. FBX axis/unit convention the client's validator expects.
+5. Polycount semantics: triangles or faces? (we use triangle-equivalent,
+   the conservative reading)
+6. File-size caps: decimal MB or binary MiB? (we enforce decimal, stricter)
+7. Are the vertical side straps carry handles, and should they be modelled?
+
+Plus one from the visual review: **replace the NISIEN label placeholder**
+`input/decals/MAYA00053153/albedo.png` with the photo crop from §5.3
+(portrait, ~0.7 aspect) — the compile picks it up automatically.
+
 ---
 
 ## T0 — Clean the tree ✅ (2026-09-01)
@@ -387,8 +404,12 @@ the map set is hand-tuned yet). The USDZ still exports from the LP GLB
 > stand-in numbers (12 × 12 × 65 IN, `dims_placeholder: true`). The full
 > chain runs and produces structural review renders, but **NO deliverable
 > package is emitted** — dimensions are never inferred and a standard
-> queen size is never guessed (rule 9). Evidence:
-> `output/blocked/MAYA00053153/qa_report.json`. **To unblock:** put the
+> queen size is never guessed (rule 9). Evidence (two different places —
+> do not conflate them): refusal report at
+> `output/blocked/MAYA00053153/qa_report.json`; review renders at
+> `output/finish/MAYA00053153/review/MAYA00053153_{front,side,top,iso}.png`
+> (HANDOFF_GLM correction, 2026-09-01: the renders are NOT in
+> `output/blocked/`). **To unblock:** put the
 > real L × W × H (explicit unit) into `input/jobs/MAYA00053153.yaml`,
 > delete the `dims_placeholder` line, re-run
 > `python -m src.cli package --job input/jobs/MAYA00053153.yaml --template templates/mattress.yaml`.
@@ -658,3 +679,107 @@ PASS with fresh Blender mesh facts.
   vision support, not the VLM provider (pre-existing behaviour, left
   alone)
 
+
+---
+
+## Session 2026-09-01 (afternoon, post-machine-move) — defect fixes verified via the Gemini visual gate ✅
+
+> HANDOFF_GLM.md order of work executed on Scout (Ryzen 5 4600H, GTX 1650
+> Ti 4 GB, CPU-bound Blender). Branch: `wip/defect-fixes` (the in-flight
+> snapshot survived on a branch + origin; the working-tree copy was lost
+> in the move — nothing needed redoing). All work committed there; main
+> untouched at `75e847f`; **nothing pushed** (owner handles pushes).
+
+**Environment confirmed (step 1):**
+- `python -m src.cli health` → green (Blender 4.5.13 portable found, AI
+  endpoint reachable). `THREED_VLM_API_KEY` present at Windows User scope.
+- `python -m pytest tests -q` on main → **238 passed** (228 s — ~2× the
+  old machine's wall time; CPU-bound, expected on Scout).
+
+**In-flight defect fixes recovered and completed (step 2):**
+- The 7-file WIP survived as commit `b874a6a` on `wip/defect-fixes`
+  ("UNTESTED SNAPSHOT"). First full suite against it: 239 passed,
+  1 failed — `test_chiral_uv_diagnostics` expected 6 islands, got 12.
+- **The WIP's test expectation was wrong, not the code**: the chiral
+  fixture is TWO boxes × six single-quad sides — no coplanar adjacency
+  exists in it, so 12 islands (one per face) is the correct count. The
+  "2 coplanar quads merge" premise described a fixture that doesn't exist.
+  Restored the expectation to 12 with a corrected comment; the REAL merge
+  regression is now pinned where merging happens — the mattress.
+- **Empirical probe** (`scripts/probe_uv_islands.py`, keeper):
+  `prepare_delivery_scene` on the compiled mattress → 2118 faces collapse
+  to **84 islands** at MAYA dims (**80** at queen), pack_scale **0.75**
+  (was 0.3164), texel-density ratio 1.0000, 0 overlaps. The vertex-keyed
+  `_uv_face_groups` matching WORKS; the old one-corner-per-face match
+  reported 2118 one-face islands.
+- New/updated tests: `test_uv_contiguous_faces_merge_into_few_islands`
+  (mattress, 84 islands pinned), chiral expectation 12, refusal stub
+  updated to the real observed values (80 / 0.75).
+- **Suite: 241 passed** (baseline 238 + tape-scale pin + tape-section pin
+  + island-merge pin). Committed `cfd937a`.
+
+**Gemini visual gate switched on and CALIBRATED (step 3):**
+- `config/ai.yaml`: `vision.vlm.provider: gemini`, model pinned
+  `gemini-3.6-flash` (local Qwen-VL path stays available for Forge).
+  Provider constructs, key validates against the live endpoint.
+- **The 12 client reference photos were found in `Temp/`** (repo root;
+  the owner dropped them in during this session — the old
+  `D:\Work\Temp\Test Images` path does not exist on Scout). Describe-mode
+  over all 12 returns a full structured reading that agrees with
+  GLM_BRIEF §5 (pillowtop quilt, mesh band, velvet band stack, black
+  perimeter piping, NISIEN label, vertical straps). Durable copy made at
+  `input/references/MAYA00053153/`; both job cards' `reference_dir`
+  updated to point there.
+- New evidence collector `scripts/run_visual_gate.py` (inspection mode /
+  describe mode / full verdict with `--refs`; prints raw responses
+  verbatim; advisory only — never gates).
+
+**DEFECT 1 + DEFECT 2 fixed and proven with before/after gate evidence
+(step 4)** — same prompt, same view set, only the code changed:
+
+| | BEFORE (main `75e847f`, renders preserved at `output/finish/MAYA00053153/review_BEFORE_defects/`) | AFTER (`cfd937a`) |
+|---|---|---|
+| tape_edges | "protrude heavily as thick collar flanges… roughly 4-5% of total height" | "thin black binding strips hug the side surface snugly… roughly 1% of total height" |
+| band_textures | "broken, chaotic black-and-white pixelated blotches and static" | "coherent fabrics… white knit patterns, mesh, dark charcoal velvet stripes" |
+| other_issues | UV corruption, pinched apex, floating rings | none |
+| verdict | **FAIL** | **PASS** |
+
+(Gemini's fractions are accurate: old thickness was exactly 4.5% of H,
+new is 0.83%.) Queen-proportioned inspection also PASS. All three chain
+runs REFUSED as designed (placeholder dims — exit 2, no package emitted).
+
+**Advisory render-vs-reference verdict (queen renders vs the 12 refs):**
+score **4/10**, `matches_reference: false` — "captures the general side
+band layout" with three concrete issues, recorded verbatim:
+1. top lacks distinct tufting/pillowtop depth — flat, blurry wavy
+   textures at the 1K iteration bake
+2. texture distortion / black artifacting along tape edges and corners
+3. side pattern + branding label lack crispness
+Analysis (not yet fixed — owner review + next iteration): the tape strip
+is ~13.7 mm on a ~2 m product, so at 1K the area-proportional atlas gives
+it only a handful of texel rows (thin-feature texel starvation; the 4K
+delivery bake is 4× better); the quilt reads through the normal map only
+(detail-normal blend, 1K); the label is the known procedural placeholder.
+The gate is advisory and per GLM_BRIEF §8 does not judge quilt pitch —
+these are quality-tuning items, not the gross defects above.
+
+**Other findings this session:**
+- `describe_reference_images` truncated mid-sentence at max_tokens 1600
+  on the real 12-photo set (gemini-3.6-flash thinking budget) — budgets
+  bumped 1600→4096 (describe) and 1200→3072 (verdict) in `src/ai/vlm.py`.
+- Chain wall time on Scout: ~2-4 min per full mattress run at 1024²
+  (build → atlas → 5-map bake → decimate → FBX → 4 renders) — 1K
+  iteration bakes are comfortably cheap on CPU.
+
+**Not verified / still blocked:**
+- All seven owner questions at the top of this file (dims first).
+- No MAYA00053153 deliverable package emitted (rule 9 — correct).
+- The queen verdict issues above are recorded, not fixed.
+
+**Next:** owner supplies dimensions → replace in
+`input/jobs/MAYA00053153.yaml`, delete `dims_placeholder`, re-run
+`python -m src.cli package --job input/jobs/MAYA00053153.yaml --template
+templates/mattress.yaml` (4K bake for the real delivery); owner reviews
+the four queen renders at `output/finish/TEST-QUEEN/review/` and tunes
+`height_fraction`s in `templates/mattress.yaml` if the band proportions
+need adjusting (owner-tunable numbers, no code change).

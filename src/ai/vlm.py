@@ -115,7 +115,11 @@ class VisionProvider(abc.ABC):
     )
 
     def describe_reference_images(self, image_paths: list[str | Path]) -> str:
-        return self.chat_vision(self.DESCRIBE_PROMPT, image_paths, max_tokens=1600)
+        # 4096, not 1600: on a real 12-photo reference set the describe call
+        # truncated mid-sentence at 1600 (gemini-3.6-flash is a thinking
+        # model — thoughtsTokenCount eats the budget before content, the
+        # same lesson as GLM-5.3's reasoning tokens; HANDOFF_GLM §3 run).
+        return self.chat_vision(self.DESCRIBE_PROMPT, image_paths, max_tokens=4096)
 
     # ── Integration point 2: advisory visual gate ──────────────────────────
 
@@ -153,7 +157,7 @@ class VisionProvider(abc.ABC):
             )
             if model_summary:
                 text += f"\nGenerated model summary: {model_summary}"
-            raw = self.chat_vision(text, all_paths, max_tokens=1200)
+            raw = self.chat_vision(text, all_paths, max_tokens=3072)
             parsed = extract_json_from_text(raw) or self._loose_verdict(raw)
             if not parsed:
                 return {"available": True, "parsed": False, "raw": raw[:800]}

@@ -64,8 +64,8 @@ def _collect(paths: list[str]) -> list[Path]:
     for p in paths:
         path = Path(p)
         if path.is_dir():
-            out.extend(sorted(path.glob("*.png")))
-            out.extend(sorted(path.glob("*.jpg")))
+            for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
+                out.extend(sorted(path.glob(ext)))
         else:
             out.append(path)
     return [p for p in out if p.exists()]
