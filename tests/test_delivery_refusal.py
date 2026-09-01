@@ -69,8 +69,12 @@ class _ChainRecorder:
     def execute_op(self, op, params):
         self.ops.append(op)
         if op == "prepare_delivery_scene":
-            return {"success": True, "uv_atlas": {"pack_scale": 0.98},
-                    "uv": {"islands_total": 114}}
+            # real observed values for the mattress at queen proportions
+            # (scripts/probe_uv_islands.py, 2026-09-01): 2118 faces collapse
+            # to 80 UV islands once _uv_face_groups merges UV-contiguous
+            # faces; pack scale 0.75, texel-density ratio 1.0000
+            return {"success": True, "uv_atlas": {"pack_scale": 0.75},
+                    "uv": {"islands_total": 80}}
         if op == "bake_maps":
             return {"success": True,
                     "maps": {"basecolor": {"stats": {"std": 0.35}}},

@@ -1,0 +1,25 @@
+# input/jobs/TEST-QUEEN.yaml — TEST CARD ONLY. Not a client job.
+#
+# Created at the owner's explicit request ("for now for test use proper
+# mattress dimensions you feel which are right") so the template can be
+# reviewed at believable proportions while the real MAYA00053153
+# dimensions are still outstanding.
+#
+# These are a US QUEEN pillowtop hybrid: 80 x 60 x 12 IN. They are a
+# REASONABLE STAND-IN, not a measurement, and not an inference about the
+# client's product. `dims_placeholder: true` stays set, so package
+# emission is still refused — this card can never become a deliverable.
+#
+# The real card is input/jobs/MAYA00053153.yaml and is untouched.
+job_code: TEST-QUEEN
+dims:
+  length: 80
+  width: 60
+  height: 12
+  unit: IN
+dims_placeholder: true
+complexity: simple
+orientation: floor
+product_class: mattress
+part_scope: "mattress only — no bed frame, no pillows, no bedding (GLM_BRIEF §5.1)"
+reference_dir: "D:/Work/Temp/Test Images"

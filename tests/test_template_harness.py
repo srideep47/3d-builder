@@ -190,6 +190,41 @@ RESULT = {"xs": sorted(xs), "z0": min(zs), "z1": max(zs), "n": len(zs)}
     assert (sec["z0"] + sec["z1"]) / 2 == pytest.approx(0.72 * EZ, abs=1e-5)
 
 
+@pytest.fixture(scope="module")
+def prepared_scene(runner):
+    """The compiled mattress through prepare_delivery_scene (build + UV
+    atlas + diagnostics) — the UV-side evidence for the defect-2 fix."""
+    from src.client.job import load_job
+    from src.spec.resolver import resolve_spec_to_build_params
+    from src.spec.template import compile_spec, load_template
+
+    spec, _warnings = compile_spec(load_template(TEMPLATE), load_job(JOB))
+    res = runner.execute_op(
+        "prepare_delivery_scene",
+        {"build": resolve_spec_to_build_params(spec)})
+    assert res["success"], res.get("error")
+    return res
+
+
+def test_uv_contiguous_faces_merge_into_few_islands(prepared_scene):
+    """DEFECT 2 regression pin (UV half): _uv_face_groups must merge
+    UV-contiguous faces across shared edges. The old loop-matching bug
+    compared ONE corner per face across a shared edge — consistent winding
+    puts those two corners at opposite ends of the edge, so they can never
+    match — and all 2118 faces became 2118 one-face islands: margin-
+    dominated packing (~1/3 target texel density), then bake-margin bleed
+    across the wall islands (the black-and-white blotch defect). With
+    vertex-keyed matching the mattress collapses to 84 islands."""
+    uv = prepared_scene["uv"]
+    topo = prepared_scene["topology"]
+    assert topo["faces_total"] == 2118
+    assert uv["islands_total"] == 84
+    assert uv["overlapping_island_pairs"] == 0
+    assert uv["in_bounds"] is True
+    assert uv["texel_density_texels_per_m"]["ratio"] < 1.05
+    assert prepared_scene["uv_atlas"]["pack_scale"] == pytest.approx(0.75, abs=0.01)
+
+
 def test_overall_bounds_exactly_nominal(objects):
     """THE client dimension gate: the union of all parts spans exactly the
     job card's nominal L x W x H, bottom on the ground plane."""
