@@ -1,23 +1,36 @@
-"""Local vision-model client — the Qwen2.5-VL plug point (PROJECT_PLAN §13.1).
+"""Vision providers — the analyst eye and the advisory visual gate
+(PROJECT_PLAN §13.1).
 
-The owner builds and serves the vision model (e.g. Qwen2.5-VL via vLLM,
-OpenAI-compatible) on Forge's 4080 Super. This client talks to it over HTTP
-and provides the two integration points:
+Two wire protocols live behind one ``VisionProvider`` ABC (T5):
 
-1. Reference analysis  — describe uploaded reference images so the text-only
-   GLM-5.3 analyst can ground its ObjectSpec in them.
-2. Visual gate         — advisory comparison of the studio renders against
-   the reference images; the verdict lands in the run manifest.
+- ``OpenAICompatibleVisionProvider`` (``LocalVLMClient``): a local Qwen2.5-VL
+  served via vLLM on Forge's 4080 Super — ``POST /chat/completions`` with
+  Bearer auth and ``image_url`` content parts.
+- ``GeminiVisionProvider``: Google Generative Language **v1beta** —
+  ``POST /v1beta/models/<model>:generateContent`` with the
+  ``x-goog-api-key`` header and a ``contents``/``parts`` body. This is NOT
+  an OpenAI-shaped API, hence a second provider class rather than a
+  modification of the first.
 
-Everything is config-gated (config/ai.yaml → vision.vlm.base_url) and fails
-soft: an absent or unreachable VLM leaves the pipeline fully functional.
+Selection is config-driven (``config/ai.yaml`` → ``vision.vlm.provider``:
+``local`` | ``gemini``). The API key NEVER lives in config or code: it is
+read from the environment (``api_key_env``, default ``THREED_VLM_API_KEY``;
+the Gemini provider also falls back to ``GEMINI_API_KEY``, which holds the
+same value). Gemini models must be PINNED versions (``gemini-3.6-flash``),
+never ``-latest`` aliases.
+
+Everything fails soft: an absent, misconfigured, or unreachable provider
+leaves the pipeline fully functional.
 """
 
 from __future__ import annotations
 
+import abc
 import base64
 import json
+import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -33,35 +46,28 @@ _IMAGE_MIME = {
     "webp": "webp",
 }
 
+# Keys are read from the environment only — never config files, never code.
+DEFAULT_API_KEY_ENV = "THREED_VLM_API_KEY"
+GEMINI_API_KEY_ENV = "GEMINI_API_KEY"  # holds the same value (owner setup)
+GEMINI_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com"
 
-def _image_content_part(path: Path) -> dict[str, Any]:
+
+def _image_b64(path: Path) -> tuple[str, str]:
+    """(mime_subtype, base64 payload) for an image file."""
     ext = path.suffix.lower().lstrip(".") or "png"
     mime = _IMAGE_MIME.get(ext, "png")
     b64 = base64.b64encode(path.read_bytes()).decode("ascii")
-    return {"type": "image_url", "image_url": {"url": f"data:image/{mime};base64,{b64}"}}
+    return mime, b64
 
 
-class LocalVLMClient:
-    """OpenAI-compatible chat with image support against the local VLM."""
+class VisionProvider(abc.ABC):
+    """One vision-chat wire protocol behind the two integration points.
 
-    def __init__(
-        self,
-        base_url: str | None = None,
-        model: str | None = None,
-        api_key: str | None = None,
-        timeout_sec: float | None = None,
-    ):
-        cfg = self._load_vision_config()
-        vlm_cfg = cfg.get("vlm", {}) or {}
-        self.base_url = (base_url or vlm_cfg.get("base_url") or "").rstrip("/")
-        self.model = model or vlm_cfg.get("model") or ""
-        self.api_key = api_key or vlm_cfg.get("_api_key")  # resolved below
-        self.timeout_sec = float(timeout_sec or vlm_cfg.get("timeout_sec", 120))
-        if not self.api_key:
-            import os
-
-            self.api_key = os.environ.get(vlm_cfg.get("api_key_env") or "THREED_VLM_API_KEY") or "sk-local"
-        self._available: bool | None = None
+    Subclasses own construction/config and the three abstract wire methods;
+    the concrete integration points below (reference description for the
+    text-only analyst, advisory render-vs-reference verdict) are shared
+    because they only speak ``chat_vision``.
+    """
 
     @staticmethod
     def _load_vision_config() -> dict[str, Any]:
@@ -75,29 +81,15 @@ class LocalVLMClient:
             pass
         return {}
 
+    @abc.abstractmethod
     def is_configured(self) -> bool:
-        return bool(self.base_url and self.model)
+        """Config is present (endpoint + model [+ key]). No network."""
 
+    @abc.abstractmethod
     def is_available(self, recheck: bool = False) -> bool:
-        """Cached liveness probe (GET /models)."""
-        if not self.is_configured():
-            return False
-        if self._available is not None and not recheck:
-            return self._available
-        try:
-            r = httpx.get(
-                f"{self.base_url}/models",
-                headers=self._headers(),
-                timeout=5.0,
-            )
-            self._available = r.status_code == 200
-        except Exception:
-            self._available = False
-        return self._available
+        """Cached liveness probe."""
 
-    def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-
+    @abc.abstractmethod
     def chat_vision(
         self,
         text: str,
@@ -107,30 +99,6 @@ class LocalVLMClient:
         temperature: float = 0.2,
     ) -> str:
         """One vision chat round. Raises on HTTP errors; callers fail soft."""
-        if not self.is_available():
-            raise RuntimeError("local VLM not available")
-        content: list[dict[str, Any]] = [{"type": "text", "text": text}]
-        for p in image_paths:
-            content.append(_image_content_part(Path(p)))
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": content})
-
-        resp = httpx.post(
-            f"{self.base_url}/chat/completions",
-            headers=self._headers(),
-            json={
-                "model": self.model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            },
-            timeout=self.timeout_sec,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
 
     # ── Integration point 1: reference analysis for the analyst ────────────
 
@@ -171,7 +139,7 @@ class LocalVLMClient:
         """Compare renders against references. Returns a verdict dict:
         {available, matches_reference, score, issues, summary}."""
         if not self.is_available():
-            return {"available": False, "reason": "local VLM not available"}
+            return {"available": False, "reason": "vision provider not available"}
         try:
             all_paths = [str(p) for p in reference_paths] + [
                 render_paths[k]
@@ -211,11 +179,211 @@ class LocalVLMClient:
             return None
 
 
-def get_local_vlm() -> LocalVLMClient | None:
-    """The configured local VLM, or None when vision.vlm is not set up.
-    Never raises — an unreachable VLM is reported via is_available()."""
+class OpenAICompatibleVisionProvider(VisionProvider):
+    """OpenAI-compatible chat with image support (local vLLM/Qwen2.5-VL)."""
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+        timeout_sec: float | None = None,
+    ):
+        cfg = self._load_vision_config()
+        vlm_cfg = cfg.get("vlm", {}) or {}
+        self.base_url = (base_url or vlm_cfg.get("base_url") or "").rstrip("/")
+        self.model = model or vlm_cfg.get("model") or ""
+        self.api_key = api_key or vlm_cfg.get("_api_key")  # resolved below
+        self.timeout_sec = float(timeout_sec or vlm_cfg.get("timeout_sec", 120))
+        if not self.api_key:
+            self.api_key = (
+                os.environ.get(vlm_cfg.get("api_key_env") or DEFAULT_API_KEY_ENV)
+                or "sk-local"
+            )
+        self._available: bool | None = None
+
+    def is_configured(self) -> bool:
+        return bool(self.base_url and self.model)
+
+    def is_available(self, recheck: bool = False) -> bool:
+        """Cached liveness probe (GET /models)."""
+        if not self.is_configured():
+            return False
+        if self._available is not None and not recheck:
+            return self._available
+        try:
+            r = httpx.get(
+                f"{self.base_url}/models",
+                headers=self._headers(),
+                timeout=5.0,
+            )
+            self._available = r.status_code == 200
+        except Exception:
+            self._available = False
+        return self._available
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+
+    def chat_vision(
+        self,
+        text: str,
+        image_paths: list[str | Path],
+        system: str | None = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.2,
+    ) -> str:
+        if not self.is_available():
+            raise RuntimeError("local VLM not available")
+        content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+        for p in image_paths:
+            mime, b64 = _image_b64(Path(p))
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/{mime};base64,{b64}"},
+            })
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": content})
+
+        resp = httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers=self._headers(),
+            json={
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+            timeout=self.timeout_sec,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+
+
+# Historical name (agent loop, tests): the local OpenAI-compatible provider.
+LocalVLMClient = OpenAICompatibleVisionProvider
+
+
+class GeminiVisionProvider(VisionProvider):
+    """Google Generative Language v1beta — a deliberately SECOND wire
+    protocol (``:generateContent``, ``x-goog-api-key``, ``contents``/``parts``),
+    not a modification of the OpenAI-shaped one.
+
+    The API key comes from the environment ONLY: ``api_key_env`` (default
+    ``THREED_VLM_API_KEY``), falling back to ``GEMINI_API_KEY`` (same value
+    in the owner's setup). The model must be a PINNED version (e.g.
+    ``gemini-3.6-flash``) — ``-latest`` aliases are rejected at construction
+    so a silent model drift can never pass review.
+    """
+
+    def __init__(
+        self,
+        model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout_sec: float | None = None,
+    ):
+        cfg = self._load_vision_config()
+        vlm_cfg = cfg.get("vlm", {}) or {}
+        self.model = model or vlm_cfg.get("model") or ""
+        if self.model.endswith("-latest"):
+            raise ValueError(
+                f"gemini model {self.model!r} is a floating alias — pin a "
+                "specific version (e.g. gemini-3.6-flash) so results are "
+                "reproducible"
+            )
+        self.base_url = (
+            base_url or vlm_cfg.get("base_url") or GEMINI_DEFAULT_BASE_URL
+        ).rstrip("/")
+        self.api_key = api_key or vlm_cfg.get("_api_key") or (
+            os.environ.get(vlm_cfg.get("api_key_env") or DEFAULT_API_KEY_ENV)
+            or os.environ.get(GEMINI_API_KEY_ENV)
+        )
+        self.timeout_sec = float(timeout_sec or vlm_cfg.get("timeout_sec", 120))
+        self._available: bool | None = None
+
+    def is_configured(self) -> bool:
+        return bool(self.model and self.api_key)
+
+    def is_available(self, recheck: bool = False) -> bool:
+        """Cached liveness probe (GET /v1beta/models with the API key)."""
+        if not self.is_configured():
+            return False
+        if self._available is not None and not recheck:
+            return self._available
+        try:
+            r = httpx.get(f"{self.base_url}/v1beta/models",
+                          headers=self._headers(), timeout=10.0)
+            self._available = r.status_code == 200
+        except Exception:
+            self._available = False
+        return self._available
+
+    def _headers(self) -> dict[str, str]:
+        # v1beta auth is the x-goog-api-key header — NOT a Bearer token.
+        return {"x-goog-api-key": self.api_key or "", "Content-Type": "application/json"}
+
+    def chat_vision(
+        self,
+        text: str,
+        image_paths: list[str | Path],
+        system: str | None = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.2,
+    ) -> str:
+        if not self.is_available():
+            raise RuntimeError("gemini vision provider not available")
+        parts: list[dict[str, Any]] = [{"text": text}]
+        for p in image_paths:
+            mime, b64 = _image_b64(Path(p))
+            parts.append({"inline_data": {"mime_type": f"image/{mime}", "data": b64}})
+        body: dict[str, Any] = {
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {
+                "maxOutputTokens": max_tokens,
+                "temperature": temperature,
+            },
+        }
+        if system:
+            body["systemInstruction"] = {"parts": [{"text": system}]}
+
+        resp = httpx.post(
+            f"{self.base_url}/v1beta/models/{self.model}:generateContent",
+            headers=self._headers(),
+            json=body,
+            timeout=self.timeout_sec,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        # shape: candidates[0].content.parts[*].text (joined across parts)
+        candidates = data.get("candidates") or []
+        if not candidates:
+            raise RuntimeError(f"gemini response had no candidates: {str(data)[:300]}")
+        content = (candidates[0].get("content") or {})
+        return "".join(
+            p.get("text") or "" for p in (content.get("parts") or [])
+        )
+
+
+def get_vision_provider() -> VisionProvider | None:
+    """The configured vision provider, or None when vision.vlm is not set
+    up. Never raises — an unreachable provider is reported via
+    is_available(); a broken config is reported to stderr and degrades to
+    no vision (fail soft)."""
     try:
-        client = LocalVLMClient()
+        vlm_cfg = VisionProvider._load_vision_config().get("vlm", {}) or {}
+        provider = str(vlm_cfg.get("provider") or "local").strip().lower()
+        cls = GeminiVisionProvider if provider == "gemini" else OpenAICompatibleVisionProvider
+        client = cls()
         return client if client.is_configured() else None
-    except Exception:
+    except Exception as e:
+        print(f"[vision] provider construction failed (continuing without "
+              f"vision): {e}", file=sys.stderr)
         return None
+
+
+# Back-compat alias: the agent loop and older call sites used this name.
+get_local_vlm = get_vision_provider

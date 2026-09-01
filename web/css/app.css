@@ -432,3 +432,21 @@ select { cursor: pointer; appearance: none; background-image: linear-gradient(45
   .tab-pane { position: relative; inset: auto; }
   .tab-pane.active { position: relative; }
 }
+
+/* ── delivery view (T5): job intake + compliance panel ─────────────────── */
+
+#view-delivery { flex-direction: row; }
+#view-delivery .output-panel { flex-direction: column; overflow-y: auto; }
+.package-detail { padding: 14px 18px; overflow-y: auto; flex: 1; }
+
+.dims-row { display: flex; gap: 8px; }
+.dims-row input { flex: 1; min-width: 0; }
+.dims-row select { width: 64px; }
+
+.checkbox-field { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+.checkbox-field input { margin-top: 3px; }
+.checkbox-field.danger { outline: 1px solid var(--red); border-radius: 6px; padding: 8px; }
+
+.refusal-box { border: 1px solid var(--red); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; }
+.refusal-box.warn { border-color: var(--yellow, #d9a03f); }
+.refusal-box p { margin: 6px 0 0; font-size: 12.5px; }

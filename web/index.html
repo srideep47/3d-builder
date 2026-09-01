@@ -30,9 +30,12 @@
         <button class="nav-item active" data-view="build">
           <span class="nav-ico">▦</span> Build
         </button>
-        <button class="nav-item" data-view="runs">
-          <span class="nav-ico">≡</span> Runs <span id="runs-count" class="nav-badge"></span>
-        </button>
+      <button class="nav-item" data-view="runs">
+        <span class="nav-ico">≡</span> Runs <span id="runs-count" class="nav-badge"></span>
+      </button>
+      <button class="nav-item" data-view="delivery">
+        <span class="nav-ico">▤</span> Delivery
+      </button>
         <button class="nav-item" data-view="system">
           <span class="nav-ico">⚙</span> System
         </button>
@@ -184,6 +187,92 @@
               </tr></thead>
               <tbody id="runs-tbody"></tbody>
             </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════════ DELIVERY VIEW (job intake + compliance) ══════════════ -->
+      <section id="view-delivery" class="view hidden">
+        <div class="input-col">
+          <div class="panel">
+            <div class="panel-header"><h2>Job Intake</h2></div>
+            <div class="form-body">
+              <label class="field">
+                <span class="field-label">Job code</span>
+                <input id="dj-code" type="text" placeholder="e.g. MAYA00053153" autocomplete="off" spellcheck="false">
+              </label>
+              <label class="field">
+                <span class="field-label">Product template</span>
+                <select id="dj-template"></select>
+              </label>
+              <div class="field">
+                <span class="field-label">Dimensions <em>— owner-supplied, exact, never inferred</em></span>
+                <div class="dims-row">
+                  <input id="dj-l" type="number" step="any" min="0" placeholder="L">
+                  <input id="dj-w" type="number" step="any" min="0" placeholder="W">
+                  <input id="dj-h" type="number" step="any" min="0" placeholder="H">
+                  <select id="dj-unit">
+                    <option value="in" selected>in</option>
+                    <option value="m">m</option>
+                    <option value="cm">cm</option>
+                    <option value="mm">mm</option>
+                    <option value="ft">ft</option>
+                  </select>
+                </div>
+              </div>
+              <label class="field checkbox-field">
+                <input type="checkbox" id="dj-placeholder">
+                <span class="field-label">Dims are stand-ins, not owner-supplied — <strong>delivery will be REFUSED</strong> (pipeline runs for structural review only)</span>
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span class="field-label">Complexity</span>
+                  <select id="dj-complexity"><option>simple</option><option>medium</option><option>complex</option></select>
+                </label>
+                <label class="field">
+                  <span class="field-label">Orientation</span>
+                  <select id="dj-orientation"><option>floor</option><option>wall</option><option>ceiling</option><option>tabletop</option></select>
+                </label>
+              </div>
+              <label class="field">
+                <span class="field-label">Part scope</span>
+                <input id="dj-scope" type="text" placeholder="e.g. mattress only — no frame, no pillows">
+              </label>
+              <label class="field">
+                <span class="field-label">Reference dir <em>— optional, client photos</em></span>
+                <input id="dj-refdir" type="text" placeholder="path to reference photos" spellcheck="false">
+              </label>
+            </div>
+            <div class="form-actions">
+              <button id="btn-create-job" class="btn primary lg">Save job card</button>
+              <span id="job-note" class="build-note"></span>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header"><h2>Job Cards</h2><button id="btn-refresh-jobs" class="btn ghost sm">↻</button></div>
+            <div class="table-wrap">
+              <table class="runs-table">
+                <thead><tr><th>Job</th><th>Dims</th><th>Class</th></tr></thead>
+                <tbody id="jobs-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="output-col">
+          <div class="panel output-panel">
+            <div class="panel-header">
+              <h2>Compliance</h2>
+              <button id="btn-refresh-packages" class="btn ghost sm">↻ Refresh</button>
+            </div>
+            <div class="table-wrap">
+              <table class="runs-table">
+                <thead><tr><th>Package</th><th>Kind</th><th>Gates</th><th></th></tr></thead>
+                <tbody id="packages-tbody"></tbody>
+              </table>
+            </div>
+            <div id="package-detail" class="package-detail"></div>
           </div>
         </div>
       </section>

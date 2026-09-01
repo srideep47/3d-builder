@@ -71,6 +71,7 @@ async function boot() {
   initTabs();
   initViewer();
   initRunsView();
+  initDeliveryView();
   await refreshHealth();
   await refreshRunsCount();
   setInterval(refreshHealth, 30000);
@@ -85,6 +86,7 @@ function initNav() {
       $$(".view").forEach((v) => v.classList.add("hidden"));
       $(`#view-${btn.dataset.view}`).classList.remove("hidden");
       if (btn.dataset.view === "runs") refreshRunsTable();
+      if (btn.dataset.view === "delivery") refreshDelivery();
       if (btn.dataset.view === "system") renderSystemView();
       if (btn.dataset.view === "build" && state.viewer) {
         state.viewer._resize();
@@ -880,6 +882,249 @@ async function refreshRunsTable() {
     });
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="8" class="tl-detail">failed to load: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+// ── delivery view (T5): job intake + compliance panel ────────────────────
+
+function initDeliveryView() {
+  $("#btn-refresh-jobs").addEventListener("click", refreshJobsTable);
+  $("#btn-refresh-packages").addEventListener("click", refreshPackagesTable);
+  $("#btn-create-job").addEventListener("click", createJob);
+  $("#dj-placeholder").addEventListener("change", (e) => {
+    // rule 9 must be unmissable when stand-ins are chosen
+    e.target.closest(".checkbox-field").classList.toggle("danger", e.target.checked);
+  });
+}
+
+async function refreshDelivery() {
+  await Promise.all([loadTemplateOptions(), refreshJobsTable(), refreshPackagesTable()]);
+}
+
+async function loadTemplateOptions() {
+  const sel = $("#dj-template");
+  if (sel.options.length > 1) return; // already loaded
+  try {
+    const list = await api("/api/templates");
+    sel.innerHTML =
+      `<option value="">— manual product_class —</option>` +
+      list
+        .map((t) =>
+          t.error
+            ? `<option value="" disabled>${escapeHtml(t.file)} (invalid)</option>`
+            : `<option value="${escapeHtml(t.product_class)}">${escapeHtml(t.file)} — ${escapeHtml((t.description || "").slice(0, 70))}</option>`
+        )
+        .join("");
+  } catch (e) {
+    sel.innerHTML = `<option value="">load failed</option>`;
+  }
+}
+
+async function refreshJobsTable() {
+  const tbody = $("#jobs-tbody");
+  tbody.innerHTML = `<tr><td colspan="3" class="tl-detail">loading…</td></tr>`;
+  try {
+    const jobs = await api("/api/jobs");
+    if (!jobs.length) {
+      tbody.innerHTML = `<tr><td colspan="3" class="tl-detail">no job cards — create one on the left</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = "";
+    jobs.forEach((j) => {
+      if (j.error) {
+        tbody.insertAdjacentHTML("beforeend",
+          `<tr><td class="mono">${escapeHtml(j.file)}</td><td colspan="2" class="fail">${escapeHtml(j.error)}</td></tr>`);
+        return;
+      }
+      const dims = j.dims
+        ? `${j.dims.length} × ${j.dims.width} × ${j.dims.height} ${j.dims.unit}`
+        : "—";
+      const badge = j.dims_placeholder
+        ? ` <span class="chip bad" title="delivery refused until real dims arrive">placeholder</span>`
+        : "";
+      tbody.insertAdjacentHTML("beforeend",
+        `<tr><td class="mono">${escapeHtml(j.job_code)}</td>` +
+        `<td class="mono">${escapeHtml(dims)}${badge}</td>` +
+        `<td>${escapeHtml(j.product_class || "—")}</td></tr>`);
+    });
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="3" class="tl-detail">failed to load: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+async function refreshPackagesTable() {
+  const tbody = $("#packages-tbody");
+  tbody.innerHTML = `<tr><td colspan="4" class="tl-detail">loading…</td></tr>`;
+  $("#package-detail").innerHTML = "";
+  try {
+    const pkgs = await api("/api/packages");
+    if (!pkgs.length) {
+      tbody.innerHTML = `<tr><td colspan="4" class="tl-detail">no packages yet — run <span class="mono">python -m src.cli package --template … --job …</span></td></tr>`;
+      return;
+    }
+    tbody.innerHTML = "";
+    pkgs.forEach((p) => {
+      const verdict = p.refused
+        ? `<span class="chip bad">REFUSED</span>`
+        : p.all_passed
+          ? `<span class="chip ok">all passed</span>`
+          : `<span class="chip bad">failed</span>`;
+      const gates = p.gates_total != null ? `${p.gates_passed}/${p.gates_total}` : "—";
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td class="mono">${escapeHtml(p.job_code)}</td>
+        <td>${p.kind === "blocked" ? '<span class="chip warn">blocked</span>' : "package"}</td>
+        <td class="mono">${gates}</td>
+        <td>${verdict}</td>`;
+      tr.addEventListener("click", () => showPackage(p.job_code, p.kind));
+      tbody.appendChild(tr);
+    });
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="4" class="tl-detail">failed to load: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function gateRows(gates) {
+  if (!Array.isArray(gates)) return `<div class="tl-detail">no gates recorded</div>`;
+  const rows = gates
+    .map(
+      (g) => `<tr>
+        <td>${escapeHtml(g.gate || "?")}</td>
+        <td class="mono">${escapeHtml(g.expected ?? "—")}</td>
+        <td class="mono">${escapeHtml(g.received ?? "—")}</td>
+        <td class="${g.passed ? "pass" : "fail"}">${g.passed ? "PASS" : "FAIL"}</td>
+      </tr>`
+    )
+    .join("");
+  return `<table class="gate-table">
+    <thead><tr><th>Gate</th><th>Expected</th><th>Received</th><th></th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+async function showPackage(jobCode, kind) {
+  const detail = $("#package-detail");
+  detail.innerHTML = `<div class="tl-detail">loading ${escapeHtml(jobCode)}…</div>`;
+  try {
+    const { report } = await api(`/api/packages/${encodeURIComponent(jobCode)}`);
+    let html = "";
+
+    if (report.refused) {
+      html += `<div class="refusal-box">
+        <strong>REFUSED — placeholder dimensions</strong>
+        <p>${escapeHtml(report.refusal_reason || "")}</p>
+        <p class="tl-detail">Unblock: ${escapeHtml(report.unblock || "supply real dimensions in the job card")}</p>
+      </div>`;
+    }
+
+    html += `<div class="gate-section">
+      <div class="gate-title">Client Validator (local mirror)
+        <span class="chip ${report.all_passed ? "ok" : "bad"}">${report.all_passed ? "all passed" : "failed"}</span>
+      </div>
+      ${gateRows(report.gates)}
+    </div>`;
+
+    const fin = report.finish || {};
+    if (Object.keys(fin).length) {
+      const uv = fin.uv_diagnostics || {};
+      html += `<div class="gate-section">
+        <div class="gate-title">Finish pipeline</div>
+        <div class="sys-row"><span class="k">FBX source</span><span class="v mono">${escapeHtml(fin.fbx_source || "—")}</span></div>
+        <div class="sys-row"><span class="k">LP / HP tri-eq</span><span class="v mono">${(fin.lp_tri_equivalent ?? "—").toLocaleString?.() ?? "—"} / ${(fin.hp_tri_equivalent ?? "—").toLocaleString?.() ?? "—"} (budget ${fin.lp_budget ?? "—"})</span></div>
+        <div class="sys-row"><span class="k">Texture resolution</span><span class="v mono">${fin.texture_resolution ?? "—"}</span></div>
+        <div class="sys-row"><span class="k">UV islands / overlaps</span><span class="v mono">${uv.islands_total ?? "—"} / ${uv.overlapping_island_pairs ?? "—"}</span></div>
+        <div class="sys-row"><span class="k">Detail parts</span><span class="v mono">${escapeHtml(Object.keys(fin.detail_parts || {}).join(", ") || "—")}</span></div>
+      </div>`;
+      if (Array.isArray(fin.review_renders) && fin.review_renders.length) {
+        html += `<div class="gate-section"><div class="gate-title">Review renders (awaiting owner review)</div>
+          <div class="tl-detail">${fin.review_renders.map(escapeHtml).join("<br>")}</div></div>`;
+      }
+    }
+
+    const ph = report.placeholders;
+    if (ph && (ph.lp_hp_single_source || ph.textures_synthetic)) {
+      html += `<div class="refusal-box warn">
+        <strong>T3 placeholders present</strong>
+        <p class="tl-detail">${escapeHtml(ph.detail || "")}</p>
+      </div>`;
+    }
+
+    if (kind !== "blocked" && !report.refused) {
+      html += `<div class="form-actions">
+        <button id="btn-revalidate" class="btn ghost">↻ Re-run validator</button>
+        <span id="revalidate-note" class="build-note"></span>
+      </div>`;
+    }
+
+    detail.innerHTML = html;
+    const btn = $("#btn-revalidate");
+    if (btn) btn.addEventListener("click", () => revalidatePackage(jobCode));
+  } catch (e) {
+    detail.innerHTML = `<div class="tl-detail">failed to load: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function revalidatePackage(jobCode) {
+  const note = $("#revalidate-note");
+  note.textContent = "running (fresh Blender process for mesh facts)…";
+  try {
+    const res = await api(`/api/packages/${encodeURIComponent(jobCode)}/validate`, { method: "POST" });
+    const detail = $("#package-detail");
+    detail.insertAdjacentHTML(
+      "afterbegin",
+      `<div class="gate-section">
+        <div class="gate-title">Live re-validation
+          <span class="chip ${res.all_passed ? "ok" : "bad"}">${res.all_passed ? "all passed" : "failed"}</span>
+          ${res.blender_facts ? "" : '<span class="chip warn">no mesh facts (Blender unavailable — mesh gates fail closed)</span>'}
+        </div>
+        ${gateRows(res.gates)}
+      </div>`
+    );
+    note.textContent = res.all_passed ? "all gates green ✓" : "gate failures above";
+    toast(`Re-validated ${jobCode}: ${res.all_passed ? "PASS" : "FAIL"}`, res.all_passed ? "ok" : "bad");
+  } catch (e) {
+    note.textContent = "";
+    toast(`Re-validation failed: ${e.message}`, "bad");
+  }
+}
+
+async function createJob() {
+  const note = $("#job-note");
+  const code = $("#dj-code").value.trim();
+  const l = $("#dj-l").value, w = $("#dj-w").value, h = $("#dj-h").value;
+  const unit = $("#dj-unit").value;
+  const placeholder = $("#dj-placeholder").checked;
+
+  if (!code) return toast("Job code is required", "bad");
+  if (!l || !w || !h || !unit) {
+    return toast("Dimensions are required with an explicit unit — never inferred (rule 9)", "bad");
+  }
+  if (placeholder && !confirm("Save with placeholder stand-in dimensions? NO deliverable package will be emitted for this job until real dimensions replace them.")) {
+    return;
+  }
+
+  note.textContent = "saving…";
+  try {
+    const tplVal = $("#dj-template").value;
+    const res = await api("/api/jobs", {
+      method: "POST",
+      body: {
+        job_code: code,
+        dims: { length: parseFloat(l), width: parseFloat(w), height: parseFloat(h), unit },
+        dims_placeholder: placeholder,
+        complexity: $("#dj-complexity").value,
+        orientation: $("#dj-orientation").value,
+        product_class: tplVal || "generic",
+        part_scope: $("#dj-scope").value.trim(),
+        reference_dir: $("#dj-refdir").value.trim() || undefined,
+      },
+    });
+    note.textContent = "";
+    toast(`Job card saved: ${res.path}${res.dims_placeholder ? " (placeholder — delivery will be REFUSED)" : ""}`, "ok");
+    refreshJobsTable();
+  } catch (e) {
+    note.textContent = "";
+    toast(`Save failed: ${e.message}`, "bad");
   }
 }
 

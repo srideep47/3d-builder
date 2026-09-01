@@ -545,4 +545,116 @@ flag flipped, opposite outcome.
 - Carry handles remain unmodelled pending §9.4 (declared `enabled:
   false` in the template's `features:` block)
 
-## T5 — Generalise ⬜ (not started)
+## T5 — Generalise ✅ (2026-09-01)
+
+**Landed:**
+- **`src/ai/vlm.py` behind a `VisionProvider` ABC** — the two integration
+  points (reference description for the text-only analyst, advisory
+  render-vs-reference verdict) are CONCRETE on the ABC and speak only
+  `chat_vision`, so every wire protocol gets them for free:
+  - `OpenAICompatibleVisionProvider` (historical alias `LocalVLMClient`):
+    the local Qwen2.5-VL/vLLM path, unchanged wire behaviour
+  - `GeminiVisionProvider`: Google Generative Language **v1beta** — a
+    deliberately SECOND provider class (the API is not OpenAI-shaped):
+    `POST {base}/v1beta/models/<model>:generateContent`, auth via the
+    **`x-goog-api-key` header** (never Bearer), body
+    `contents:[{role, parts:[{text}|{inline_data:{mime_type,data}}]}]` +
+    `systemInstruction` + `generationConfig{maxOutputTokens,temperature}`;
+    response parsed from `candidates[0].content.parts[*].text`
+  - Selection: `config/ai.yaml` → `vision.vlm.provider: local|gemini`
+    (factory `get_vision_provider()`, never raises; broken config →
+    stderr warning + no vision). The agent loop now calls the factory
+    (`get_local_vlm` kept as a back-compat alias)
+  - **Key handling**: the API key lives ONLY in the environment —
+    `api_key_env` (default `THREED_VLM_API_KEY`), with `GEMINI_API_KEY`
+    as fallback (same value in the owner's setup). Never in config files,
+    never in code, never in the repo
+  - **Pinned models only**: `-latest` aliases raise at construction (a
+    floating model can never pass review); the Gemini default pin is
+    `gemini-3.6-flash`
+- **Web UI Delivery view** (`python -m src.cli ui` → nav "Delivery"):
+  - **Job intake form** → `POST /api/jobs` writes a validated job card to
+    `input/jobs/<code>.yaml` (JobCard/JobDims pydantic validation → 400
+    with the reason; existing codes never overwritten → 409). Rule 9 is
+    structural: dims + explicit unit are REQUIRED; the "dims are
+    stand-ins" checkbox sets `dims_placeholder: true` with a red warning
+    and a confirm() — the card carries the rule-9 comment header
+  - **Compliance panel** mirroring the client validator:
+    `GET /api/packages` (packages + blocked, verdict chips),
+    `GET /api/packages/<JOB>` (full qa_report), and
+    `POST /api/packages/<JOB>/validate` — a LIVE re-run of all six gates
+    (fresh Blender process for mesh facts; placeholder-dims jobs are
+    REFUSED with 409, rule 9)
+  - Supporting endpoints: `GET /api/templates`, `GET /api/jobs`
+  - `input/jobs/COFFEE0001.yaml` made durable (values copied from the
+    package's own audit record) so the showcase is re-validatable from
+    the panel
+- Tests: `tests/test_vlm.py` (12: the 4 original + 8 new — ABC contract,
+  Gemini wire format against a mock v1beta server that mirrors the REAL
+  response shape, key env/fallback, `-latest` rejection, dead-endpoint
+  fail-soft, shared integration points over the Gemini wire, factory
+  selection) and `tests/test_webapp_api.py` (+8: templates/jobs/packages
+  endpoints, intake validation never infers, no-overwrite, refusal paths,
+  live-validate wiring with gates mocked)
+
+**The ONE live Gemini smoke call** (single `:generateContent` round trip,
+image included to validate `inline_data`; key read from the environment,
+redacted below):
+- Request: `POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent`,
+  headers `{x-goog-api-key: AQ.…, Content-Type: application/json}`, body
+  keys `contents`, `generationConfig`, `systemInstruction` — all accepted
+  (200). The 64×64 red test PNG was read correctly (reply
+  `{"color": "red", "count_corners": 4}`; usage shows IMAGE 1089 tokens)
+- **Response shape (recorded for future parsing work):**
+  ```
+  candidates[0].content.parts[0].text        # the content (join across parts)
+  candidates[0].content.parts[0].thoughtSignature   # opaque ~468-char thinking signature
+  candidates[0].content.role = "model"
+  candidates[0].finishReason = "STOP"        # other: MAX_TOKENS
+  candidates[0].index = 0
+  usageMetadata: promptTokenCount, candidatesTokenCount, totalTokenCount,
+    promptTokensDetails[{modality: IMAGE|TEXT, tokenCount}],
+    thoughtsTokenCount, serviceTier
+  modelVersion: "gemini-3.6-flash", responseId
+  ```
+
+**Empirical findings banked (do not regress):**
+1. **`gemini-2.5-flash` is retired for new API keys** (HTTP 404: "no
+   longer available to new users… use models/gemini-3.6-flash") — it
+   still appears in `GET /v1beta/models` but `:generateContent` refuses
+   it. Pin `gemini-3.6-flash`. A models-list 200 proves the key, NOT the
+   model's availability
+2. **v1beta is not OpenAI-shaped in either direction**: auth is the
+   `x-goog-api-key` header (no Authorization), images are
+   `inline_data{mime_type, data}` (not `image_url` data URLs), the
+   system prompt is `systemInstruction{parts}` (not a system message),
+   and generation params go in `generationConfig{maxOutputTokens}` (not
+   `max_tokens`)
+3. **Gemini 3.6-flash is a thinking model** (`thoughtsTokenCount` 66 on a
+   trivial call, `thoughtSignature` on parts): budget `maxOutputTokens`
+   generously or `finishReason: MAX_TOKENS` can arrive with empty text —
+   the same lesson as GLM-5.3's reasoning tokens
+
+**Verified:** `python -m pytest tests -q` → **238 passed** (full suite
+incl. blender-marked; T4's 222 + 16 new). Web UI browser pass (repo
+convention, evidence in `docs/gui-screenshots/08-delivery-intake-refused.png`
++ `09-delivery-compliance-gates.png`): intake form creates a job card and
+lists it (demo card removed afterwards); the blocked MAYA00053153 package
+renders the REFUSED box with the finish evidence and unblock
+instructions; COFFEE0001 renders the six-gate table; the panel's
+"Re-run validator" button performed a live re-validation — all six gates
+PASS with fresh Blender mesh facts.
+
+**Not verified / flagged for the owner:**
+- The Gemini provider has had exactly ONE live call (the smoke above, by
+  order). The shared `describe_reference_images`/`visual_verdict`
+  integration points are mock-tested on the Gemini wire but have not run
+  against real reference photos — that happens on the first real client
+  job with `vision.vlm.provider: gemini`
+- The local Qwen-VL path remains unexercised on this machine (no vLLM
+  server running); its wire behaviour is unchanged and still covered by
+  the mock-server tests
+- The health dot in the web UI sidebar reflects the GLM endpoint's
+  vision support, not the VLM provider (pre-existing behaviour, left
+  alone)
+

@@ -1,0 +1,15 @@
+# input/jobs/COFFEE0001.yaml — the T3 coffee-table showcase job card
+# (durable, for owner review + web-UI re-validation). Values copied from
+# the package's own audit record (qa_report.json job_card section): the
+# showcase was built to 120 x 60 x 40 cm, expressed in inches.
+job_code: COFFEE0001
+dims:
+  length: 47.24409
+  width: 23.62205
+  height: 15.74803
+  unit: in
+complexity: simple
+orientation: floor
+product_class: coffee_table
+part_scope: "T3 full-quality finish showcase (owner review)"
+reference_dir: "input/benchmarks"

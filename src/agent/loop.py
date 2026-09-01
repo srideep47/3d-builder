@@ -67,19 +67,19 @@ class AgentLoop:
         # builds without organic parts never touch the service.
         self._img3d_provider = None
         self._img3d_checked = False
-        # local vision model (Qwen2.5-VL plug point) — lazy, fails soft
+        # vision provider (local Qwen-VL or Gemini, config vision.vlm.provider) — lazy, fails soft
         self._vlm = None
         self._vlm_checked = False
 
-    # ── Local vision model (analyst eye + visual gate) ───────────────────────
+    # ── Vision provider (analyst eye + visual gate) ──────────────────────────
 
     def _get_vlm(self):
         if not self._vlm_checked:
             self._vlm_checked = True
             try:
-                from ..ai.vlm import get_local_vlm
+                from ..ai.vlm import get_vision_provider
 
-                self._vlm = get_local_vlm()
+                self._vlm = get_vision_provider()
             except Exception:
                 self._vlm = None
         return self._vlm

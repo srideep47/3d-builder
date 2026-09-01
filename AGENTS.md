@@ -7,7 +7,7 @@
 ## Architecture
 3D Builder is structured in 4 layers plus a web interface and a GPU microservice:
 1. **Interfaces**: `src/cli.py` (Typer CLI), `src/mcp_server.py` (MCP stdio server; mcp 2.x `MCPServer`, 1.x fallback), `src/webapp/` (FastAPI server + run registry) serving `web/` (three.js studio UI; `python -m src.cli ui`).
-2. **Agent Layer**: `src/agent/loop.py` (analyst → neural parts → build → measure → render → gates → corrector; emits progress events, supports cancel + run_dir reuse), `src/agent/prompts.py` (Analyst, Corrector), `src/agent/verifier.py` (dimension + mesh gates), `src/ai/aptos.py` (GLM-5.3 integration), `src/ai/vlm.py` (local Qwen-VL plug point: analyst eye + advisory visual gate).
+2. **Agent Layer**: `src/agent/loop.py` (analyst → neural parts → build → measure → render → gates → corrector; emits progress events, supports cancel + run_dir reuse), `src/agent/prompts.py` (Analyst, Corrector), `src/agent/verifier.py` (dimension + mesh gates), `src/ai/aptos.py` (GLM-5.3 integration), `src/ai/vlm.py` (vision providers behind a `VisionProvider` ABC — T5: local Qwen-VL via OpenAI-compatible vLLM AND Google Gemini v1beta; analyst eye + advisory visual gate; selected by `config/ai.yaml` `vision.vlm.provider`).
 3. **Spec Layer**: `src/spec/schema.py` (ObjectSpec v2 Pydantic model), `src/spec/resolver.py` (spec → build params), `src/spec/validation.py` (dimension gate), `src/spec/template.py` + `templates/<product_class>.yaml` (T4 product templates: proportions × job-card dims → ObjectSpec; the ONLY place product knowledge lives, rule 11), `src/textures/` (T4 texture composition: CC0 scans + procedural tileable patterns → canonical map sets; `scripts/fetch_cc0_textures.py` + `scripts/gen_template_textures.py`).
 4. **Capability Layer**: `src/blender/runner.py` (subprocess runner), `src/blender/harness_script.py` (self-contained headless Blender engine — runs inside Blender's Python, must not import project code), `src/img3d/client.py` (RemoteImg3DProvider → the neural service), `services/img3d_service/` (FastAPI GPU microservice, PLAN.md §9: single-job queue, mock + tripo_sr backends, trellis/hunyuan3d bake-off slots).
 5. **Client Layer**: `src/client/` (MetaZtech delivery compliance — knows the contract, never the product): `job.py` (JobCard from job.yaml; dims + explicit unit REQUIRED, never inferred; axis_map L→X/W→Y/H→Z; client dim tolerance ±0.01 in default, separate from the internal ±1 mm), `contract.py` (the single shared deliverable-set + tier-ceiling definition), `gates.py` (six pure validator gates + MeshFacts, fail-closed without mesh facts), `units.py` (metres ↔ client units, boundary only), `fbx_inspect.py` (independent binary-FBX reader — GlobalSettings/geometry/Model transforms parsed without Blender, plus the signed-permutation chirality machinery), `package.py` (assembles `output/packages/<JOB>/` + `qa_report.json`). `python -m src.cli package <glb> --job job.yaml` then `validate <pkg_dir>` mirror the client's validator locally.
@@ -35,8 +35,13 @@
   `reasoning_effort: low` (also in `config/ai.yaml`, sent via `extra_body`)
   cuts per-call latency ~30× with equal quality — do not remove it.
   The endpoint is keyless for text and NOT multimodal (vision probes fail with
-  HTTP 400). The local Qwen-VL ladder step is wired in `src/ai/vlm.py`
-  (config `vision.vlm.base_url` + `model`).
+  HTTP 400). The vision ladder is wired in `src/ai/vlm.py`: local Qwen-VL
+  (vLLM, OpenAI-compatible) or Gemini (Google v1beta, `x-goog-api-key`,
+  `contents`/`parts`), selected by `vision.vlm.provider`. Gemini models must
+  be PINNED versions (`gemini-3.6-flash`; `-latest` aliases are rejected at
+  construction) — `gemini-2.5-flash` is retired for new keys. API keys come
+  from the ENV only (`THREED_VLM_API_KEY`, Gemini falls back to
+  `GEMINI_API_KEY`); never commit a key.
 - **glTF export splits vertices** per normal/UV attribute and stores part
   positions as node transforms. Mesh-gate checks must load via
   `src/agent/verifier.py: load_merged_mesh()` (`scene.to_mesh()` + constructor
@@ -103,7 +108,7 @@
   guess a standard size.
 
 ## Verification
-- `python -m pytest tests -q` — 222 tests; `blender`-marked tests auto-skip
+- `python -m pytest tests -q` — 238 tests; `blender`-marked tests auto-skip
   when no Blender is found.
 - Client packages: `python -m src.cli package --spec <spec.json> --job
   job.yaml` runs the full T3 finish chain (build → quad-verify + per-island
@@ -131,4 +136,12 @@
 - Golden benchmarks in `input/benchmarks/` (dimensions.com-sourced) must pass
   both gates deterministically; `scripts/benchmark_golden.py` scores the AI flow.
 - img3d backend bake-off: `scripts/bakeoff_img3d.py` (service must be running).
-- Web UI browser-verification evidence lives in `docs/gui-screenshots/`.
+- Web UI browser-verification evidence lives in `docs/gui-screenshots/`
+  (08/09: the Delivery view — job intake + compliance panel with the live
+  six-gate re-validation).
+- Web UI Delivery view (`python -m src.cli ui`): job-intake form →
+  `input/jobs/<code>.yaml` (dims + explicit unit required, rule 9;
+  placeholder stand-ins flag delivery refusal), compliance panel mirrors
+  the client validator over `output/packages/` + `output/blocked/` with a
+  live re-run (`POST /api/packages/<JOB>/validate`, fresh Blender process
+  for mesh facts).
