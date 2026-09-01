@@ -1310,7 +1310,11 @@ ObjectSpecs cold, one shot each, no builds/renders/measure-feedback (schema
 validation only): `output/braintest_specs/braintest_a_writing_desk.json`,
 `braintest_b_teacup.json`, `braintest_c_doormat.json` + generation script.
 Delivered in the session report with §5 notes blocks; the reviewer builds and
-judges per §7.
+judges per §7. (Authoring-time catch worth recording: the rounded-rect
+profile generator had a TL corner-centre typo — `hy+r` instead of `hy-r` —
+that bulged the doormat's top-left corner 2×r outward; caught by a bbox
+self-check added to the generator BEFORE any build. The check now ships with
+it. Coordinate lists need guards exactly like measurements do.)
 
 ### New gotchas (round 5)
 
