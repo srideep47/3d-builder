@@ -1,5 +1,22 @@
 # 3D Builder — AI 3D Model Generation
 
+> ## START HERE
+>
+> Active work is the **autonomous model-creation system**. Read in this order:
+>
+> | Order | File | For |
+> |---|---|---|
+> | 1 | [`PLAN_AUTONOMOUS.md`](PLAN_AUTONOMOUS.md) | Everyone — scope, architecture, 24-hour plan, go/no-go |
+> | 2 | [`docs/DESKTOP_SETUP.md`](docs/DESKTOP_SETUP.md) | Machine runbook. **Do this first on a new host** |
+> | 3a | [`HANDOFF_CLAUDE_DESKTOP.md`](HANDOFF_CLAUDE_DESKTOP.md) | Reviewer / architect seat — includes the measurement recipes |
+> | 3b | [`HANDOFF_GLM_AUTONOMOUS.md`](HANDOFF_GLM_AUTONOMOUS.md) | Builder seat — the work order |
+> | 4 | [`docs/VISION_CONFIG.md`](docs/VISION_CONFIG.md) | Gemini limits, cost, tiering, 429 handling |
+> | 5 | [`PROGRESS.md`](PROGRESS.md) | Current task-by-task state and the gotchas ledger |
+>
+> Two things gate everything: **enable billing on the Gemini key before any
+> vision call** (free tier trains on submissions), and **confirm GPU Cycles
+> baking works** on the new host before trusting any throughput estimate.
+
 Turn **prompts + precise measurements** (and, later, reference images) into
 verified, real-world-scaled 3D models. The brain is **GLM-5.3** on the Aptos
 endpoint; the hands are a **headless Blender 4.5 harness**; a closed
