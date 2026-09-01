@@ -47,3 +47,6 @@ services/img3d_service/vendor/
 
 # Composed texture surfaces (regenerable: python scripts/gen_template_textures.py)
 assets/textures/
+
+# Owner raw photo drops (duplicates of input/references/)
+Temp/

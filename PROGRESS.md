@@ -899,3 +899,141 @@ default; run_4k_diagnostic.py is the workaround).
 **Committed** (wip/defect-fixes, no push): per-object diagnostic + test.
 Quilt amplitude/aliasing fixes await owner/reviewer decision on the
 direction above. MAYA00053153 dims still blocked on the owner (rule 9).
+
+## Session log — 2026-09-01 (round 3: visual quality vs the reference photos)
+
+Owner's directive: NOT the submission phase — optimise for visual quality
+against the reference photos, not the client's unknown validator. The owner
+read the photos directly and corrected §5.2 in seven places (all
+reviewer-sourced; GLM_BRIEF.md §5.2/§5.3 corrected and marked as such).
+Work order: quilt geometry (corrections 3+1+2 as one crown change), band
+order, handles, label, materials, bake timeout — Gemini verdict after each
+group. TEST-QUEEN 80×60×12 IN stays the standing target; 1K stays the
+iteration default. Suite: **243 passed**.
+
+### Group A — the quilt is REAL LP geometry, square grid, ~119mm cells
+
+`_DOME_SCRIPT` is replaced by `_QUILT_DOME_SCRIPT` (template.py). The FG
+superellipse map carries a grid-topology cap: cell-commensurate grid lines
+(spacing exactly 2/(cells·DIV) anchored at u=−1, so every DIV-th line IS a
+cell boundary → stitch valleys land on grid lines), quadratic shoulder
+clustering toward the boundary, boundary loop closed with a triangle fan.
+Displacement is along vertex normals gated `normal.z ≥ restrict_z` (0.85) —
+the steep shoulder stays on the footprint — and `H = h_band − AMP` so puff
+peaks land exactly on the nominal band top. The crown HP is bevel-only
+(`DetailSpec(subdivision_levels=0)`): subsurf would smooth the puffs away
+in the baked normal (the round-2 failure mode).
+
+Chosen numbers (queen): `cells_across: 17` → 17×13 cells = **119.0 ×
+116.5mm** (reviewer target 100-130mm; 12-14 cells across the width → 13
+cross-cells derived); `amplitude_fraction: 0.12` of one cell = **14.3mm**
+(0.15 = 17.8mm read as "sharp, exaggerated zigzag peaks" in the Group-A
+render check → softened, exponent 1.6 → 1.3 with it); divisions 4.
+
+Counts: crown **5,040 quads + 288 fan tris = 10,368 tri-eq** (the grid is
+100% quads; the FG boundary fan is the only tri content; zero n-gons).
+Whole LP **15,612 tri-eq** (after Groups C/E added handles + cord tapes)
+against the provisional 50k Simple ceiling — **decimation is a no-op, the
+quilt geometry survives into the delivered FBX** (3.2× headroom). HP
+200,016 tri-eq. Measured: peaks exactly on the nominal 85.34mm band top
+(0.000mm overshoot); nothing beyond the L/W footprint; silhouette relief
+in the front render **1px → 9px** at a 67px period (was 1px when the quilt
+was a baked normal map); height-field autocorrelation peaks at 119mm (X) /
+116mm (Y); ASCII height field shows straight rows and columns — SQUARE.
+
+**Square vs diamond:** the product photos (9.28.22 / 9.28.35) read SQUARE;
+the marketing render (9.29.19) shows diamond. Two-variant possibility
+flagged in §5.2; switching is one YAML line (`pattern: grid_diamond`).
+Gemini: 3 (before) → 3 (after; the zigzag complaint → fixed by softening)
+→ **4** (after-soft).
+
+### Group B — band order off by one at both ends
+
+Ten bands: crown .28 / air_mesh .162 / knit_1 .062 / velvet_1 .072 /
+knit_2 .062 / velvet_2 .072 / knit_3 .062 / velvet_3 .072 / white_band
+.056 / base .10 — the white knit RIB comes first below the air-mesh, and a
+plain WHITE band sits above the base. New `plain_white` flat surface for
+white_band (smooth — not the ribbed knit). Render luminance walk verifies
+light-dark alternation in the corrected order with white_band light (124)
+above the dark base; knit_1's window reads dark because tape_2 straddles
+its top boundary (perspective, not a band error). Gemini **4** (no
+band-order complaint).
+
+### Group C — carry handles (§9.4 open question CLOSED)
+
+Photo 9.28.35: vertical dark straps crossing the full border stack at
+intervals along the long side. Modelled as `CarryHandleSpec`: **2 per long
+side at the quarter points** (count/spacing read from the photos;
+owner-tunable), width_fraction 0.08 (~24mm webbing), outer face at 0.92×
+the tape protrusion — just behind the tape plane, no z-fighting where the
+straps cross the tapes — inner face buried 4mm past the local curved wall,
+spanning white_band → crown (bottom tape line to top tape line).
+Verified in the LP GLB (world bounds) and in render ASCII crops (dark
+vertical bands at both quarter points crossing the full stack). Gemini
+said "missing vertical strap accents" — contradicted by the pixel
+evidence; recorded as a VLM miss, not acted on. Score **4**. Pinned by
+`test_carry_handles_cross_the_full_stack_inside_nominal`.
+
+### Group D — label taller and narrower
+
+Measured off the corner close-up (not the owner's round numbers): aspect
+**0.46**, height_fraction **0.34** of H (z 0.16..0.50 — inside the velvet
+stack 0.156..0.558, clears tape_3 and tape_2), center 0.33. Gemini **3**
+("label tiny, distorted, unreadable") — judged a 1K render artifact: a
+48×104mm label is ≈21×45px in a full-frame 1024 render. Label verified
+present at the correct spot and size via ASCII; a label close-up render
+would settle it if a verdict-level check is wanted.
+
+### Group E — materials minor tuning
+
+- velvet: tint 0.16 → **[0.09, 0.09, 0.10]**; baked basecolor velvet mode
+  24/255 = **9.4%** (requested 0.08-0.10). New `SurfaceSpec.rotate_deg`
+  (np.rot90 in compose.py — square tiles stay tileable): the scan's nap
+  streaks run horizontal in texture space, quarter-turned so they render
+  **VERTICAL** (−84° measured in the render).
+- tape: **round cord** — width == protrusion at 0.023×min(L,W,H) (~7mm on
+  a queen, 2.3% of H). `_build_sweep`'s circular branch needed
+  `bevel_resolution=4` (12-gon ring). Cord inner tangent exactly on the
+  band wall, outer tangent exactly on nominal — pinned by
+  `test_tape_section_is_a_round_cord_flush_on_the_wall`.
+- mesh holes: `cell_m: 0.010` → **10.0mm** pitch measured in the texture.
+- Gemini verdict: **rate-limited (429) four times over ~35 minutes**
+  (waits of 0/4/15 min between attempts) — daily-quota exhaustion, not a
+  burst limit. The measured evidence above stands; re-run
+  `output/verdict_round3.py groupE_after "output/finish/TEST-QUEEN/review"`
+  after the quota resets if a verdict is wanted.
+
+### Group F — bake timeout is a real finish_delivery parameter
+
+`finish_delivery(bake_timeout_sec=300.0)` → threaded to
+`runner.execute_op("bake_maps", ..., timeout_sec=...)`; recorded in the
+finish section of BOTH the refusal (blocked) report and the delivered
+report; CLI `--bake-timeout`. Tests pin the default (300.0 reaches the
+bake op and is recorded) and the override (3600.0 reaches only the bake
+op). Closes the round-2 operational finding: a 4K mattress bake takes
+~19 min and the old fixed 300s op timeout killed it.
+
+### New gotchas (pinned by tests, or bitten hard enough to write down)
+
+1. **SUBSURF at levels=0 is DISABLED** — `modifier_apply` raises
+   "Modifier is disabled, skipping apply". The harness now adds subsurf
+   only when `part_levels > 0`, and an explicit 0 is distinguished from
+   None (None = inherit HP levels; 0 = bevel-only HP — required for the
+   quilt to survive the bake).
+2. **glTF triangulates quads** — GLB face counts are 2× blend quad
+   counts. Never do blend-side arithmetic with GLB numbers (cost one
+   faces_total pin: predicted 9,870, actual 10,446).
+3. **pack_scale dropped 0.75 → 0.5625** — the round-cord tapes carry ~3×
+   the strip surface into the atlas. Not a defect (it still packs), but
+   the tapes' texel share tripled.
+4. **Exact island-count pins drift with quilt softness** — smart-project
+   regroups faces as normals shift. Island pins are now ranges.
+5. **Gemini verdict quirks this round**: reads "diamond" on a square grid
+   (uncalibrated for pattern orientation — overruled by the owner's
+   direct reading), missed handles the pixel evidence shows, cannot read
+   a 48mm label at 1K. Advisory only — keep measured evidence in the
+   loop.
+
+MAYA00053153 dims untouched (rule 9). `Temp/` (the owner's raw WhatsApp
+photo drop — duplicate of `input/references/MAYA00053153/`) gitignored.
+Committed, no push.

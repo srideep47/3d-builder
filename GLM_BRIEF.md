@@ -146,33 +146,43 @@ pillows, no room, no bedding.
 
 ### 5.2 Layer structure, top to bottom (from a corner close-up and a clean side elevation)
 
+> **CORRECTED 2026-09-01 (round 3).** The owner reviewed the reference
+> photos directly and corrected this section — the corrections below come
+> from the **reviewer's eyes**, not from GLM (GLM is text-only; its only
+> photo access is the advisory Gemini describe, which DISAGREES on the
+> quilt pattern — see band 1). Where the original transcription and a
+> correction conflict, **the correction wins.**
+
 The silhouette is a **rounded box**: a domed, quilted top over a straight-sided
 border. Reading down the side face:
 
 | # | Element | Description |
 |---|---|---|
-| 1 | **Pillowtop crown** | Domed, puffed quilted panel. White knit fabric. Quilting reads as a **grid of rounded, scalloped/diamond cells** — soft-edged puffs separated by stitch valleys, not sharp creases. A faint **grey zigzag/chevron micro-print** is woven into the white knit. |
-| 2 | **Tape edge (top)** | Thin **black/near-black binding tape** wrapping the top perimeter edge. Visible **herringbone / diagonal twill** weave. |
-| 3 | **Air-mesh band** | **White 3D spacer mesh** — a perforated, honeycomb/oval-hole pattern. Distinctly open and textural. Roughly the tallest single light band. |
-| 4 | **Tape edge (mid)** | As #2. |
-| 5 | **Border stack** | Alternating horizontal bands: **white knit ribs** (smooth, slightly ribbed, cream-white) separated by **dark charcoal/near-black velvet bands** (soft sheen, catches light along the length). Approximately **3 dark velvet bands** separated by white ribs. |
+| 1 | **Pillowtop crown** | Domed, puffed quilted panel. White knit fabric. Quilting reads as a **SQUARE GRID of puffed cells — straight rows and columns aligned to the mattress edges** (reviewer's reading of the two detailed product photos, 9.28.22 and 9.28.35), **~12-14 cells across the width** (cell ≈ 100-130 mm on a queen). The puffs **break the silhouette — they visibly bulge along the top edge — so the quilt must be real low-poly geometry, not a baked normal map** (a normal map carries no silhouette). A faint **grey zigzag/chevron micro-print** is woven into the white knit. ⚠ **DISAGREEMENT:** the marketing render (9.29.19) shows a **diagonal diamond/argyle** top instead — likely two presentations/variants of the product; we model the photographed physical product (square). The advisory Gemini eye reads "diamond" on the product photos too, but it is uncalibrated for pattern orientation and its cell counts (6-10 across) contradict the reviewer's direct count — the reviewer's reading is authoritative. |
+| 2 | **Tape edge (top)** | **Black/near-black binding cord** wrapping the top perimeter edge — reads as a **rounded cord ≈ 2-3% of the mattress height** (the first-pass "thin tape" over-corrected to ~1% of H — too thin). Herringbone / diagonal twill weave. |
+| 3 | **Air-mesh band** | **White 3D spacer mesh** — a perforated, honeycomb/oval-hole pattern; **holes ≈ 10 mm** (not 6). Distinctly open and textural. Roughly the tallest single light band. |
+| 4 | **Tape edge (mid)** | As #2, below the air-mesh band. |
+| 5 | **Border stack** | Top to bottom: **WHITE KNIT RIB directly under the air-mesh, then velvet, rib, velvet, rib, velvet, then a WHITE BAND above the base** — the stack starts with knit (not velvet) and ends with a white band (not a third velvet at the bottom). **3 dark velvet bands** separated by knit ribs. Velvet reads **darker than the first-pass tint 0.16 — closer to 0.08-0.10 lightness — with vertical nap streaks**. |
 | 6 | **Tape edge (bottom)** | As #2, wrapping the bottom perimeter edge. |
 | 7 | **Base** | Flat underside, dark non-slip fabric. Rarely visible — keep it cheap. |
 
 ### 5.3 Distinctive features
 
 - **Brand label.** A **black rectangular patch** on the **front-left side
-  border**, portrait-oriented, spanning several bands vertically. Contents, top
-  to bottom: `NISIEN` (wide-tracked serif caps) / `PURE COMFORT` (smaller caps)
-  / `with body support` (small lowercase) / a **blue rounded-square icon**
+  border**, portrait-oriented, **taller and narrower than first transcribed:
+  aspect ≈ 0.45, spanning nearly the whole velvet stack** (measured off the
+  photos via the advisory eye: ~74% of the border-stack height ≈ 0.34 of H on
+  a queen; the decal texture crop is 512x1024, aspect 0.5). Contents, top to
+  bottom: `NISIEN` (wide-tracked serif caps) / `PURE COMFORT` (smaller caps) /
+  `with body support` (small lowercase) / a **blue rounded-square icon**
   showing a white mattress glyph with three downward arrows / `Perfect Night`
   in italic script. **Best source: crop this directly from the corner close-up
   photo** — it is clean, well-lit, and nearly orthographic.
-- **Vertical strap elements.** At intervals along the long sides there are
-  **vertical dark straps** crossing the border bands. These are almost certainly
-  **carry handles**. Observed in the in-room shots at roughly the quarter
-  points. *Confidence: moderate.* Confirm with the owner before modelling them
-  (§9).
+- **Carry handles — OPEN QUESTION CLOSED (reviewer, round 3).** Photo 9.28.35
+  clearly shows **vertical dark straps crossing the FULL border stack at
+  intervals along the long sides** — these ARE carry handles and they ARE to
+  be modelled. From the photos: **2 per long side, near the quarter points**,
+  dark woven webbing ≈ 25 mm wide.
 
 ### 5.4 What NOT to model
 

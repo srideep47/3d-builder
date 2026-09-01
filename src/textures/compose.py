@@ -128,6 +128,15 @@ def compose_surface(product_class: str, name: str, surface: SurfaceSpec,
             roughness = modulate(roughness, groove, gdr)
         manifest["layers"].append({"kind": layer.kind, "params": layer.params})
 
+    if surface.rotate_deg:
+        # quarter-turn the composed maps (square tiles stay tileable): turns
+        # a scan's directional nap so it renders the right way on walls
+        k = surface.rotate_deg // 90 % 4
+        albedo = np.rot90(albedo, k)
+        roughness = np.rot90(roughness, k)
+        height = np.rot90(height, k)
+        manifest["rotate_deg"] = surface.rotate_deg
+
     save_png(albedo, out_dir / "albedo.png")
     save_png(roughness, out_dir / "roughness.png")
     save_png(height, out_dir / "height.png")

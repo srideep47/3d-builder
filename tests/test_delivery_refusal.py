@@ -60,21 +60,24 @@ def test_package_delivery_refuses_placeholder_before_any_work(tmp_path):
 
 
 class _ChainRecorder:
-    """Stands in for BlenderRunner: records every op, returns plausible
-    results, writes the review renders the real op would produce."""
+    """Stands in for BlenderRunner: records every op (and the bake timeout),
+    returns plausible results, writes the review renders the real op would
+    produce."""
 
     def __init__(self):
         self.ops = []
+        self.timeouts = {}  # op -> timeout_sec it was called with
 
-    def execute_op(self, op, params):
+    def execute_op(self, op, params=None, timeout_sec=None):
         self.ops.append(op)
+        if op not in self.timeouts or timeout_sec is not None:
+            self.timeouts[op] = timeout_sec
         if op == "prepare_delivery_scene":
-            # real observed values for the mattress at queen proportions
-            # (scripts/probe_uv_islands.py, 2026-09-01): 2118 faces collapse
-            # to 80 UV islands once _uv_face_groups merges UV-contiguous
-            # faces; pack scale 0.75, texel-density ratio 1.0000
+            # plausible stand-in values for the mattress (the real op's
+            # numbers are pinned in test_template_harness.py — round 3:
+            # 8982 faces, 120 islands, pack scale 0.75)
             return {"success": True, "uv_atlas": {"pack_scale": 0.75},
-                    "uv": {"islands_total": 80}}
+                    "uv": {"islands_total": 120}}
         if op == "bake_maps":
             return {"success": True,
                     "maps": {"basecolor": {"stats": {"std": 0.35}}},
@@ -107,6 +110,10 @@ def test_finish_delivery_runs_chain_then_refuses(tmp_path):
                        "decimate_to_budget", "render_views"]
     # ...but no deliverable export ever happened
     assert "export_fbx" not in rec.ops and "export_usdz" not in rec.ops
+    # the bake timeout is a real parameter (round-3 Group F): default 300 s
+    # silently killed 4K bakes; only the bake op carries the timeout
+    assert rec.timeouts["bake_maps"] == 300.0
+    assert rec.timeouts["prepare_delivery_scene"] is None
     # loud refusal: three log lines
     assert sum(1 for m in logs if m.startswith("REFUSED")) == 3
 
@@ -124,19 +131,41 @@ def test_finish_delivery_runs_chain_then_refuses(tmp_path):
     fin = report["finish"]
     assert fin["lp_tri_equivalent"] == 3468
     assert fin["hp_tri_equivalent"] == 201600
+    assert fin["bake_timeout_sec"] == 300.0  # recorded with the refusal evidence
     assert fin["review_renders"]  # structural review renders recorded
-    # the quilt displacement evidence travels with the refusal report
-    disp = fin["detail_parts"]["crown"]["displacement"]
-    assert disp["pattern"] == "grid_diamond"
-    assert disp["amplitude_m"] == pytest.approx(
-        0.07 * (0.3048 - 2 * 0.016 * 0.3048) / 8)  # fraction of one quilt CELL
-    assert disp["restrict"] == "up"
+    # the crown detail evidence travels with the refusal report: round-3
+    # semantics — the quilt is REAL LP geometry now, so the HP hint is
+    # bevel-only (explicit subdivision_levels=0; no displacement entry)
+    assert fin["detail_parts"]["crown"] == {"subdivision_levels": 0}
     assert "unblock" in report
     # and NO package directory was created
     assert not (tmp_path / "packages" / job.job_code).exists()
 
 
 # ── the CLI wiring: PlaceholderDimensionsError -> exit code 2 ────────────────
+
+
+def test_finish_delivery_bake_timeout_is_threaded_through(tmp_path):
+    """Round-3 Group F: the bake timeout is a real finish_delivery parameter.
+    The 300 s default silently killed 4K bakes (the first 4K attempt died
+    after baking only the AO pass); an explicit value must reach ONLY the
+    bake op and be recorded in the refusal/finish evidence."""
+    job = load_job(JOB)
+    spec, _warnings = compile_spec(load_template(TEMPLATE), job)
+    rec = _ChainRecorder()
+    logs: list[str] = []
+    with pytest.raises(PlaceholderDimensionsError, match="REFUSED"):
+        finish_delivery(job, spec, out_root=tmp_path / "packages",
+                        runner=rec, log=logs.append, resolution=64,
+                        bake_timeout_sec=3600.0)
+    assert rec.timeouts["bake_maps"] == 3600.0
+    # the timeout is bake-specific: nothing else is time-capped
+    for op in ("prepare_delivery_scene", "decimate_to_budget", "render_views"):
+        assert rec.timeouts[op] is None
+    report = json.loads(
+        (tmp_path / "blocked" / job.job_code / "qa_report.json")
+        .read_text(encoding="utf-8"))
+    assert report["finish"]["bake_timeout_sec"] == 3600.0
 
 
 def test_cli_package_template_placeholder_exits_2(tmp_path, monkeypatch):

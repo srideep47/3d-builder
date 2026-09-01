@@ -361,6 +361,7 @@ def package(
     spec: str = typer.Option(None, "--spec", help="ObjectSpec JSON instead of a source GLB: run the full T3 finish chain (build → UV atlas → bake → decimate → live-quad FBX)"),
     template: str = typer.Option(None, "--template", help="Product-class template YAML instead of a spec: compiled with the job card's dimensions (T4)"),
     resolution: int = typer.Option(1024, "--res", help="Texture resolution for --spec/--template bakes"),
+    bake_timeout: float = typer.Option(300.0, "--bake-timeout", help="Bake subprocess timeout in seconds (4K bakes need ~16x the 1K time; 3600 is comfortable)"),
 ):
     """Assemble the client delivery package (§4.1) + qa_report.json, then validate it.
 
@@ -413,7 +414,8 @@ def package(
             with console.status("[bold cyan]Finishing delivery (template → build → atlas → bake → decimate → export)...[/]"):
                 report = finish_delivery(job_card, object_spec, out_root=Path(out_root),
                                          runner=runner, log=console.print,
-                                         resolution=resolution)
+                                         resolution=resolution,
+                                         bake_timeout_sec=bake_timeout)
         elif spec:
             from .client.package import finish_delivery
             from .spec.schema import ObjectSpec
@@ -430,7 +432,8 @@ def package(
             with console.status("[bold cyan]Finishing delivery (build → atlas → bake → decimate → export)...[/]"):
                 report = finish_delivery(job_card, object_spec, out_root=Path(out_root),
                                          runner=runner, log=console.print,
-                                         resolution=resolution)
+                                         resolution=resolution,
+                                         bake_timeout_sec=bake_timeout)
         else:
             from .client.package import package_delivery
 

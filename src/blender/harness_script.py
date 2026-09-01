@@ -573,6 +573,8 @@ def _build_sweep(name, path_points, dims, closed=False):
         curve.bevel_mode = "OBJECT"
     else:
         curve.bevel_depth = float(dims[0]) * 0.5
+        # a round CORD (tape edges), not the default low-poly bevel profile
+        curve.bevel_resolution = 4
 
     obj = bpy.data.objects.new(name, curve)
     bpy.context.collection.objects.link(obj)
@@ -2768,7 +2770,11 @@ def op_bake_maps(params):
             min_dim = min(bb[1][i] - bb[0][i] for i in range(3)) if bb else bevel_width
             part_bevel = part_detail.get("bevel_width")
             width = max(min(part_bevel if part_bevel else bevel_width, 0.05 * min_dim), 1e-5)
-            part_levels = int(part_detail.get("subdivision_levels") or hp_levels)
+            # explicit 0 is meaningful (bevel-only HP — real LP geometry must
+            # not be subsurf-smoothed away in the bake); only an absent key
+            # falls back to the scene default
+            raw_levels = part_detail.get("subdivision_levels")
+            part_levels = hp_levels if raw_levels is None else int(raw_levels)
             select_only([obj])
             bpy.ops.object.duplicate()
             hp = bpy.context.active_object
@@ -2781,10 +2787,13 @@ def op_bake_maps(params):
             select_only([hp])
             bpy.ops.object.shade_smooth()
             bpy.ops.object.modifier_apply(modifier=bev.name)
-            sub = hp.modifiers.new(name="ThreedHPSubdiv", type="SUBSURF")
-            sub.levels = part_levels
-            sub.render_levels = part_levels
-            bpy.ops.object.modifier_apply(modifier=sub.name)
+            if part_levels > 0:
+                # levels=0 leaves the modifier "disabled" — modifier_apply
+                # then raises; a bevel-only HP simply skips subsurf
+                sub = hp.modifiers.new(name="ThreedHPSubdiv", type="SUBSURF")
+                sub.levels = part_levels
+                sub.render_levels = part_levels
+                bpy.ops.object.modifier_apply(modifier=sub.name)
             _displace_along_normals(hp, max(0.002 * min_dim, 1e-5))
             if part_detail.get("displacement"):
                 _apply_pattern_displacement(hp, part_detail["displacement"])

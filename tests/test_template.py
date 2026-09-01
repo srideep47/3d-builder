@@ -49,12 +49,14 @@ def _part(spec, name):
 
 
 def test_mattress_template_loads_and_validates(mattress):
-    # §5.2 structure: crown + air-mesh + 3 velvet + 2 knit ribs + base
+    # §5.2 structure (round-3 correction, reviewer's eyes): crown + air-mesh
+    # + knit/velvet x3 (rib FIRST below the air-mesh) + white band + base
     assert mattress.product_class == "mattress"
-    assert len(mattress.bands) == 8
+    assert len(mattress.bands) == 10
     assert [b.name for b in mattress.bands] == [
-        "crown", "air_mesh", "velvet_1", "knit_1",
-        "velvet_2", "knit_2", "velvet_3", "base",
+        "crown", "air_mesh", "knit_1", "velvet_1",
+        "knit_2", "velvet_2", "knit_3", "velvet_3",
+        "white_band", "base",
     ]
     assert len(mattress.tape_edges) == 3  # §5.2 bands 2/4/6
     assert mattress.crown is not None and mattress.crown.quilt is not None
@@ -135,8 +137,9 @@ def test_bands_stack_to_full_height(compiled):
     ez = job.expected_bounds_m()["z"]
     band_parts = [p for p in compiled.parts
                   if p.name != "decal_patch"
-                  and not p.name.startswith("tape_")]
-    assert len(band_parts) == 8
+                  and not p.name.startswith("tape_")
+                  and not p.name.startswith("handle_")]
+    assert len(band_parts) == 10
     assert sum(p.dimensions[2] for p in band_parts) == pytest.approx(ez, abs=1e-6)
     # and they stack: sorted by z-base, bases chain exactly
     ordered = sorted(band_parts, key=lambda p: p.position[2])
@@ -156,22 +159,32 @@ def test_crown_compiles_to_script_dome(compiled):
 
 
 def test_crown_quilt_references_cell_size(compiled, mattress):
-    """Quilt amplitude is a fraction of one quilt CELL (footprint / cells),
-    not of the mattress height — scale-invariant puff depth. Cells are
-    square in metres: frequency_y follows the footprint aspect."""
+    """Round-3 rework: the quilt is REAL LP geometry baked into the crown
+    script. The puff AMPLITUDE is a fraction of one quilt CELL (footprint /
+    cells), not of the mattress height — scale-invariant puff depth — and
+    the profile is lowered by exactly that amplitude so peaks land on the
+    nominal band top (bounds contract). Cross-cell count follows the
+    footprint aspect (whole cells, square in metres). The HP must not
+    subsurf-smooth the puffs away: subdivision_levels=0 (bevel-only)."""
     job = load_job(JOB)
     bounds = job.expected_bounds_m()
     ex, ey = bounds["x"], bounds["y"]
     q = mattress.crown.quilt
     p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * min(bounds.values())
-    cell = (ex - 2 * p_max) / q.cells_across
+    a_body = ex / 2 - p_max
+    b_body = ey / 2 - p_max
+    amp = q.amplitude_fraction * (2 * a_body / q.cells_across)
     crown = _part(compiled, "crown")
+    # bevel-only HP: explicit zero, not the absent-key default
     assert crown.detail is not None
-    assert crown.detail.displacement.amplitude == pytest.approx(
-        q.amplitude_fraction * cell)
-    assert crown.detail.displacement.frequency_y == pytest.approx(
-        crown.detail.displacement.frequency * ey / ex)
-    assert crown.detail.displacement.restrict == "up"  # LP bounds never move
+    assert crown.detail.subdivision_levels == 0
+    assert crown.detail.displacement is None
+    # tokens substituted into the script: amplitude, lowered profile, cells
+    assert crown.code and "__AMP__" not in crown.code
+    assert f"AMP = {amp!r}" in crown.code
+    assert f"H = {crown.dimensions[2] - amp!r}" in crown.code
+    assert f"CX = {q.cells_across}" in crown.code
+    assert f"CY = {round(q.cells_across * b_body / a_body)}" in crown.code
 
 
 def test_bands_inset_by_tape_protrusion(compiled, mattress):
@@ -218,8 +231,8 @@ def test_tape_fractions_are_of_the_cross_section_scale(mattress):
     """Tape size follows min(L, W, H), not H: the same template must give a
     ~13 mm strip on the tall 12x12x65 in placeholder AND a ~11 mm strip on
     a queen — a tape is a detail of the side face, not of the height."""
-    for job_dims, expected_width in (((0.3048, 0.3048, 1.651), 0.045 * 0.3048),
-                                     ((2.032, 1.524, 0.254), 0.045 * 0.254)):
+    for job_dims, expected_width in (((0.3048, 0.3048, 1.651), 0.023 * 0.3048),
+                                     ((2.032, 1.524, 0.254), 0.023 * 0.254)):
         spec, _warnings = compile_spec(mattress, _job(*job_dims, code="SC"))
         tape = {p.name: p for p in spec.parts}["tape_1"]
         assert tape.dimensions[1] == pytest.approx(expected_width), job_dims

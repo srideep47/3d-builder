@@ -15,8 +15,9 @@ existing pipeline already understands. The compiler emits:
 
   - one fan-capped `extrude` part per band, all sharing the same
     superellipse footprint outline (flush wall junctions, zero n-gons);
-  - a script-method dome part for the crown band (radial rings over the
-    same footprint, quads + triangle pole/cap fans);
+  - a script-method quilted-dome part for the crown band (a Cartesian grid
+    cap FG-mapped onto the same footprint superellipse: square quilt cells,
+    stitch valleys on grid lines, quads + a triangle cap fan);
   - one closed-loop `sweep` part per tape edge (thin binding strip: the
     rectangular section seats flush on the band wall and stands proud by
     exactly one protrusion, outer face on the nominal silhouette);
@@ -38,7 +39,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..client.job import JobCard
-from .schema import (ConstraintSpec, DetailSpec, DisplacementSpec, ObjectSpec,
+from .schema import (ConstraintSpec, DetailSpec, ObjectSpec,
                      PBRMaterial, PartSpec)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -81,23 +82,36 @@ class TapeEdgeSpec(BaseModel):
 
 
 class QuiltSpec(BaseModel):
-    """HP displacement on the crown (bakes into the LP normal map; the LP
-    bounds never move). Cells are SQUARE in metres: frequency_y is derived
-    from the footprint aspect at compile time."""
+    """REAL low-poly quilt geometry on the crown band (reviewer round-3
+    correction: in the reference photos the puffs break the top silhouette,
+    so the quilt must be mesh, not a baked normal map — a normal map carries
+    no silhouette). The dome profile is lowered by the puff amplitude so the
+    peaks land exactly on the band top: overall bounds stay nominal at any
+    template scale. Cells are square in metres: the cross-cell count is
+    derived from the footprint aspect at compile time (rounded to a whole
+    cell so the grid ends on a valley, not a partial cell)."""
 
-    pattern: Literal["grid_diamond", "grid_square", "bumps"] = "grid_diamond"
-    cells_across: int = Field(default=8, ge=1)
-    amplitude_fraction: float = Field(gt=0)  # of H
-    exponent: float = Field(default=1.6, gt=0)
+    pattern: Literal["grid_diamond", "grid_square", "bumps"] = "grid_square"
+    cells_across: int = Field(default=17, ge=1)      # cells along the LENGTH
+    amplitude_fraction: float = Field(gt=0)          # of one CELL — puff depth
+    exponent: float = Field(default=1.6, gt=0)       # soft-edged puffs
+    divisions: int = Field(default=4, ge=2)          # grid samples per cell
+    restrict_z: float = Field(default=0.85, gt=0.0, lt=1.0)
+    # ^^ displace only vertices whose normal.z >= this: the near-vertical
+    # shoulder stays put, so radial bulges can never push the silhouette
+    # past the footprint (the profile reaches normal.z=0.85 only ~12 mm
+    # inside the wall — below that the horizontal puff component would
+    # outrun the dome's radial inset and break the bounds contract)
 
 
 class CrownSpec(BaseModel):
-    """The top band as a dome instead of a prism: radial rings over the
-    shared footprint, z(s) = H*(1 - s^Q)^(1/Q). Q ~ 3-4 gives a pillow-like
-    profile (near-full height over the middle, roll-off near the wall)."""
+    """The top band as a quilted dome: a Cartesian grid cap mapped onto the
+    shared footprint superellipse (FG-style square-to-squircle map — square
+    quilt cells in straight rows/columns, matching the reference photos),
+    z from the pillow profile z(s) = H*(1 - s^Q)^(1/Q), plus the quilt puff
+    displacement applied directly to the LP vertices."""
 
     profile_exponent: float = Field(default=3.5, gt=0)
-    rings: int = Field(default=10, ge=2)
     quilt: QuiltSpec | None = None
 
 
@@ -122,6 +136,9 @@ class SurfaceSpec(BaseModel):
     base: Literal["scan", "flat"] = "flat"
     scan: str | None = None  # CC0 scan dir name under input/textures/cc0/
     tint: list[float] | None = None  # force the colour family, keep structure
+    # rotate the composed maps by quarter turns: a scan's directional nap
+    # (e.g. horizontal streaks) can be turned to render vertical on walls
+    rotate_deg: Literal[0, 90, 180, 270] = 0
     roughness: float = Field(default=0.7, ge=0, le=1)
     bump_strength: float = Field(default=0.15, ge=0, le=1)
     layers: list[TextureLayerSpec] = Field(default_factory=list)
@@ -146,6 +163,27 @@ class DecalSpec(BaseModel):
     texture: str  # DIR containing albedo.png (repo-relative), like surfaces
 
 
+class CarryHandleSpec(BaseModel):
+    """Vertical straps on the long-side faces crossing the border stack
+    (reviewer round-3 correction: the carry handles EXIST — photo 9.28.35 —
+    the §9.4 open question is closed; they were previously deferred)."""
+
+    enabled: bool = False
+    count_per_side: int = Field(default=2, ge=1, le=4)
+    width_fraction: float = Field(default=0.08, gt=0)  # of cross-section scale
+    # of the tape protrusion: the strap's outer face stays just BEHIND the
+    # tape plane — flush enough to read as surface-mounted, recessed enough
+    # that straps crossing the tapes never z-fight on the shared outer plane
+    protrusion_fraction: float = Field(default=0.92, gt=0.0, le=1.0)
+    from_boundary: str  # strap bottom at this band's bottom edge
+    to_boundary: str    # strap top at this band's bottom edge (full stack span)
+    material: str
+
+
+class FeaturesSpec(BaseModel):
+    carry_handles: CarryHandleSpec | None = None
+
+
 class TemplateSpec(BaseModel):
     product_class: str
     description: str = ""
@@ -155,7 +193,7 @@ class TemplateSpec(BaseModel):
     tape_edges: list[TapeEdgeSpec] = Field(default_factory=list)
     decal: DecalSpec | None = None
     textures: dict[str, SurfaceSpec]
-    features: dict[str, Any] = Field(default_factory=dict)  # e.g. carry_handles: {enabled: false}
+    features: FeaturesSpec = Field(default_factory=FeaturesSpec)
     tri_budget: int = Field(default=50000, gt=0)
 
     @field_validator("product_class")
@@ -186,6 +224,17 @@ class TemplateSpec(BaseModel):
             if tape.at_boundary_below not in names:
                 raise ValueError(
                     f"tape at_boundary_below {tape.at_boundary_below!r} is not a band name ({names})"
+                )
+        ch = self.features.carry_handles
+        if ch is not None and ch.enabled:
+            for field in ("from_boundary", "to_boundary"):
+                if getattr(ch, field) not in names:
+                    raise ValueError(
+                        f"carry_handles {field} {getattr(ch, field)!r} is not a band name ({names})"
+                    )
+            if ch.material not in self.textures:
+                raise ValueError(
+                    f"carry_handles material {ch.material!r} is not defined in textures"
                 )
         if self.crown is not None and self.crown.quilt is not None and len(names) < 2:
             raise ValueError("a quilted crown needs at least one band below it for the tape to sit on")
@@ -243,57 +292,127 @@ def _offset_loop(points: list[list[float]], delta: float) -> list[list[float]]:
     return out
 
 
-# Self-contained dome builder (runs inside Blender via the script-method part;
-# the harness script namespace only exposes bpy). __TOKENS__ are substituted
-# by compile_spec. Builds from z=0 up to __H__ at the origin; the caller
-# positions it via obj.location.
-_DOME_SCRIPT = """
+# Self-contained QUILTED-dome builder (runs inside Blender via the script-
+# method part; the harness script namespace only exposes bpy). __TOKENS__ are
+# substituted by compile_spec. Builds from z=0 up to the band top at the
+# origin; the caller positions it via obj.location.
+#
+# Round-3 rework (reviewer's eyes, GLM_BRIEF.md §5.2): the quilt is REAL
+# low-poly geometry — the puffs must break the top silhouette, which a baked
+# normal map cannot do. Construction, in order:
+#   1. a Cartesian grid in (u, v) in [-1, 1]^2: uniform over the interior at
+#      exactly 2/(cells*divisions) spacing ANCHORED AT u=-1, so every
+#      `divisions`-th line is a cell boundary and the stitch valleys land
+#      exactly on grid lines; past the last whole cell the lines cluster
+#      quadratically toward the wall (the profile's near-vertical drop is
+#      resolved without over-tessellating the flat top);
+#   2. an FG-style superellipse map (u, v) -> (x, y): square quilt cells in
+#      metres in the interior, boundary EXACTLY on the footprint
+#      superellipse at z=0 (seats on the band walls with no gap), bijective;
+#   3. a flat bottom cap fanned from a centre vertex (seats on the band
+#      below, never visible);
+#   4. puffs displaced along vertex normals, the pattern evaluated in (u, v)
+#      PARAMETER space (so mesh grid lines ARE stitch valleys), gated by
+#      normal.z >= RZ so the near-vertical shoulder stays on the footprint.
+_QUILT_DOME_SCRIPT = """
 import bpy, bmesh, math
 
-A = __A__
-B = __B__
-H = __H__
-N = __N__
-Q = __Q__
-SEG = __SEG__
-RINGS = __RINGS__
+A = __A__          # half length of the body-inset footprint
+B = __B__          # half width
+H = __H__          # profile height = band height MINUS puff amplitude, so
+                   # puff peaks land exactly on the nominal band top
+N = __N__          # footprint superellipse exponent
+Q = __Q__          # crown profile exponent
+CX = __CX__        # quilt cells along the length (x)
+CY = __CY__        # quilt cells along the width (y) — whole cells, square in m
+AMP = __AMP__      # puff amplitude (m), along vertex normals
+EXP = __EXP__      # puff softness exponent
+DIV = __DIV__      # grid samples per quilt cell (interior spacing)
+RZ = __RZ__        # displace only verts with normal.z >= RZ (bounds guard)
+PATTERN = "__PATTERN__"
 NAME = "__NAME__"
 Z0 = __Z0__
 
-
-def footprint(t):
-    ct, st = math.cos(t), math.sin(t)
-    x = A * math.copysign(abs(ct) ** (2.0 / N), ct)
-    y = B * math.copysign(abs(st) ** (2.0 / N), st)
-    return x, y
+EDGE_MAX = 0.85    # uniform region ends at the last cell boundary <= this
 
 
+def dome_point(u, v):
+    # FG superellipse map of the unit square onto the footprint: square
+    # cells in the interior, boundary exactly ON the superellipse (sigma=1,
+    # z=0 — flush with the band walls), bijective with no folds. Closed
+    # form of the mapped radius: sigma^N = |u|^N+|v|^N-|u|^N*|v|^N.
+    x = u * (1.0 - 0.5 * abs(v) ** N) ** (1.0 / N)
+    y = v * (1.0 - 0.5 * abs(u) ** N) ** (1.0 / N)
+    sig = (abs(u) ** N + abs(v) ** N - (abs(u) * abs(v)) ** N) ** (1.0 / N)
+    z = H * (1.0 - sig ** Q) ** (1.0 / Q) if sig < 1.0 else 0.0
+    return x * A, y * B, z
+
+
+def grid_lines(cells):
+    # Interior: spacing exactly 2/(cells*DIV) anchored at u=-1 — every
+    # DIV-th line is a cell boundary, so pattern valleys coincide with grid
+    # lines (crisp stitched creases instead of sampled wiggles). Uniform up
+    # to the last whole cell boundary <= EDGE_MAX. Shoulder: quadratic
+    # clustering to the wall — spacing ramps smoothly from the interior
+    # step down to ~1 mm, and the last line IS u=1.0 exactly. Only the
+    # positive side is generated; the negative side is the mirror.
+    step = 2.0 / (cells * DIV)
+    k_edge = int(math.floor((EDGE_MAX + 1.0) / step)) // DIV * DIV
+    inner = [u for u in (-1.0 + k * step for k in range(k_edge + 1))
+             if u >= -1e-12]
+    e0 = inner[-1]
+    span = 1.0 - e0
+    m = max(6, min(16, int(round(2.0 * span / step))))
+    shoulder = [e0 + span * (1.0 - (1.0 - i / m) ** 2) for i in range(1, m + 1)]
+    pos = inner + shoulder            # centre (or near) .. 1.0, ascending
+    return [-p for p in reversed(pos) if p > 1e-12] + pos
+
+
+def puff(u, v):
+    # Pattern in (u, v) PARAMETER space: valleys exactly on grid lines,
+    # peaks at cell centres (grid_square) or cell corners (grid_diamond).
+    cu = (u + 1.0) * 0.5 * CX
+    cv = (v + 1.0) * 0.5 * CY
+    if PATTERN == "grid_diamond":
+        return abs(math.sin(math.pi * (cu + cv))
+                   * math.sin(math.pi * (cu - cv))) ** EXP
+    if PATTERN == "bumps":
+        du = cu - math.floor(cu) - 0.5
+        dv = cv - math.floor(cv) - 0.5
+        return max(0.0, 1.0 - 4.0 * (du * du + dv * dv)) ** EXP
+    return (abs(math.sin(math.pi * cu))
+            * abs(math.sin(math.pi * cv))) ** EXP  # grid_square
+
+
+us = grid_lines(CX)
+vs = grid_lines(CY)
+if len(us) < 3 or len(vs) < 3:
+    raise ValueError("degenerate quilt grid")
 bm = bmesh.new()
-ts = [2.0 * math.pi * i / SEG for i in range(SEG)]
-center = bm.verts.new((0.0, 0.0, H))
-rings = []
-for k in range(1, RINGS + 1):
-    s = k / RINGS
-    z = H * (1.0 - s ** Q) ** (1.0 / Q)
-    rings.append([
-        bm.verts.new((x * s, y * s, z)) for x, y in (footprint(t) for t in ts)
-    ])
-r1 = rings[0]
-for i in range(SEG):
-    bm.faces.new((center, r1[i], r1[(i + 1) % SEG]))
-for k in range(RINGS - 1):
-    r0, r1 = rings[k], rings[k + 1]
-    for i in range(SEG):
-        bm.faces.new((r0[i], r1[i], r1[(i + 1) % SEG], r0[(i + 1) % SEG]))
-outer = rings[-1]
-cap = bm.verts.new((
-    sum(v.co.x for v in outer) / SEG,
-    sum(v.co.y for v in outer) / SEG,
-    0.0,
-))
-for i in range(SEG):
-    bm.faces.new((cap, outer[i], outer[(i + 1) % SEG]))
+grid = [[bm.verts.new(dome_point(u, v)) for v in vs] for u in us]
+for i in range(len(us) - 1):
+    for j in range(len(vs) - 1):
+        bm.faces.new((grid[i][j], grid[i + 1][j],
+                      grid[i + 1][j + 1], grid[i][j + 1]))
+# flat bottom cap: fan from a centre vertex at z=0 around the boundary loop
+imu, jmv = len(us) - 1, len(vs) - 1
+loop = ([grid[0][j] for j in range(jmv + 1)]
+        + [grid[i][jmv] for i in range(1, imu + 1)]
+        + [grid[imu][j] for j in range(jmv - 1, -1, -1)]
+        + [grid[i][0] for i in range(imu - 1, 0, -1)])
+cap = bm.verts.new((0.0, 0.0, 0.0))
+for k in range(len(loop)):
+    bm.faces.new((cap, loop[k], loop[(k + 1) % len(loop)]))
 bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+bm.normal_update()
+moved = 0
+for i, u in enumerate(us):
+    for j, v in enumerate(vs):
+        vert = grid[i][j]
+        if vert.normal.z < RZ:
+            continue
+        vert.co = vert.co + vert.normal * (AMP * puff(u, v))
+        moved += 1
 me = bpy.data.meshes.new(NAME)
 bm.to_mesh(me)
 bm.free()
@@ -301,20 +420,40 @@ obj = bpy.data.objects.new(NAME, me)
 bpy.context.collection.objects.link(obj)
 obj.location.z += Z0
 obj.data = me
-RESULT = {"verts": len(me.vertices), "faces": len(me.polygons)}
+RESULT = {"verts": len(me.vertices), "faces": len(me.polygons),
+          "quads": sum(1 for p in me.polygons if len(p.vertices) == 4),
+          "tris": sum(1 for p in me.polygons if len(p.vertices) == 3),
+          "displaced_verts": moved}
 """
+
+
+def _cross_cells(cells_x: int, a: float, b: float) -> int:
+    """Whole cells across the WIDTH so cells stay square in metres
+    (cell_y = 2b/cells_y ~= cell_x = 2a/cells_x)."""
+    return max(1, int(round(cells_x * b / a)))
 
 
 def _dome_part(name: str, a: float, b: float, height: float, crown: CrownSpec,
                footprint: FootprintSpec, z0: float) -> PartSpec:
-    code = (_DOME_SCRIPT
+    q = crown.quilt
+    cells_x = q.cells_across if q else 1
+    cell = 2.0 * a / max(cells_x, 1)
+    amp = q.amplitude_fraction * cell if q else 0.0
+    code = (_QUILT_DOME_SCRIPT
             .replace("__A__", repr(a))
             .replace("__B__", repr(b))
-            .replace("__H__", repr(height))
+            # peaks land exactly on the band top: the profile is lowered by
+            # the puff amplitude (bounds contract — any template scale)
+            .replace("__H__", repr(max(height - amp, 1e-4)))
             .replace("__N__", repr(footprint.exponent))
             .replace("__Q__", repr(crown.profile_exponent))
-            .replace("__SEG__", str(footprint.segments))
-            .replace("__RINGS__", str(crown.rings))
+            .replace("__CX__", str(cells_x))
+            .replace("__CY__", str(_cross_cells(cells_x, a, b)))
+            .replace("__AMP__", repr(amp))
+            .replace("__EXP__", repr(q.exponent if q else 1.6))
+            .replace("__DIV__", str(q.divisions if q else 4))
+            .replace("__RZ__", repr(q.restrict_z if q else 0.85))
+            .replace("__PATTERN__", q.pattern if q else "grid_square")
             .replace("__NAME__", name)
             .replace("__Z0__", repr(z0)))
     return PartSpec(
@@ -421,22 +560,11 @@ def compile_spec(template: TemplateSpec, job: JobCard) -> tuple[ObjectSpec, list
             )
         part.material = _material_for(template, band.material, "band")
         if is_crown and template.crown.quilt is not None:
-            q = template.crown.quilt
-            # Quilt puffs are per-cell features: the amplitude references the
-            # CELL SIZE (footprint / cells), not the mattress height, so the
-            # quilting reads identically at any mattress size.
-            cell = 2.0 * a_body / max(q.cells_across, 1)
-            part.detail = DetailSpec(
-                displacement=DisplacementSpec(
-                    pattern=q.pattern,
-                    amplitude=q.amplitude_fraction * cell,
-                    frequency=float(q.cells_across),
-                    # square cells in metres: repeats across Y scaled by aspect
-                    frequency_y=round(q.cells_across * ey / ex, 6) or None,
-                    exponent=q.exponent,
-                    restrict="up",
-                )
-            )
+            # The quilt is REAL LP geometry now (round 3): the HP exists only
+            # to round the stitch valleys — subdivision_levels=0 keeps the HP
+            # a bevel-only shell (subsurf would smooth the puffs away in the
+            # baked normal map, the round-2 "absent quilt" failure mode).
+            part.detail = DetailSpec(subdivision_levels=0)
         parts.append(part)
 
     for i, tape in enumerate(template.tape_edges):
@@ -459,6 +587,49 @@ def compile_spec(template: TemplateSpec, job: JobCard) -> tuple[ObjectSpec, list
             material=_material_for(template, tape.material, "tape"),
         )
         parts.append(part)
+
+    ch = template.features.carry_handles
+    if ch is not None and ch.enabled:
+        # Reviewer round-3 correction (photo 9.28.35): the carry handles
+        # exist — vertical straps crossing the FULL border stack, two per
+        # long side at the quarter points. Each strap is a thin box whose
+        # inner face is buried a few mm past the local wall (the wall curves
+        # away from the strap centre near the quarter points) and whose
+        # outer face stays just behind the tape plane: visibly raised, can
+        # never widen the nominal silhouette, and never z-fights the tapes
+        # it crosses.
+        w = ch.width_fraction * scale
+        z0, z1 = bottoms[ch.from_boundary], bottoms[ch.to_boundary]
+        if z1 <= z0:
+            raise ValueError(
+                f"carry_handles to_boundary {ch.to_boundary!r} must sit above "
+                f"from_boundary {ch.from_boundary!r} in the band stack"
+            )
+        protr = ch.protrusion_fraction * p_max if p_max > 0 else 0.002
+        embed = 0.004  # past the wall curvature drop across the strap width
+        mat = _material_for(template, ch.material, "handle")
+        n_fp = fp.exponent
+        for face, sign in (("front", -1.0), ("back", 1.0)):
+            for k in range(ch.count_per_side):
+                # quarter points for the observed 2-per-side; even spacing
+                # (avoiding centre and ends) for any other count
+                if ch.count_per_side == 2:
+                    frac = -0.5 if k == 0 else 0.5
+                else:
+                    frac = 2.0 * (k + 1) / (ch.count_per_side + 1) - 1.0
+                xc = frac * (ex / 2.0)
+                # local wall y at the strap's outer edge (worst curvature)
+                x_edge = min(abs(xc) + w / 2.0, 0.999 * a_body)
+                y_wall = b_body * (1.0 - (x_edge / a_body) ** n_fp) ** (1.0 / n_fp)
+                y_in, y_out = y_wall - embed, b_body + protr
+                parts.append(PartSpec(
+                    name=f"handle_{face}_{k + 1}",
+                    shape="box",
+                    dimensions=[w, y_out - y_in, z1 - z0],
+                    position=[xc, sign * (y_in + y_out) / 2.0, (z0 + z1) / 2.0],
+                    position_mode="center",
+                    material=mat,
+                ))
 
     if template.decal is not None:
         d = template.decal

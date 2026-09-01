@@ -36,7 +36,7 @@ JOB = PROJECT_ROOT / "input" / "jobs" / "MAYA00053153.yaml"
 NOM = {"x": 0.3048, "y": 0.3048, "z": 1.651}
 EZ = NOM["z"]
 SCALE = min(NOM.values())  # tape fractions are of the cross-section scale
-P_MAX = 0.016 * SCALE  # tape protrusion (largest of the template's tapes)
+P_MAX = 0.023 * SCALE  # tape cord radius*2 (round-3: rounded cord, 2-3% of H)
 A_BODY = NOM["x"] / 2 - P_MAX  # inset band wall half-width
 
 
@@ -65,7 +65,7 @@ def quad_scene(runner, tmp_path_factory):
         resolve_spec_to_build_params(spec, output_glb_path=str(blend)))
     assert res["success"], res.get("error")
     assert res["warnings"] == []
-    assert res["parts_created"] == 12
+    assert res["parts_created"] == 18
     return blend
 
 
@@ -110,8 +110,8 @@ RESULT = out
 # ── every part is a real, closed, quad/tri-only mesh ─────────────────────────
 
 
-def test_twelve_real_mesh_parts(objects):
-    assert len(objects) == 12  # 8 bands + 3 tapes + decal
+def test_all_real_mesh_parts(objects):
+    assert len(objects) == 18  # 10 bands + 3 tapes + 4 handles + decal (round 3)
     for name, o in objects.items():
         assert o["quad"] + o["tri"] > 0, name
 
@@ -131,11 +131,13 @@ def test_every_part_is_an_independently_closed_solid(objects):
 
 
 def test_dome_is_quads_plus_pole_fans(objects):
-    """The crown script part: SEG*RINGS ring quads + two triangle fans
-    (pole + base), deterministically."""
+    """The crown script part (round-3 quilt rework): a Cartesian grid cap —
+    (lines_x-1) x (lines_y-1) quads with stitch valleys exactly on grid
+    lines — plus one triangle fan closing the flat bottom. On this square
+    placeholder job both axes derive 17 cells -> 85 grid lines each."""
     crown = objects["crown"]
-    assert crown["quad"] == 48 * 9  # rings 1..9 of 10
-    assert crown["tri"] == 48 * 2   # apex pole fan + base cap fan
+    assert crown["quad"] == 84 * 84  # grid quads (17 cells x 4 divisions)
+    assert crown["tri"] == 2 * 84 + 2 * 84  # boundary-loop cap fan
 
 
 # ── the geometry contract: nominal silhouette ────────────────────────────────
@@ -145,7 +147,7 @@ def test_band_walls_are_inset_by_the_tape_protrusion(objects):
     body = objects["air_mesh"]
     assert body["x"][1] - body["x"][0] == pytest.approx(2 * A_BODY, abs=2e-4)
     assert body["y"][1] - body["y"][0] == pytest.approx(2 * A_BODY, abs=2e-4)
-    assert body["z"][1] - body["z"][0] == pytest.approx(0.17 * EZ, abs=2e-4)
+    assert body["z"][1] - body["z"][0] == pytest.approx(0.162 * EZ, abs=2e-4)
     # centred on the footprint
     assert body["x"][0] == pytest.approx(-A_BODY, abs=2e-4)
 
@@ -157,16 +159,18 @@ def test_tape_outer_faces_land_exactly_on_nominal(objects):
         assert t["x"][0] == pytest.approx(-NOM["x"] / 2, abs=2e-4), tape
         assert t["y"][0] == pytest.approx(-NOM["y"] / 2, abs=2e-4), tape
         assert t["y"][1] == pytest.approx(NOM["y"] / 2, abs=2e-4), tape
-        assert t["z"][1] - t["z"][0] == pytest.approx(0.045 * SCALE, abs=2e-4)
+        assert t["z"][1] - t["z"][0] == pytest.approx(0.023 * SCALE, abs=2e-4)  # cord diameter
 
 
-def test_tape_section_is_thin_and_flush_seated(runner, quad_scene):
-    """§5.2 DEFECT 1 regression pin: binding tape HUGS the wall — the
-    section is [protrusion x width] with its inner face ON the band wall
-    and exactly one protrusion of stand-off. Measured on tape_1's +X-flat
-    section corners (path point 0 sits at y = 0, x > 0; its 4 corners are
-    the only verts on that flat). The old [2*protrusion x thickness]
-    half-buried section of H rendered as 58 mm collars."""
+def test_tape_section_is_a_round_cord_flush_on_the_wall(runner, quad_scene):
+    """§5.2 DEFECT 1 regression pin (round-3 cord form): binding tape HUGS
+    the wall — a round cord whose INNER TANGENT sits on the band wall and
+    whose OUTER TANGENT lands exactly on the nominal silhouette (one
+    protrusion of stand-off). Measured on tape_1's +X-flat ring (path point
+    0 sits at y = 0, x > 0, so the whole section ring is on that flat).
+    The old [2*protrusion x thickness] half-buried section of H rendered as
+    58 mm collars; the flat-strip form read too thin vs the reference
+    photos (round-3 correction: a rounded cord, 2-3% of H)."""
     code = r"""
 import bpy
 from mathutils import Vector
@@ -182,10 +186,10 @@ RESULT = {"xs": sorted(xs), "z0": min(zs), "z1": max(zs), "n": len(zs)}
     res = runner.execute_op("run_script", {"code": code, "input": str(quad_scene)})
     assert res["success"], res.get("error")
     sec = res["result"]
-    assert sec["n"] == 4  # one rectangular section at the +X flat
-    assert min(sec["xs"]) == pytest.approx(A_BODY, abs=1e-5)   # flush on wall
-    assert max(sec["xs"]) == pytest.approx(A_BODY + P_MAX, abs=1e-5)  # one proud
-    assert sec["z1"] - sec["z0"] == pytest.approx(0.045 * SCALE, abs=1e-5)  # thin
+    assert sec["n"] == 12  # one 12-gon section ring at the +X flat
+    assert min(sec["xs"]) == pytest.approx(A_BODY, abs=1e-5)  # inner tangent on wall
+    assert max(sec["xs"]) == pytest.approx(A_BODY + P_MAX, abs=1e-5)  # outer on nominal
+    assert sec["z1"] - sec["z0"] == pytest.approx(P_MAX, abs=1e-5)  # cord diameter
     # centred on the crown/air-mesh boundary
     assert (sec["z0"] + sec["z1"]) / 2 == pytest.approx(0.72 * EZ, abs=1e-5)
 
@@ -211,18 +215,28 @@ def test_uv_contiguous_faces_merge_into_few_islands(prepared_scene):
     UV-contiguous faces across shared edges. The old loop-matching bug
     compared ONE corner per face across a shared edge — consistent winding
     puts those two corners at opposite ends of the edge, so they can never
-    match — and all 2118 faces became 2118 one-face islands: margin-
-    dominated packing (~1/3 target texel density), then bake-margin bleed
-    across the wall islands (the black-and-white blotch defect). With
-    vertex-keyed matching the mattress collapses to 84 islands."""
+    match — and every face became a one-face island: margin-dominated
+    packing (~1/3 target texel density), then bake-margin bleed across the
+    wall islands (the black-and-white blotch defect). With vertex-keyed
+    matching the mattress collapses to ~150 islands. (Counts are round-3
+    values: the crown became a real quilted grid cap, the border gained a
+    white band, and four carry-handle boxes were added.)"""
     uv = prepared_scene["uv"]
     topo = prepared_scene["topology"]
-    assert topo["faces_total"] == 2118
-    assert uv["islands_total"] == 84
+    assert topo["faces_total"] == 10446  # round-3: quilted crown + 10 bands
+    # + handles + 576-face round-cord tapes (12-gon ring x 48 segments)
+    # island count shifts a little with quilt softness (smart-project groups
+    # by face-normal adjacency — exponent/amplitude tuning moves a few
+    # faces across the 66-degree limit) and with feature count (each handle
+    # box adds 6); the regression this pins is the loop-matching bug, which
+    # produced ONE ISLAND PER FACE (~9000)
+    assert 120 <= uv["islands_total"] <= 170
     assert uv["overlapping_island_pairs"] == 0
     assert uv["in_bounds"] is True
     assert uv["texel_density_texels_per_m"]["ratio"] < 1.05
-    assert prepared_scene["uv_atlas"]["pack_scale"] == pytest.approx(0.75, abs=0.01)
+    # round-3: the round-cord tapes carry ~3x the strip surface into the
+    # atlas, so the pack scale dropped from 0.75 (flat strips)
+    assert prepared_scene["uv_atlas"]["pack_scale"] == pytest.approx(0.5625, abs=0.01)
 
 
 def test_overall_bounds_exactly_nominal(objects):
@@ -249,8 +263,42 @@ def test_decal_recessed_behind_the_tape_plane(objects):
     assert d["y"][1] - d["y"][0] == pytest.approx(0.3 * P_MAX, abs=2e-4)
     h = d["z"][1] - d["z"][0]
     w = d["x"][1] - d["x"][0]
-    assert h == pytest.approx(0.38 * EZ, abs=2e-4)
+    assert h == pytest.approx(0.34 * EZ, abs=2e-4)  # round-3: ~74% of the
+    # tape-to-tape border stack — taller and narrower than the first pass
     assert h > w  # portrait per §5.3
+
+
+def test_carry_handles_cross_the_full_stack_inside_nominal(objects):
+    """Round-3 correction (photo 9.28.35): the carry handles exist — two
+    vertical straps per long side at the quarter points. Contract: the
+    strap z-span is the FULL border stack (bottom tape line to top tape
+    line), the outer face stays behind the tape plane (never widens the
+    nominal silhouette, never z-fights the tapes it crosses), and the
+    inner face is buried past the curved wall (no floating gap)."""
+    handles = {n: o for n, o in objects.items() if n.startswith("handle_")}
+    assert len(handles) == 4  # 2 per long side, front and back
+    z0 = 0.10 * EZ   # white_band bottom  (bottom tape line)
+    z1 = 0.72 * EZ   # crown bottom       (top tape line)
+    for name, hd in handles.items():
+        assert hd["z"][0] == pytest.approx(z0, abs=2e-4), name
+        assert hd["z"][1] == pytest.approx(z1, abs=2e-4), name
+        # behind the tape plane, proud of the wall, buried past the wall —
+        # sign-independent (front handles sit at -y, back handles at +y)
+        y_out = max(abs(hd["y"][0]), abs(hd["y"][1]))
+        y_in = min(abs(hd["y"][0]), abs(hd["y"][1]))
+        assert y_out < NOM["y"] / 2, name   # never widens the silhouette
+        assert y_out > A_BODY, name         # visibly raised off the wall
+        assert y_in < A_BODY, name          # no floating gap under the strap
+        assert (hd["x"][1] - hd["x"][0]) == pytest.approx(0.08 * SCALE, abs=2e-4)
+    # quarter points of the length, mirrored front/back
+    xcs = sorted({round((hd["x"][0] + hd["x"][1]) / 2.0, 4) for hd in handles.values()})
+    assert xcs == pytest.approx([-NOM["x"] / 4, NOM["x"] / 4])
+    fronts = [hd for n, hd in handles.items() if "front" in n]
+    backs = [hd for n, hd in handles.items() if "back" in n]
+    assert len(fronts) == 2 and len(backs) == 2
+    for f, b in zip(sorted(fronts, key=lambda o: o["x"][0]),
+                    sorted(backs, key=lambda o: o["x"][0])):
+        assert f["x"][0] == pytest.approx(b["x"][0])
 
 
 # ── triplanar label orientation (the +0.5 Mapping offset contract) ───────────

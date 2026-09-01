@@ -300,12 +300,20 @@ def finish_delivery(
     work_dir: Path | str | None = None,
     resolution: int = 1024,
     review_renders: bool = True,
+    bake_timeout_sec: float = 300.0,
 ) -> dict[str, Any]:
     """T3 full-quality finishing chain for a verified spec.
 
     prepare (quad-verify + UV atlas) → bake the real 5-map set from a
     high-poly detail shell → decimate the LP to the tier budget → export the
     deliverable FBX + USDZ → assemble the package + qa_report.json.
+
+    ``bake_timeout_sec``: the subprocess timeout for the bake step. The
+    300 s default is fine at 1K, but bake time scales ~with texel count —
+    a 4K bake needs ~16x (the first 4K attempt silently died at 300 s
+    after baking only the AO pass; see the round-2 session log). Pass a
+    larger value (3600 is comfortable for 4K on this hardware) whenever
+    ``resolution`` > 1024.
 
     Owner decision (recorded in PROGRESS.md): the deliverable FBX is exported
     from the LIVE QUAD-CLEAN SCENE (scene.blend), not the triangulated GLB —
@@ -369,7 +377,7 @@ def finish_delivery(
         "detail_normal": True,
         "hp_glb": str(hp_glb),
         "save_blend": str(scene_blend),
-    }), "bake_maps")
+    }, timeout_sec=bake_timeout_sec), "bake_maps")
     log(f"baked maps: {sorted(k for k, v in bake.get('maps', {}).items() if isinstance(v, dict) and 'stats' in v)}")
 
     # ── 3. LP: decimate the delivery scene to the tier budget ───────────────
@@ -423,6 +431,7 @@ def finish_delivery(
                 "hp_tri_equivalent": bake.get("hp_triangle_equivalent"),
                 "lp_budget": budget,
                 "texture_resolution": resolution,
+                "bake_timeout_sec": bake_timeout_sec,
                 "detail_parts": detail_map,
                 "uv_atlas": prep.get("uv_atlas"),
                 "uv_diagnostics": prep.get("uv"),
@@ -510,6 +519,7 @@ def finish_delivery(
         "lp_budget": budget,
         "lp_decimated": dec.get("decimated"),
         "texture_resolution": resolution,
+        "bake_timeout_sec": bake_timeout_sec,
         "detail_parts": detail_map,
         "uv_atlas": prep.get("uv_atlas"),
         "uv_diagnostics": prep.get("uv"),
