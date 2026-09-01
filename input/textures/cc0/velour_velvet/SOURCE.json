@@ -1,0 +1,33 @@
+{
+  "asset_id": "velour_velvet",
+  "name": "Velour Velvet",
+  "site": "https://polyhaven.com/a/velour_velvet",
+  "licence": "CC0 (Poly Haven publishes all assets under CC0)",
+  "physical_size_cm": [
+    284.22817052147235,
+    273.499995470047
+  ],
+  "resolution": "2k",
+  "maps": {
+    "albedo.png": {
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/velour_velvet/velour_velvet_diff_2k.jpg",
+      "md5": "8a177e9b50140fda3a46e1349b65473a",
+      "size_bytes": 3195339
+    },
+    "height.png": {
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/velour_velvet/velour_velvet_disp_2k.png",
+      "md5": "484b56fe89c41a4ba3e4d0685d8766d0",
+      "size_bytes": 6628172
+    },
+    "roughness.png": {
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/velour_velvet/velour_velvet_rough_2k.jpg",
+      "md5": "4553577d1d92669fd46534ee2ab55719",
+      "size_bytes": 3891940
+    },
+    "ao.png": {
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/velour_velvet/velour_velvet_ao_2k.jpg",
+      "md5": "ba02effd694551afaf28f7cb2b71b419",
+      "size_bytes": 2537860
+    }
+  }
+}

@@ -44,3 +44,6 @@ config/local.yaml
 # img3d service artifacts (job files, vendored model repos, service venv)
 services/img3d_service/data/
 services/img3d_service/vendor/
+
+# Composed texture surfaces (regenerable: python scripts/gen_template_textures.py)
+assets/textures/

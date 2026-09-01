@@ -1,0 +1,27 @@
+# input/jobs/MAYA00053153.yaml — the real client job card for T4.
+#
+# DIMENSIONS ARE PLACEHOLDERS. The owner's dimension line arrived blank
+# (GLM_BRIEF §9 open question 5), so the values below are the CLIENT
+# DASHBOARD's own recorded numbers (§5.5: "12 × 12 × 65 IN"), quoted
+# verbatim as stand-ins — NOT an inference of the real product and NOT a
+# guessed standard queen size (rule 9). Both the brief and the dashboard
+# values are suspect; only owner-supplied dimensions count.
+#
+# With dims_placeholder: true the pipeline runs (structural review renders
+# are valid output) but NO deliverable package is emitted — package
+# emission is refused loudly and evidence lands in output/blocked/.
+#
+# TO UNBLOCK: replace dims with the real L x W x H + explicit unit and
+# delete the dims_placeholder line.
+job_code: MAYA00053153
+dims:
+  length: 12
+  width: 12
+  height: 65
+  unit: IN
+dims_placeholder: true
+complexity: simple
+orientation: floor
+product_class: mattress
+part_scope: "mattress only — no bed frame, no pillows, no bedding (GLM_BRIEF §5.1)"
+reference_dir: "D:/Work/Temp/Test Images"

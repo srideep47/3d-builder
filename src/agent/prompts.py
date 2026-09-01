@@ -55,6 +55,9 @@ high-poly copy the normal map is baked from, so it never risks a dimension gate.
   Patterns: "grid_diamond" (quilted/padded look), "grid_square" (button-tufted
   grid), "bumps" (domes), "waves" (ripples), "noise" (organic grain).
   amplitude = peak height in meters, frequency = repeats across the part.
+  Optional "frequency_y" sets a different repeat count along the depth axis —
+  use it for SQUARE cells in metres when the part is not square
+  (frequency_y = frequency x depth / width).
   Use "restrict": "up" for panels so side walls stay clean.
 
 MATERIALS (flat PBR values export correctly to GLB)

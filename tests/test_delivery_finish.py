@@ -395,7 +395,7 @@ def test_finish_delivery_coffee_table_end_to_end(runner, tmp_path):
         "reference_dir": "input/benchmarks",
     }), encoding="utf-8")
 
-    out_root = tmp_path / "out"
+    out_root = tmp_path / "packages"
     result = CliRunner().invoke(cli_app, [
         "package", "--spec", str(PROJECT_ROOT / "input/benchmarks/coffee_table.spec.json"),
         "--job", str(job_yaml), "--out-root", str(out_root), "--res", "512"])
@@ -403,7 +403,7 @@ def test_finish_delivery_coffee_table_end_to_end(runner, tmp_path):
     assert "ALL GATES PASSED" in result.output
     assert "Placeholder Warning" not in result.output
 
-    package_dir = out_root / "packages" / "COFFEE0001"
+    package_dir = out_root / "COFFEE0001"
     report = json.loads((package_dir / "qa_report.json").read_text(encoding="utf-8"))
     assert report["all_passed"] is True
     assert "placeholders" not in report, "finish chain must not ship placeholders"

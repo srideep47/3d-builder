@@ -8,7 +8,7 @@
 3D Builder is structured in 4 layers plus a web interface and a GPU microservice:
 1. **Interfaces**: `src/cli.py` (Typer CLI), `src/mcp_server.py` (MCP stdio server; mcp 2.x `MCPServer`, 1.x fallback), `src/webapp/` (FastAPI server + run registry) serving `web/` (three.js studio UI; `python -m src.cli ui`).
 2. **Agent Layer**: `src/agent/loop.py` (analyst → neural parts → build → measure → render → gates → corrector; emits progress events, supports cancel + run_dir reuse), `src/agent/prompts.py` (Analyst, Corrector), `src/agent/verifier.py` (dimension + mesh gates), `src/ai/aptos.py` (GLM-5.3 integration), `src/ai/vlm.py` (local Qwen-VL plug point: analyst eye + advisory visual gate).
-3. **Spec Layer**: `src/spec/schema.py` (ObjectSpec v2 Pydantic model), `src/spec/resolver.py` (spec → build params), `src/spec/validation.py` (dimension gate).
+3. **Spec Layer**: `src/spec/schema.py` (ObjectSpec v2 Pydantic model), `src/spec/resolver.py` (spec → build params), `src/spec/validation.py` (dimension gate), `src/spec/template.py` + `templates/<product_class>.yaml` (T4 product templates: proportions × job-card dims → ObjectSpec; the ONLY place product knowledge lives, rule 11), `src/textures/` (T4 texture composition: CC0 scans + procedural tileable patterns → canonical map sets; `scripts/fetch_cc0_textures.py` + `scripts/gen_template_textures.py`).
 4. **Capability Layer**: `src/blender/runner.py` (subprocess runner), `src/blender/harness_script.py` (self-contained headless Blender engine — runs inside Blender's Python, must not import project code), `src/img3d/client.py` (RemoteImg3DProvider → the neural service), `services/img3d_service/` (FastAPI GPU microservice, PLAN.md §9: single-job queue, mock + tripo_sr backends, trellis/hunyuan3d bake-off slots).
 5. **Client Layer**: `src/client/` (MetaZtech delivery compliance — knows the contract, never the product): `job.py` (JobCard from job.yaml; dims + explicit unit REQUIRED, never inferred; axis_map L→X/W→Y/H→Z; client dim tolerance ±0.01 in default, separate from the internal ±1 mm), `contract.py` (the single shared deliverable-set + tier-ceiling definition), `gates.py` (six pure validator gates + MeshFacts, fail-closed without mesh facts), `units.py` (metres ↔ client units, boundary only), `fbx_inspect.py` (independent binary-FBX reader — GlobalSettings/geometry/Model transforms parsed without Blender, plus the signed-permutation chirality machinery), `package.py` (assembles `output/packages/<JOB>/` + `qa_report.json`). `python -m src.cli package <glb> --job job.yaml` then `validate <pkg_dir>` mirror the client's validator locally.
 
@@ -76,19 +76,52 @@
   extension is absent). `rembg` needs an explicit `onnxruntime` install.
   `HF_HUB_CACHE` must be set before `huggingface_hub` is first imported
   (backend `__init__`).
+- **`curve.bevel_object` is IGNORED unless `curve.bevel_mode = "OBJECT"`**
+  (Blender 2.90+). Without the mode, `convert()` yields a bare polyline and
+  glTF exports sweep parts (tape edges) as EMPTY transform-only nodes.
+- **The template geometry contract**: band bodies are inset by the tape
+  protrusion so tape outer faces land EXACTLY on nominal L/W — overall
+  bounds equal the job card at any template scale; the decal is recessed
+  behind the tape plane. Pinned in `tests/test_template_harness.py`.
+- **Triplanar BOX mapping anchors its tile grid at the object-local
+  origin** — the Mapping node needs `Location=(0.5,0.5,0.5)` or one-tile
+  textures wrap and show twice mirrored. The glTF exporter converts
+  BOX-projection materials to UV-mapped ones, so orientation must be
+  probed on the live scene, never a GLB round trip. Label orientation
+  pinned by NCC (identity 0.99 vs all flips negative).
+- **Materials are created through a name-keyed cache** threaded through
+  `apply_material` — per-part creation leaks .001/.002 datablock variants
+  into the delivery scene.
+- **glTF triangulates quads and splits vertices per attribute** — n-gon
+  gates are only meaningful on .blend/FBX (the live quad-clean scene),
+  never on a GLB. trimesh reads glTF Y-up; do screen/world math
+  Blender-side (`matrix_world`).
+- **Placeholder dims refuse delivery** (rule 9): a job card with
+  `dims_placeholder: true` runs the full chain for structural review
+  renders but emits NO package — `output/blocked/<JOB>/qa_report.json` +
+  `PlaceholderDimensionsError` (CLI exit code 2). Never infer dims, never
+  guess a standard size.
 
 ## Verification
-- `python -m pytest tests -q` — 164 tests; `blender`-marked tests auto-skip
+- `python -m pytest tests -q` — 222 tests; `blender`-marked tests auto-skip
   when no Blender is found.
 - Client packages: `python -m src.cli package --spec <spec.json> --job
   job.yaml` runs the full T3 finish chain (build → quad-verify + per-island
   UV atlas → 5-map bake → LP decimation → FBX from the live quad-clean scene
-  → gates + qa_report with bake/UV evidence + review renders); `package
-  <source_glb> --job job.yaml` is the T2 placeholder flow (assembles
+  → gates + qa_report with bake/UV evidence + review renders);
+  `package --template templates/<class>.yaml --job job.yaml` compiles the
+  product template with the job card's dimensions first (T4; a
+  `dims_placeholder: true` card is REFUSED at package emission — exit 2,
+  evidence in `output/blocked/`);
+  `package <source_glb> --job job.yaml` is the T2 placeholder flow (assembles
   `output/packages/<JOB>/` + `qa_report.json`: gates, axis convention as
   independently parsed, hashes, placeholders);
   `python -m src.cli validate <package_dir> --job job.yaml` re-checks a
   package on disk (local mirror of the MetaZtech validator panel).
+- Template surfaces: `python scripts/gen_template_textures.py --template
+  templates/<class>.yaml` composes CC0 scan + procedural textures into
+  `assets/textures/<class>/` (deterministic; provenance in each
+  manifest.json; `--placeholder-decal` for the label stand-in).
 - FBX axis/handedness is verified WITHOUT a Blender round trip
   (`src/client/fbx_inspect.py` independent binary parse + trimesh GLB
   cross-load) against the permanent chiral fixture

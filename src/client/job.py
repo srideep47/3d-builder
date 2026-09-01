@@ -10,6 +10,7 @@ counts.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -88,6 +89,13 @@ class JobCard(BaseModel):
     axis_map: AxisMap = Field(default_factory=AxisMap)
     # Client-gate tolerance in the job's declared unit (see DEFAULT_DIM_TOLERANCE).
     dim_tolerance: float | None = Field(default=None, gt=0)
+    # PLACEHOLDER dimensions (owner's overnight order, T4): the owner has NOT
+    # supplied real dimensions yet — the values in `dims` are stand-ins for
+    # exercising the pipeline only. With this flag set the pipeline still runs
+    # (structural review renders are valid output) but package emission is
+    # REFUSED, loudly (rule 9: dimensions are never inferred; a standard
+    # queen size must never be guessed). Recorded in qa_report.json.
+    dims_placeholder: bool = False
 
     @field_validator("job_code")
     @classmethod
@@ -139,6 +147,18 @@ def load_job(path: str | Path) -> JobCard:
         raise ValueError(
             f"Job card {p}: dims.unit is REQUIRED and must be explicit — "
             "units are never defaulted (rule 9)"
+        )
+    if raw.get("dims_placeholder"):
+        # Loud, unavoidable: these dims are NOT real and nothing deliverable
+        # may be built from them (refusal happens in package emission).
+        print(
+            "*" * 78
+            + f"\n* PLACEHOLDER DIMENSIONS: job card {p} sets dims_placeholder: true.\n"
+            "* The dims below are stand-ins for pipeline exercise ONLY — the owner\n"
+            "* has not supplied real dimensions. NO deliverable package will be\n"
+            "* emitted for this job until real dimensions replace them (rule 9).\n"
+            + "*" * 78,
+            file=sys.stderr,
         )
     try:
         return JobCard.model_validate(raw)

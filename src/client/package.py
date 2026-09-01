@@ -185,6 +185,12 @@ def _assemble_and_audit(
     return report
 
 
+class PlaceholderDimensionsError(RuntimeError):
+    """Raised when a job carries `dims_placeholder: true` — the owner has not
+    supplied real dimensions, so NO deliverable package may be emitted
+    (GLM_BRIEF rule 9: dimensions are never inferred)."""
+
+
 def package_delivery(
     job: JobCard,
     source_glb: Path,
@@ -196,6 +202,14 @@ def package_delivery(
     qa_report.json. Returns the report dict. Raises loudly on export or
     parse failures — a package that cannot be audited must not ship."""
     log = log or (lambda msg: None)
+    if job.dims_placeholder:
+        raise PlaceholderDimensionsError(
+            f"REFUSED — job {job.job_code} carries dims_placeholder: true "
+            f"(dimensions {job.dims.length} x {job.dims.width} x "
+            f"{job.dims.height} {job.dims.unit} are PLACEHOLDER stand-ins). "
+            "No deliverable package is emitted until the owner supplies real "
+            "dimensions (rule 9: never inferred)."
+        )
     source_glb = Path(source_glb)
     if not source_glb.is_file():
         raise FileNotFoundError(f"source GLB not found: {source_glb}")
@@ -280,7 +294,7 @@ _BAKE_MAP_FILES: dict[str, str] = {
 def finish_delivery(
     job: JobCard,
     spec,
-    out_root: Path | str = Path("output"),
+    out_root: Path | str = Path("output/packages"),
     runner=None,
     log: Callable[[str], None] | None = None,
     work_dir: Path | str | None = None,
@@ -316,8 +330,11 @@ def finish_delivery(
     # Absolute from here down: the harness runs Blender in a subprocess whose
     # image-path resolution is blend-relative — a relative out_root makes
     # bakes silently write nowhere (empirical, see _save_map in the harness).
+    # `out_root` is the PACKAGES root (same contract as package_delivery):
+    # the package lands at out_root/<JOB>; work/review artifacts at the
+    # sibling "finish" dir, refusal evidence at the sibling "blocked" dir.
     out_root = Path(out_root).resolve()
-    work = Path(work_dir).resolve() if work_dir else out_root / "finish" / job.job_code
+    work = Path(work_dir).resolve() if work_dir else out_root.parent / "finish" / job.job_code
     maps_dir = work / "maps"
     scene_blend = work / "scene.blend"
     hp_glb = work / "hp.glb"
@@ -347,6 +364,9 @@ def finish_delivery(
         "maps": None,
         "resolution": resolution,
         "detail": detail_map,
+        # micro weave (triplanar height maps -> Bump nodes) blends into the
+        # baked normal map via the self-bake + whiteout pass (see harness)
+        "detail_normal": True,
         "hp_glb": str(hp_glb),
         "save_blend": str(scene_blend),
     }), "bake_maps")
@@ -364,8 +384,71 @@ def finish_delivery(
     log(f"LP exported: {dec.get('triangle_equivalent')} tri-eq "
         f"(budget {budget}, decimated={dec.get('decimated')})")
 
+    def _render_review() -> list[str]:
+        rv = _require(runner.execute_op("render_views", {
+            "model_path": str(lp_glb),
+            "output_dir": str(review_dir),
+            "prefix": job.job_code,
+        }), "render_views")
+        files_rendered = sorted(str(p) for p in review_dir.glob("*.png"))
+        log(f"review renders awaiting owner review: {files_rendered}")
+        return files_rendered
+
+    # ── 3b. PLACEHOLDER-DIMENSION REFUSAL (owner's overnight order, T4) ──────
+    # The pipeline is exercised (structural review renders are valid output)
+    # but NO deliverable package is emitted: the dims are stand-ins until the
+    # owner supplies real ones (rule 9 — never inferred, never a guessed
+    # standard size). Evidence lands in output/blocked/<JOB>/qa_report.json.
+    if job.dims_placeholder:
+        review_files = _render_review()
+        blocked_dir = out_root.parent / "blocked" / job.job_code
+        blocked_dir.mkdir(parents=True, exist_ok=True)
+        blocked_report = {
+            "job_code": job.job_code,
+            "refused": True,
+            "refusal_reason": (
+                "dims_placeholder: the job card's dimensions are PLACEHOLDER "
+                "stand-ins (the owner has not supplied real values). No "
+                "deliverable package was emitted — dimensions are never "
+                "inferred (GLM_BRIEF rule 9)."
+            ),
+            "placeholder_dims": {
+                "length": job.dims.length, "width": job.dims.width,
+                "height": job.dims.height, "unit": job.dims.unit,
+                "source": "job card stand-in values, NOT owner-supplied",
+            },
+            "gates": None,
+            "finish": {
+                "lp_tri_equivalent": dec.get("triangle_equivalent"),
+                "hp_tri_equivalent": bake.get("hp_triangle_equivalent"),
+                "lp_budget": budget,
+                "texture_resolution": resolution,
+                "detail_parts": detail_map,
+                "uv_atlas": prep.get("uv_atlas"),
+                "uv_diagnostics": prep.get("uv"),
+                "bake": bake.get("maps"),
+                "review_renders": review_files,
+                "review_note": "Structural review only — band order, materials, "
+                               "tape and label placement. Proportions render "
+                               "correctly at any dims (fractions of H), but "
+                               "silhouette review needs the real dimensions.",
+            },
+            "unblock": "Put the real L x W x H (explicit unit) into the job "
+                       "card and remove dims_placeholder, then re-run.",
+        }
+        (blocked_dir / "qa_report.json").write_text(
+            json.dumps(blocked_report, indent=2) + "\n", encoding="utf-8")
+        for _ in range(3):
+            log("REFUSED — PLACEHOLDER DIMENSIONS: no deliverable package "
+                f"emitted for {job.job_code} (see {blocked_dir / 'qa_report.json'})")
+        raise PlaceholderDimensionsError(
+            f"REFUSED — job {job.job_code} carries dims_placeholder: true. "
+            f"The chain ran (renders + evidence in {blocked_dir}) but no "
+            f"package was emitted. Owner must supply real dimensions (rule 9)."
+        )
+
     # ── 4. assemble deliverables ────────────────────────────────────────────
-    package_dir = out_root / "packages" / job.job_code
+    package_dir = out_root / job.job_code
     package_dir.mkdir(parents=True, exist_ok=True)
     files: list[dict[str, Any]] = []
 
@@ -418,13 +501,7 @@ def finish_delivery(
     # ── 5. review renders for the owner (valid T3 output: awaits review) ────
     review_files: list[str] = []
     if review_renders:
-        rv = _require(runner.execute_op("render_views", {
-            "model_path": str(lp_glb),
-            "output_dir": str(review_dir),
-            "prefix": job.job_code,
-        }), "render_views")
-        review_files = sorted(str(p) for p in review_dir.glob("*.png"))
-        log(f"review renders awaiting owner review: {review_files}")
+        review_files = _render_review()
 
     finish_section = {
         "fbx_source": "live_quad_scene",

@@ -67,6 +67,8 @@ class PBRMaterial(BaseModel):
     transmission: float = 0.0
     emission: list[float] | None = None
     texture_dir: str | None = None  # Folder path containing Albedo, Normal, Roughness, Metallic maps
+    texture_size: list[float] | None = None  # metres per texture tile (triplanar mapping scale)
+    bump_strength: float | None = None  # height-map bump strength (0..1); None = material default
     triplanar: bool = False
     procedural: bool = False  # Attach procedural node shaders (pair with bake_materials for export)
 
@@ -122,6 +124,8 @@ class DisplacementSpec(BaseModel):
     pattern: Literal["noise", "waves", "grid_diamond", "grid_square", "bumps"]
     amplitude: float                       # peak displacement, spec units
     frequency: float = 8.0                 # repeats across the part's largest horizontal span
+    frequency_y: float | None = None       # separate v-axis repeats (None = same as frequency;
+    #                                           set for SQUARE cells in metres on non-square parts)
     axis: Literal["x", "y", "z"] = "z"     # travel direction (waves)
     seed: int = 0                          # deterministic noise seed
     exponent: float = 1.0                  # grid puffiness: 1=soft sine, 2=boxy
@@ -153,6 +157,8 @@ class PartSpec(BaseModel):
     top_scale: list[float] | None = None  # For tapered_extrude [sx, sy]
     profile_points: list[list[float]] | None = None  # revolve_lathe [[r,z],...] or extrude [[x,y],...]
     path_points: list[list[float]] | None = None  # sweep [[x, y, z], ...]
+    path_closed: bool = False  # sweep: close the path into a loop (no tube end caps)
+    caps: Literal["ngon", "fan"] = "ngon"  # extrude cap fill: one n-gon face or a triangle fan
     position_mode: Literal["center", "base"] | None = None  # None = auto per shape
     method: GenerationMethod = GenerationMethod.PARAMETRIC
     material: PBRMaterial | None = None

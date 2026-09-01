@@ -1,0 +1,168 @@
+# templates/mattress.yaml — the ONLY place mattress knowledge lives
+# (GLM_BRIEF rule 11). Compiled by src/spec/template.py:compile_spec with a
+# job card's owner-supplied dimensions. Everything below is PROPORTIONS —
+# no absolute size exists here, and none may ever be added (rule 9: the
+# owner supplies dimensions; a standard queen size must never be inferred).
+#
+# Structure and wording track the §5.2 written transcription of the
+# reference photos (seven bands, top to bottom):
+#   1 pillowtop crown (domed, puffed quilt panel, white knit + faint grey
+#     chevron micro-print)          -> band `crown` + quilt displacement
+#   2 tape edge (top perimeter)     -> tape below crown
+#   3 air-mesh band (white 3D spacer mesh, tallest light band)
+#                                   -> band `air_mesh`
+#   4 tape edge (mid)               -> tape below air_mesh
+#   5 border stack: ~3 dark velvet bands separated by white knit ribs
+#                                   -> bands velvet_1..3, knit_1..2
+#   6 tape edge (bottom perimeter)  -> tape below velvet_3
+#   7 base (dark, rarely visible, cheap)
+#
+# Band proportions are a FIRST PASS from the §5.2 reading ("air-mesh is
+# roughly the tallest single light band"; three velvet bands separated by
+# knit ribs). They are owner-tunable numbers — review the rendered output
+# against the reference before delivery and adjust.
+product_class: mattress
+description: >
+  Pillowtop hybrid mattress: domed quilted crown over a straight-sided
+  banded border with perimeter tape edges and a side brand label
+  (GLM_BRIEF §5.2). Model the mattress only — no frame, pillows, or
+  bedding (§5.1); internal marketing layers are NOT modelled (§5.4).
+
+footprint:
+  exponent: 5.0        # superellipse: 2=ellipse, 5=rounded rectangle
+  segments: 48
+
+bands:                 # top to bottom; height_fractions MUST sum to 1.0
+  - name: crown
+    height_fraction: 0.28
+    material: knit_white
+  - name: air_mesh
+    height_fraction: 0.17
+    material: mesh_white
+  - name: velvet_1
+    height_fraction: 0.095
+    material: velvet_charcoal
+  - name: knit_1
+    height_fraction: 0.0825
+    material: knit_white
+  - name: velvet_2
+    height_fraction: 0.095
+    material: velvet_charcoal
+  - name: knit_2
+    height_fraction: 0.0825
+    material: knit_white
+  - name: velvet_3
+    height_fraction: 0.095
+    material: velvet_charcoal
+  - name: base
+    height_fraction: 0.10
+    material: base_dark
+
+crown:
+  profile_exponent: 3.5   # z(s)=H(1-s^Q)^(1/Q): ~3.5 = pillow-like roll-off
+  rings: 10
+  quilt:                  # HP displacement -> baked normal map; LP bounds fixed
+    pattern: grid_diamond # rounded scalloped/diamond cells (§5.2 band 1)
+    cells_across: 8       # quilt cells across the length; square in metres
+    amplitude_fraction: 0.07   # of one quilt CELL — puff depth
+    exponent: 1.6         # soft-edged puffs, not boxy
+
+tape_edges:            # closed sweeps centred on the inset band wall; the
+                       # outer face lands exactly on the nominal L/W silhouette
+  - at_boundary_below: crown
+    thickness_fraction: 0.045   # vertical, of H
+    protrusion_fraction: 0.035  # radial stick-out, of H
+    material: tape_black
+  - at_boundary_below: air_mesh
+    thickness_fraction: 0.045
+    protrusion_fraction: 0.035
+    material: tape_black
+  - at_boundary_below: velvet_3
+    thickness_fraction: 0.045
+    protrusion_fraction: 0.035
+    material: tape_black
+
+decal:                 # brand label (§5.3): front-left side border, portrait
+  face: front
+  along_fraction: -0.35     # left of face centre as seen from the front
+  center_height_fraction: 0.325   # centred on the velvet/knit border stack
+  aspect: 0.7               # patch width / height (<1 = portrait)
+  height_fraction: 0.38     # of H; clears tape_3 (top 0.1225) and tape_2 (bottom 0.5275)
+  texture: input/decals/MAYA00053153   # dir with albedo.png (photo crop)
+
+textures:
+  knit_white:
+    base: scan
+    scan: knitted_fleece             # CC0 (Poly Haven), structure only
+    tint: [0.93, 0.92, 0.89]         # cream-white knit (§5.2 band 1)
+    tile_m: 2.68                     # scan physical size (SOURCE.json)
+    resolution: 2048
+    roughness: 0.82
+    bump_strength: 0.12
+    layers:
+      - kind: chevron               # faint grey zigzag micro-print (§5.2 band 1)
+        params: {pitch_m: 0.08, thickness_m: 0.004, amplitude_m: 0.08}
+        color: [0.66, 0.66, 0.68]
+        opacity: 0.16
+        height_delta: -0.02
+        roughness_delta: 0.03
+
+  mesh_white:
+    base: flat
+    tint: [0.90, 0.90, 0.89]         # white spacer mesh (§5.2 band 3)
+    tile_m: 0.30
+    resolution: 1024
+    roughness: 0.85
+    bump_strength: 0.35              # distinctly open and textural
+    layers:
+      - kind: oval_holes             # perforated honeycomb/oval holes
+        params: {cell_m: 0.006, hole_rx: 0.30, hole_ry: 0.20}
+        color: [0.55, 0.56, 0.58]    # holes read darker/greyer
+        opacity: 0.55
+        height_delta: -0.30          # recessed holes
+        roughness_delta: 0.10
+
+  velvet_charcoal:
+    base: scan
+    scan: velour_velvet              # CC0 (Poly Haven), napped structure
+    tint: [0.16, 0.16, 0.17]         # dark charcoal (§5.2 band 5)
+    tile_m: 2.79                     # scan physical size (SOURCE.json)
+    resolution: 2048
+    roughness: 0.50                  # sheen: catches light along the length
+    bump_strength: 0.10
+
+  tape_black:
+    base: flat
+    tint: [0.05, 0.05, 0.05]         # black/near-black binding (§5.2 bands 2/4/6)
+    tile_m: 0.05
+    resolution: 1024
+    roughness: 0.62
+    bump_strength: 0.30
+    layers:
+      - kind: herringbone            # diagonal twill weave, visible at zoom
+        params:
+          column_width_m: 0.003
+          stripe_pitch_m: 0.0025
+          stripe_fraction: 0.5
+          groove_width: 0.12
+          groove_height_delta: -0.10
+          groove_roughness_delta: 0.05
+        color: [0.16, 0.16, 0.16]    # slightly lighter yarn over near-black
+        opacity: 0.45
+        height_delta: 0.12
+        roughness_delta: -0.05
+
+  base_dark:
+    base: flat
+    tint: [0.10, 0.10, 0.10]         # dark non-slip underside (§5.2 band 7)
+    roughness: 0.9
+
+features:
+  carry_handles:
+    enabled: false
+    note: >
+      Vertical dark straps at the quarter points of the long sides
+      (§5.3, moderate confidence) — almost certainly carry handles.
+      NOT modelled until the owner confirms (open question §9.4).
+
+tri_budget: 50000     # Simple tier provisional ceiling (open question §9.2)

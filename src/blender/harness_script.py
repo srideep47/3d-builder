@@ -479,8 +479,33 @@ def _build_revolve(name, profile_points, segments=32):
     return _object_from_bmesh(bm, name)
 
 
-def _build_extrude(name, profile_points, height, top_scale=None):
-    """Extrude a [[x, y], ...] polygon; optional taper toward the profile centroid."""
+def _fan_cap(bm, ring):
+    """Triangulate a closed vertex ring from its centroid — n-gon-free cap
+    for extruded profiles with more than 4 points (the client's n-gon gate
+    is strict: a 48-point superellipse profile capped as one face is a
+    48-gon). Winding is irrelevant: callers recalc face normals."""
+    n = len(ring)
+    if n < 3:
+        return []
+    center = bm.verts.new((
+        sum(v.co.x for v in ring) / n,
+        sum(v.co.y for v in ring) / n,
+        sum(v.co.z for v in ring) / n,
+    ))
+    faces = []
+    for i in range(n):
+        try:
+            faces.append(bm.faces.new((center, ring[i], ring[(i + 1) % n])))
+        except ValueError:
+            pass
+    return faces
+
+
+def _build_extrude(name, profile_points, height, top_scale=None, caps="ngon"):
+    """Extrude a [[x, y], ...] polygon; optional taper toward the profile
+    centroid. `caps="fan"` triangulates the end caps from the ring centroid
+    (n-gon-free, required for >4-point profiles under the client's strict
+    n-gon gate); "ngon" keeps the historical single-face caps."""
     import bmesh
 
     if not profile_points or len(profile_points) < 3:
@@ -496,16 +521,23 @@ def _build_extrude(name, profile_points, height, top_scale=None):
     bottom = [bm.verts.new((x, y, 0.0)) for x, y in pts]
     top = [bm.verts.new(((x - cx) * taper + cx, (y - cy) * taper + cy, height)) for x, y in pts]
     n = len(pts)
-    bm.faces.new(list(reversed(bottom)))
-    bm.faces.new(top)
+    if caps == "fan":
+        _fan_cap(bm, list(reversed(bottom)))
+        _fan_cap(bm, top)
+    else:
+        bm.faces.new(list(reversed(bottom)))
+        bm.faces.new(top)
     for i in range(n):
         bm.faces.new((bottom[i], bottom[(i + 1) % n], top[(i + 1) % n], top[i]))
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     return _object_from_bmesh(bm, name)
 
 
-def _build_sweep(name, path_points, dims):
-    """Sweep a circular or rectangular section along a 3D poly path (cables, tubes)."""
+def _build_sweep(name, path_points, dims, closed=False):
+    """Sweep a circular or rectangular section along a 3D poly path (cables, tubes).
+    `closed=True` joins the path into a loop (perimeter bands): the spline is
+    cyclic so the tube has no end caps to fill — the seam is geometrically
+    continuous."""
     import bpy
 
     if not path_points or len(path_points) < 2:
@@ -517,6 +549,8 @@ def _build_sweep(name, path_points, dims):
     spline.points.add(len(path_points) - 1)
     for p, co in zip(spline.points, path_points):
         p.co = (float(co[0]), float(co[1]), float(co[2]), 1.0)
+    if closed:
+        spline.use_cyclic_u = True
 
     # Circular section when width == height (or height unset); rectangular otherwise.
     use_rect = len(dims) >= 2 and float(dims[1]) > 0 and abs(float(dims[1]) - float(dims[0])) > 1e-9
@@ -533,6 +567,10 @@ def _build_sweep(name, path_points, dims):
         bevel_obj = bpy.data.objects.new(name + "_section", bevel_curve)
         bpy.context.collection.objects.link(bevel_obj)
         curve.bevel_object = bevel_obj
+        # EMPIRICAL (Blender 4.5): bevel_object is IGNORED unless bevel_mode
+        # is set to 'OBJECT' — the default 'ROUND' reads bevel_depth (0 here)
+        # and convert() yields a bare polyline with no faces.
+        curve.bevel_mode = "OBJECT"
     else:
         curve.bevel_depth = float(dims[0]) * 0.5
 
@@ -746,27 +784,125 @@ def build_procedural_pbr_material(name, preset=None, color=None, roughness=0.5, 
     return mat
 
 
-def apply_material(objects, mat_spec):
+def build_textured_pbr_material(name, mat_spec):
+    """Image-texture material from a `texture_dir` of canonical maps
+    (albedo.png / roughness.png / height.png, each optional).
+
+    Atlas-safety (the load-bearing design): when `triplanar` is set, the
+    images use BOX projection driven by OBJECT coordinates, scaled by
+    `texture_size` (metres per tile). The delivery pipeline repacks every
+    UV into a shared atlas, so UV-sampled repeating textures would show a
+    random crop of the image per island — object-space tiling is the only
+    mapping that survives repacking, and the bake rasterizes it into the
+    atlas correctly.
+
+    The height map drives a Bump node: a self normal bake INCLUDES material
+    bump (empirically verified — probe in PROGRESS.md T4), so micro weave
+    reaches the delivered normal map via the bake op's detail-normal pass.
+    """
+    import bpy
+
+    tex_dir = os.path.abspath(str(mat_spec.get("texture_dir")))
+    triplanar = bool(mat_spec.get("triplanar"))
+
+    def _find(*names):
+        for n in names:
+            p = os.path.join(tex_dir, n)
+            if os.path.exists(p):
+                return p
+        return None
+
+    albedo_path = _find("albedo.png", "albedo.jpg")
+    rough_path = _find("roughness.png", "roughness.jpg")
+    height_path = _find("height.png", "height.jpg", "disp.png")
+
+    mat = bpy.data.materials.new(name=name)
+    mat.use_nodes = True
+    tree = mat.node_tree
+    nodes = tree.nodes
+    links = tree.links
+    bsdf = nodes.get("Principled BSDF")
+    if bsdf is None:
+        bsdf = nodes.new(type="ShaderNodeBsdfPrincipled")
+        out = nodes.get("Material Output") or nodes.new(type="ShaderNodeOutputMaterial")
+        links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+
+    bsdf.inputs["Roughness"].default_value = float(mat_spec.get("roughness", 0.7))
+    bsdf.inputs["Metallic"].default_value = float(mat_spec.get("metallic", 0.0))
+    base_col = mat_spec.get("color")
+    if base_col:
+        c = list(base_col) + [1.0] if len(base_col) == 3 else list(base_col)
+        bsdf.inputs["Base Color"].default_value = c
+
+    vec_source = None
+    if triplanar:
+        tex_coord = nodes.new(type="ShaderNodeTexCoord")
+        mapping = nodes.new(type="ShaderNodeMapping")
+        ts = mat_spec.get("texture_size") or [0.3, 0.3, 0.3]
+        ts = [float(v) for v in (ts * 3)[:3]] if len(ts) < 3 else [float(v) for v in ts[:3]]
+        mapping.inputs["Scale"].default_value = (
+            1.0 / max(ts[0], 1e-6), 1.0 / max(ts[1], 1e-6), 1.0 / max(ts[2], 1e-6),
+        )
+        # EMPIRICAL: without a +0.5 offset the tile grid anchors at the
+        # object-local origin, so a part spanning [-tile/2, +tile/2] samples
+        # u in [-0.5, 0.5] — which WRAPS, showing a one-tile texture (e.g. a
+        # decal) twice, mirrored about the part centre. The offset centres
+        # the grid on the object origin: u in [0, 1] across a centred part.
+        # For repeating fabric tiles it is a harmless phase shift.
+        mapping.inputs["Location"].default_value = (0.5, 0.5, 0.5)
+        links.new(tex_coord.outputs["Object"], mapping.inputs["Vector"])
+        vec_source = mapping.outputs["Vector"]
+
+    def _tex_node(path, colorspace):
+        tex = nodes.new(type="ShaderNodeTexImage")
+        img = bpy.data.images.load(path, check_existing=True)
+        img.colorspace_settings.name = colorspace
+        tex.image = img
+        if triplanar:
+            tex.projection = "BOX"
+            if vec_source is not None:
+                links.new(vec_source, tex.inputs["Vector"])
+        return tex
+
+    if albedo_path:
+        links.new(_tex_node(albedo_path, "sRGB").outputs["Color"], bsdf.inputs["Base Color"])
+    if rough_path:
+        links.new(_tex_node(rough_path, "Non-Color").outputs["Color"], bsdf.inputs["Roughness"])
+    if height_path:
+        bump = nodes.new(type="ShaderNodeBump")
+        bump.inputs["Strength"].default_value = float(mat_spec.get("bump_strength", 0.15))
+        links.new(_tex_node(height_path, "Non-Color").outputs["Color"], bump.inputs["Height"])
+        links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
+    return mat
+
+
+def apply_material(objects, mat_spec, cache=None):
     if not mat_spec:
         return None
     name = mat_spec.get("name", "ThreedMaterial")
-    if mat_spec.get("procedural"):
-        mat = build_procedural_pbr_material(
-            name=name,
-            preset=mat_spec.get("preset"),
-            color=mat_spec.get("color"),
-            roughness=mat_spec.get("roughness", 0.5),
-            metallic=mat_spec.get("metallic", 0.0),
-            transmission=mat_spec.get("transmission", 0.0),
-        )
-    else:
-        mat = build_flat_pbr_material(
-            name=name,
-            color=mat_spec.get("color"),
-            roughness=mat_spec.get("roughness", 0.5),
-            metallic=mat_spec.get("metallic", 0.0),
-            transmission=mat_spec.get("transmission", 0.0),
-        )
+    mat = cache.get(name) if cache is not None else None
+    if mat is None:
+        if mat_spec.get("texture_dir"):
+            mat = build_textured_pbr_material(name, mat_spec)
+        elif mat_spec.get("procedural"):
+            mat = build_procedural_pbr_material(
+                name=name,
+                preset=mat_spec.get("preset"),
+                color=mat_spec.get("color"),
+                roughness=mat_spec.get("roughness", 0.5),
+                metallic=mat_spec.get("metallic", 0.0),
+                transmission=mat_spec.get("transmission", 0.0),
+            )
+        else:
+            mat = build_flat_pbr_material(
+                name=name,
+                color=mat_spec.get("color"),
+                roughness=mat_spec.get("roughness", 0.5),
+                metallic=mat_spec.get("metallic", 0.0),
+                transmission=mat_spec.get("transmission", 0.0),
+            )
+        if cache is not None:
+            cache[name] = mat
     for obj in objects:
         if obj.type == "MESH":
             obj.data.materials.clear()
@@ -803,9 +939,11 @@ def _build_shape(part):
         return _build_revolve(name, part.get("profile_points"), segments)
     if shape == "extrude":
         height = dims[2] if len(dims) > 2 else 0.1
-        return _build_extrude(name, part.get("profile_points"), height, part.get("top_scale"))
+        return _build_extrude(name, part.get("profile_points"), height, part.get("top_scale"),
+                              caps=str(part.get("caps", "ngon")).lower())
     if shape == "sweep":
-        return _build_sweep(name, part.get("path_points"), dims)
+        return _build_sweep(name, part.get("path_points"), dims,
+                            closed=bool(part.get("path_closed", False)))
     raise ValueError(f"Unknown shape '{shape}' for part '{name}'")
 
 
@@ -858,7 +996,7 @@ def op_build_from_spec(params):
         name = part.get("name", "part")
         method = str(part.get("method", "parametric")).lower()
 
-        if method == "script":
+        if method in ("script", "custom_script"):
             code = part.get("code", "")
             if not code:
                 warnings.append(f"Part '{name}' uses script method but has no code")
@@ -983,6 +1121,10 @@ def op_build_from_spec(params):
                 obj.location.z -= bb[0][2]
 
     # Pass 4: shading + materials + UVs.
+    # Materials are cached by name: several parts routinely share one surface
+    # (e.g. knit bands) and per-part creation makes Blender suffix duplicates
+    # (.001/.002) that leak into the delivered FBX material list.
+    material_cache = {}
     for part in parts:
         obj = built.get(part.get("name"))
         if not obj:
@@ -990,7 +1132,7 @@ def op_build_from_spec(params):
         if part.get("smooth_shade", False):
             _shade_auto_smooth(obj)
         if part.get("material"):
-            apply_material([obj], part["material"])
+            apply_material([obj], part["material"], cache=material_cache)
 
     if params.get("generate_uvs", True):
         for obj in obj_list:
@@ -2255,6 +2397,12 @@ def _wire_baked_maps(materials, images):
         for socket_name, (map_name, via) in links.items():
             if map_name not in images or socket_name not in bsdf.inputs:
                 continue
+            if map_name == "normal":
+                # The baked normal map now carries the bump detail (detail-
+                # normal pass) — drop the live Bump nodes so review renders
+                # don't double-count micro weave.
+                for n in [n for n in nt.nodes if n.type == "BUMP"]:
+                    nt.nodes.remove(n)
             tex = nt.nodes.new("ShaderNodeTexImage")
             tex.image = images[map_name]
             tex.interpolation = "Closest" if map_name in ("roughness", "metallic") else "Linear"
@@ -2326,6 +2474,10 @@ def _apply_pattern_displacement(hp, disp):
     pattern = disp["pattern"]
     amplitude = float(disp["amplitude_m"])
     frequency = max(float(disp.get("frequency", 8.0)), 0.25)
+    # Optional separate v-axis repeat count: with a single frequency the
+    # bbox-normalized grid makes cells L/freq × W/freq — rectangular on
+    # non-square parts. frequency_y lets the caller request square cells.
+    frequency_y = max(float(disp.get("frequency_y") or frequency), 0.25)
     seed = int(disp.get("seed", 0))
     exponent = max(float(disp.get("exponent", 1.0)), 0.05)
     axis = str(disp.get("axis", "z"))
@@ -2344,7 +2496,7 @@ def _apply_pattern_displacement(hp, disp):
         if restrict == "down" and v.normal.z > -0.3:
             continue
         u = (v.co.x - min(xs)) / span_x * frequency
-        w = (v.co.y - min(ys)) / span_y * frequency
+        w = (v.co.y - min(ys)) / span_y * frequency_y
         if pattern == "waves":
             coord = {"x": v.co.x, "y": v.co.y, "z": v.co.z}[axis]
             span = {"x": span_x, "y": span_y, "z": span_x}[axis]
@@ -2353,6 +2505,54 @@ def _apply_pattern_displacement(hp, disp):
         value = _pattern_value(pattern, u, w, seed, exponent)
         if v.normal.length > 1e-9:
             v.co = v.co + v.normal * (amplitude * value)
+
+
+def _materials_have_bump(objects):
+    """True if any material on these objects carries a Bump node (the
+    detail-normal self-bake pass is only worth running then)."""
+    mats = []
+    for obj in objects:
+        for slot in getattr(obj, "material_slots", []):
+            if slot.material and slot.material.use_nodes and slot.material not in mats:
+                mats.append(slot.material)
+    for mat in mats:
+        for n in mat.node_tree.nodes:
+            if n.type == "BUMP":
+                return True
+    return False
+
+
+def _whiteout_blend(base_img, detail_img):
+    """Combine two tangent-space normal maps over the SAME UV layout:
+    n = normalize(n1.xy + n2.xy, max(n1.z, n2.z)) — the whiteout detail
+    blend. A neutral map (0,0,1) leaves the other unchanged, so blending
+    the material-bump self-bake onto the geometry bake adds micro weave
+    only where bump actually perturbs normals. Both maps being tangent-space
+    over the same LP UVs is what makes the blend frame-consistent (no
+    per-island tangent rotation problem). Mutates base_img; returns report
+    stats."""
+    import numpy as np
+
+    def _vec(img):
+        px = np.asarray(img.pixels[:], dtype=np.float32)
+        return px.reshape(-1, img.channels)[:, :3]
+
+    va = 2.0 * _vec(base_img) - 1.0
+    vb = 2.0 * _vec(detail_img) - 1.0
+    xy = va[:, :2] + vb[:, :2]
+    z = np.maximum(va[:, 2:3], vb[:, 2:3])
+    n = np.concatenate([xy, z], axis=1)
+    length = np.linalg.norm(n, axis=1, keepdims=True)
+    n = n / np.maximum(length, 1e-6)
+    out = np.concatenate([(n + 1.0) * 0.5, np.ones((n.shape[0], 1), dtype=np.float32)], axis=1)
+    base_img.pixels[:] = out.ravel()
+    differed = np.mean(np.any(np.abs(va - vb) > 1e-4, axis=1))
+    detail_strength = float(np.mean(np.linalg.norm(vb - np.array([0.0, 0.0, 1.0]), axis=1)))
+    return {
+        "method": "whiteout(n1.xy+n2.xy, max(n1.z,n2.z))",
+        "texels_where_maps_differed": round(float(differed), 5),
+        "detail_mean_deviation_from_neutral": round(detail_strength, 5),
+    }
 
 
 def op_bake_maps(params):
@@ -2608,6 +2808,36 @@ def op_bake_maps(params):
         finally:
             for (nt, tex) in setups:
                 nt.nodes.remove(tex)
+
+        # ── detail-normal pass: material bump (micro weave) ─────────────
+        # EMPIRICAL: a self normal bake INCLUDES material Bump nodes
+        # (probe: flat plane + wave-bump material self-bakes std R 0.0178
+        # vs 0.0 for the no-bump control; mean stays neutral). Triplanar
+        # height maps on the LP materials therefore reach the delivered
+        # normal map: self-bake them into a scratch image and whiteout-
+        # blend onto the geometry normals above — both tangent-space over
+        # the same LP UVs, so the blend is frame-consistent.
+        if params.get("detail_normal") and _materials_have_bump(lp_objs):
+            scratch = bpy.data.images.new("normal_detail_bake", width=resolution,
+                                          height=resolution, alpha=False)
+            scratch.colorspace_settings.name = "Non-Color"
+            detail_setups = _with_active_image(lp_objs, scratch)
+            try:
+                for i, obj in enumerate(lp_objs):
+                    select_only([obj])
+                    bpy.ops.object.bake(
+                        type="NORMAL", normal_space="TANGENT",
+                        normal_r="POS_X", normal_g=green, normal_b="POS_Z",
+                        use_clear=(i == 0), margin=margin_px,
+                    )
+            finally:
+                for (nt, tex) in detail_setups:
+                    nt.nodes.remove(tex)
+            map_results["normal_detail_blend"] = _whiteout_blend(images["normal"], scratch)
+            bpy.data.images.remove(scratch)
+        elif params.get("detail_normal"):
+            map_results["normal_detail_blend"] = {"skipped": "no Bump nodes on LP materials"}
+
         _save_map("normal")
 
     # ── data channels via the emission trick ────────────────────────────────

@@ -36,6 +36,16 @@ def _resolve_material(mat: PBRMaterial) -> dict[str, Any]:
         merged["transmission"] = float(mat.transmission)
     if "procedural" in fields_set:
         merged["procedural"] = bool(mat.procedural)
+    # Texture-driven fields never come from a preset — pass explicitly-set
+    # values through so preset + texture_dir combinations keep working.
+    if "texture_dir" in fields_set:
+        merged["texture_dir"] = mat.texture_dir
+    if "texture_size" in fields_set:
+        merged["texture_size"] = [float(v) for v in mat.texture_size]
+    if "bump_strength" in fields_set:
+        merged["bump_strength"] = float(mat.bump_strength)
+    if "triplanar" in fields_set:
+        merged["triplanar"] = bool(mat.triplanar)
     merged["name"] = mat.name if "name" in fields_set else f"mat_{mat.preset}"
     merged["preset"] = mat.preset
     return merged
@@ -63,6 +73,10 @@ def _resolve_part(part: PartSpec, unit: Unit) -> dict[str, Any]:
         p_dict["path_points"] = [
             [unit.to_meters(float(c)) for c in pt[:3]] for pt in part.path_points
         ]
+        if part.path_closed:
+            p_dict["path_closed"] = True
+    if part.caps != "ngon":
+        p_dict["caps"] = part.caps
     if part.segments:
         p_dict["segments"] = int(part.segments)
     if part.method.value != "parametric":
@@ -89,6 +103,7 @@ def _resolve_part(part: PartSpec, unit: Unit) -> dict[str, Any]:
                 "pattern": disp.pattern,
                 "amplitude_m": unit.to_meters(disp.amplitude),
                 "frequency": float(disp.frequency),
+                "frequency_y": float(disp.frequency_y) if disp.frequency_y is not None else None,
                 "axis": disp.axis,
                 "seed": int(disp.seed),
                 "exponent": float(disp.exponent),

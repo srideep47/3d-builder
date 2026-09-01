@@ -380,6 +380,169 @@ text-only — that is exactly what the review renders are for; nothing in
 the map set is hand-tuned yet). The USDZ still exports from the LP GLB
 (triangulated; no quad requirement there).
 
-## T4 — Reference implementation (mattress MAYA00053153) ⬜ (blocked on owner-supplied dimensions — never infer, rule 9)
+## T4 — Reference implementation (mattress MAYA00053153) ✅ pipeline complete / ⛔ DELIVERY BLOCKED — owner must supply dimensions
+
+> **T4 BLOCKED — owner must supply dimensions.** The dimension line for
+> MAYA00053153 arrived blank, so the job card carries the dashboard's own
+> stand-in numbers (12 × 12 × 65 IN, `dims_placeholder: true`). The full
+> chain runs and produces structural review renders, but **NO deliverable
+> package is emitted** — dimensions are never inferred and a standard
+> queen size is never guessed (rule 9). Evidence:
+> `output/blocked/MAYA00053153/qa_report.json`. **To unblock:** put the
+> real L × W × H (explicit unit) into `input/jobs/MAYA00053153.yaml`,
+> delete the `dims_placeholder` line, re-run
+> `python -m src.cli package --job input/jobs/MAYA00053153.yaml --template templates/mattress.yaml`.
+> Everything else in T4 is DONE and tested (222 tests).
+
+**Landed:**
+- **Template layer** `src/spec/template.py` — the only place product
+  knowledge lives (rule 11): `TemplateSpec` (stacked bands + optional
+  domed crown + quilt + perimeter tape sweeps + side decal + texture
+  recipes, all PROPORTIONS of the job's owner-supplied L×W×H);
+  `footprint_outline` (superellipse, shared by bands/dome/tape paths so
+  junctions are flush); self-contained `_DOME_SCRIPT` (radial rings,
+  quads + pole/cap fans, runs inside Blender via `method: custom_script`);
+  `compile_spec(template, job)` → plain ObjectSpec + warnings. Validation:
+  band fractions must sum to 1.0, unique names, material refs must exist,
+  tape boundaries must name a band
+- **The geometry contract** (load-bearing, pinned in tests): band bodies
+  are INSET by the largest tape protrusion (a_body = a − p_max) so every
+  tape's outer face lands exactly on nominal L/W → overall bounds are
+  exactly the job card's L×W×H at ANY template scale; the decal is proud
+  of the band wall by 0.3·p_max but recessed behind the tape plane so it
+  can never widen the silhouette; decal width clamped to ¼ of the wall
+  span (warning, never silent), corner-region + tape-z-overlap warnings;
+  quilt amplitude references one quilt CELL (footprint/cells — scale-
+  invariant puff depth), `restrict: up` so LP bounds never move;
+  protrusion ≥ half-footprint raises at compile time
+- `templates/mattress.yaml` — §5.2 structure: 8 bands (crown 0.28 /
+  air_mesh 0.17 / velvet-knit border stack / base 0.10), 3 tape edges,
+  grid_diamond quilt, front-left portrait decal (aspect 0.7, clears
+  tape_2/3 z-spans), carry handles declared but `enabled: false` (§9.4)
+- **Texture composition** `src/textures/` — `patterns.py` (pure-numpy
+  tileable generators: oval_holes, herringbone, chevron; PNG IO row 0 =
+  v = 0), `compose.py` (CC0 scans + procedural layers → canonical
+  albedo/roughness/height per surface, metre-params → per-tile integers,
+  provenance manifest.json, AO-fallback when a scan's displacement map is
+  a flat placeholder), `decal.py` (`generate_placeholder_decal` —
+  deterministic magenta-bordered stand-in). Fetcher
+  `scripts/fetch_cc0_textures.py` (Poly Haven API, licence recorded),
+  generator `scripts/gen_template_textures.py` (+ `--placeholder-decal`)
+- **CC0 sources used** (structure only, tinted to §5.2 colours; no
+  marketplace, no AI-generated): Poly Haven `knitted_fleece` (knit_white,
+  tile 2.68 m), `velour_velvet` (velvet_charcoal, tile 2.79 m);
+  mesh_white/tape_black/base_dark are procedural. Both scans' disp maps
+  were flat 1.0 → height from AO (recorded in each manifest.json)
+- **Harness** (`src/blender/harness_script.py`): `bevel_mode="OBJECT"`
+  fix (see findings), `custom_script` build dispatch, name-keyed material
+  cache (kills .001/.002 suffix leakage), triplanar Mapping
+  `Location=(0.5,0.5,0.5)` (see findings), `texture_size` plumbed through
+  `PBRMaterial` → one exact tile across the decal patch
+- **Refusal machinery** (owner's overnight order): `JobCard.dims_placeholder`
+  + loud `load_job` banner; `package_delivery` refuses at entry;
+  `finish_delivery` §3b — chain runs (build → atlas → bake → decimate →
+  4 review renders), writes `output/blocked/<JOB>/qa_report.json`
+  (refused / refusal_reason / placeholder_dims with source note /
+  gates: None / finish evidence incl. detail_parts / unblock
+  instructions), logs REFUSED ×3, raises `PlaceholderDimensionsError`;
+  CLI catches it → BLOCKED panel → **exit code 2**
+- Decal label `input/decals/MAYA00053153/albedo.png` is the procedural
+  PLACEHOLDER — see "Not verified" below
+
+**The e2e run (placeholder dims, structural review only):**
+`python -m src.cli package --job ... --template templates/mattress.yaml`
+→ compiled 12 parts (8 bands + 3 tapes + decal), atlas pack_scale 0.3164,
+**2118 islands, 0 overlaps (exact rasterization), texel-density ratio
+1.0004**; 5-map bake at 1024² (basecolor std 0.35, roughness std 0.18, AO
+std 0.44, metallic flat 0; quilt displacement reached the normal map via
+the detail-normal whiteout pass: texels_where_maps_differed 0.96, mean
+deviation 0.052); LP **3468 tri-eq** (budget 50000, not decimated) / HP
+201600 tri-eq; 4 review renders at
+`output/finish/MAYA00053153/review/MAYA00053153_{front,side,top,iso}.png`;
+then **REFUSED** (exit 2) with the blocked report. Review renders are
+valid owner-review output: band order, materials, tape and label
+placement are dimension-independent (fractions of H); silhouette review
+needs the real dims.
+
+**Empirical findings banked (do not regress):**
+1. **`curve.bevel_object` is IGNORED unless `curve.bevel_mode = "OBJECT"`**
+   (Blender 2.90+; harness `_build_sweep`). Symptom: convert() yields a
+   bare polyline with no faces and glTF exports the tapes as EMPTY
+   transform-only nodes — "the object exists" proves nothing, faces do.
+   Pinned: tapes are real closed tubes, 0 boundary/non-manifold edges
+2. **Triplanar BOX mapping anchors its tile grid at the object-local
+   origin.** With Object tex-coords spanning [−tile/2, +tile/2] the
+   sampled u wraps (one-tile textures show TWICE, mirrored). The Mapping
+   node needs `Location = (0.5, 0.5, 0.5)`. With the offset, a
+   −Y-normal face renders a one-tile-across label UPRIGHT and unmirrored
+   — NCC probe: identity **+0.9924** vs flipud −0.071, fliplr −0.071,
+   both −0.557 (pinned in `tests/test_template_harness.py`)
+3. **The glTF exporter converts object-coordinate/BOX-projection
+   materials to UV-mapped ones** (Mapping+UVMap nodes, possible texture
+   transform) — a render from a pre-bake GLB does NOT show the triplanar
+   result. The bake path (scene.blend) is the real path; the label
+   orientation must be probed on the live scene, not a GLB round trip
+4. **glTF triangulates and splits vertices per normal/UV attribute**: the
+   192-quad tape exports as 384 triangles / 416 verts. NOT a bug — the
+   FBX carries the live-scene quads (owner decision). Consequence: n-gon
+   gates are only meaningful on .blend/FBX, never on GLB
+5. **trimesh reads glTF in Y-up**: Blender bakes the Z-up→Y-up conversion
+   into the root node tree shared by ALL objects, so a single object
+   looking "rotated" in trimesh world coords is usually the convention,
+   not corruption. All screen/world math must be done Blender-side
+   (`matrix_world`); and the ortho screen projection is
+   `row = 1024·(0.5 + (z − cz)/S)` from the top — the (z−cz)/S term is a
+   fraction of the FULL span (a 512-vs-1024 factor error here halved the
+   mapped span and manufactured a phantom "displaced label")
+6. **PNG IO convention**: `save_png` writes row 0 = v = 0 (bottom);
+   `load_rgb`/`load_gray` flip back — roundtrip identity. Compose layers
+   preserve scan orientation only with BOTH halves of the pair
+7. **Material name clashes create .001/.002 datablocks**: per-part
+   creation of same-named materials leaks suffix variants into the
+   delivery scene — a name-keyed cache threaded through `apply_material`
+   creates each material once
+8. **Poly Haven fabric displacement maps can be constant-1.0
+   placeholders** (knitted_fleece, velour_velvet): fall back to the AO
+   map for height and record the substitution in manifest.json — never
+   ship a silently-flat bump
+9. **Tileability is provable discretely**: `np.roll` by an exact period
+   must be identity (axis 0 = u with `indexing="ij"`); bbox-style
+   "looks shifted" checks are meaningless
+10. **The dome script + base-mode placement are idempotent**: the script
+    does `obj.location.z += Z0` and `_place_part`'s base mode shifts by a
+    delta from the CURRENT bbox → no double placement (crown z-span
+    pinned exact in tests)
+
+**Verified:** `python -m pytest tests -q` → **222 passed** (97.6s; T3's
+164 + 58 new: test_textures 22, test_template 21, test_delivery_refusal
+6, test_template_harness 9 — blender-marked ones auto-skip without
+Blender). New coverage: pattern generators (analytic coverage + period
+invariance), compose (manifest/AO-fallback/layer emboss), template
+validation + compile math (inset contract, decal clamps/warnings, quilt
+cell reference), refusal path (flag, entry refusal, chain-runs-then-
+refuses with a mock runner, CLI exit 2), harness geometry (0 n-gons,
+closed solids, dome face counts, tape outer faces EXACTLY nominal,
+overall bounds exactly 12×12×65 IN, decal recessed, label orientation
+NCC), and the CONTROL: a real-dims minimal template through
+`finish_delivery` emits a full package with **all gates green**
+(`test_finish_delivery_real_dims_emits_package`) — same entry point,
+flag flipped, opposite outcome.
+
+**Not verified / flagged for the owner:**
+- **Dimensions** — the blocker above. Everything downstream of the job
+  card is done; nothing about the mattress geometry depends on which
+  dims arrive
+- **The NISIEN label decal is a procedural placeholder** (magenta border,
+  deterministic). Mechanical limits of blind sourcing (rule: the operator
+  is text-only): I cannot produce the real photo crop from §5.3. Replace
+  `input/decals/MAYA00053153/albedo.png` with the photo crop (portrait,
+  ~0.7 aspect) — the compile picks it up automatically (aspect/height
+  fractions stay in the template)
+- **Band proportions are a FIRST PASS** from the §5.2 reading — review
+  the four renders and tune `height_fraction`s in
+  `templates/mattress.yaml` (they are owner-tunable numbers, no code
+  change needed)
+- Carry handles remain unmodelled pending §9.4 (declared `enabled:
+  false` in the template's `features:` block)
 
 ## T5 — Generalise ⬜ (not started)

@@ -1,0 +1,33 @@
+{
+  "asset_id": "knitted_fleece",
+  "name": "Knitted Fleece",
+  "site": "https://polyhaven.com/a/knitted_fleece",
+  "licence": "CC0 (Poly Haven publishes all assets under CC0)",
+  "physical_size_cm": [
+    266.35669526830077,
+    270.3999876976013
+  ],
+  "resolution": "2k",
+  "maps": {
+    "albedo.png": {
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/knitted_fleece/knitted_fleece_diff_2k.jpg",
+      "md5": "5ae8d0ed7af13b0ca1b61b1467854b2a",
+      "size_bytes": 3531764
+    },
+    "height.png": {
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/knitted_fleece/knitted_fleece_disp_2k.png",
+      "md5": "efe237fa1f506bacab734923d1084651",
+      "size_bytes": 7637883
+    },
+    "roughness.png": {
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/knitted_fleece/knitted_fleece_rough_2k.jpg",
+      "md5": "d69e1dac082ee522238e6cf4681ea33d",
+      "size_bytes": 4215124
+    },
+    "ao.png": {
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/knitted_fleece/knitted_fleece_ao_2k.jpg",
+      "md5": "c8bf54303abeaf1ab7874d8571051f7f",
+      "size_bytes": 2945691
+    }
+  }
+}

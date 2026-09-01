@@ -355,18 +355,20 @@ def validate(
 
 @app.command()
 def package(
-    source_glb: str = typer.Argument(None, help="Verified source GLB, e.g. output/runs/<id>/final.glb (omit with --spec)"),
+    source_glb: str = typer.Argument(None, help="Verified source GLB, e.g. output/runs/<id>/final.glb (omit with --spec/--template)"),
     job: str = typer.Option(..., "--job", "-j", help="Path to the job card (job.yaml)"),
     out_root: str = typer.Option("output/packages", "--out-root", help="Root directory for packages"),
     spec: str = typer.Option(None, "--spec", help="ObjectSpec JSON instead of a source GLB: run the full T3 finish chain (build → UV atlas → bake → decimate → live-quad FBX)"),
-    resolution: int = typer.Option(1024, "--res", help="Texture resolution for --spec bakes"),
+    template: str = typer.Option(None, "--template", help="Product-class template YAML instead of a spec: compiled with the job card's dimensions (T4)"),
+    resolution: int = typer.Option(1024, "--res", help="Texture resolution for --spec/--template bakes"),
 ):
     """Assemble the client delivery package (§4.1) + qa_report.json, then validate it.
 
     With --spec, runs finish_delivery: the real bake pipeline (quad-clean
     scene, 5-map texture set, LP decimation, FBX from the live quad scene).
-    Without --spec, packages an already-verified source GLB (T2 flow —
-    placeholder HP/LP/textures)."""
+    With --template, the spec is compiled from templates/<class>.yaml x the
+    job card's dimensions first. Without either, packages an already-
+    verified source GLB (T2 flow — placeholder HP/LP/textures)."""
     job_card = _load_job_or_exit(job)
 
     from .blender.runner import BlenderRunner
@@ -376,15 +378,43 @@ def package(
         console.print("[bold red]Error:[/] Blender not found — packaging requires the export ops.")
         raise typer.Exit(1)
 
-    if spec and source_glb:
-        console.print("[bold red]Error:[/] Pass either a source GLB or --spec, not both.")
-        raise typer.Exit(1)
-    if not spec and not source_glb:
-        console.print("[bold red]Error:[/] A source GLB or --spec is required.")
+    if sum(1 for v in (spec, template, source_glb) if v) != 1:
+        console.print("[bold red]Error:[/] Pass exactly one of: a source GLB, --spec, or --template.")
         raise typer.Exit(1)
 
+    from .client.package import PlaceholderDimensionsError
+
     try:
-        if spec:
+        if template:
+            from .client.package import finish_delivery
+            from .spec.template import compile_spec, load_template
+
+            template_path = Path(template)
+            if not template_path.is_file():
+                console.print(f"[bold red]Error:[/] Template not found: {template}")
+                raise typer.Exit(1)
+            try:
+                tpl = load_template(template_path)
+                object_spec, compile_warnings = compile_spec(tpl, job_card)
+            except Exception as e:  # noqa: BLE001 — template errors are terminal
+                console.print(f"[bold red]Error:[/] Template {template} failed: {e}")
+                raise typer.Exit(1)
+            for w in compile_warnings:
+                console.print(f"[bold yellow]template warning:[/] {w}")
+            if job_card.dims_placeholder:
+                console.print(Panel(
+                    f"DIMS ARE PLACEHOLDERS (dims_placeholder: true): "
+                    f"{job_card.dims.length} x {job_card.dims.width} x "
+                    f"{job_card.dims.height} {job_card.dims.unit} are stand-ins.\n"
+                    "The chain runs for structural review renders, but NO "
+                    "deliverable package will be emitted (rule 9: dimensions "
+                    "are never inferred).",
+                    title="PLACEHOLDER DIMENSIONS", border_style="red"))
+            with console.status("[bold cyan]Finishing delivery (template → build → atlas → bake → decimate → export)...[/]"):
+                report = finish_delivery(job_card, object_spec, out_root=Path(out_root),
+                                         runner=runner, log=console.print,
+                                         resolution=resolution)
+        elif spec:
             from .client.package import finish_delivery
             from .spec.schema import ObjectSpec
 
@@ -413,6 +443,12 @@ def package(
                                           runner=runner, log=console.print)
     except typer.Exit:
         raise
+    except PlaceholderDimensionsError as e:
+        console.print(Panel(
+            f"{e}\n\nEvidence + structural review renders: "
+            f"output/blocked/{job_card.job_code}/qa_report.json",
+            title="BLOCKED — PLACEHOLDER DIMENSIONS", border_style="red"))
+        raise typer.Exit(2)
     except Exception as e:  # noqa: BLE001 — packaging failures are terminal
         console.print(f"[bold red]Error:[/] packaging failed: {e}")
         raise typer.Exit(1)
