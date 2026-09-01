@@ -362,6 +362,7 @@ def package(
     template: str = typer.Option(None, "--template", help="Product-class template YAML instead of a spec: compiled with the job card's dimensions (T4)"),
     resolution: int = typer.Option(1024, "--res", help="Texture resolution for --spec/--template bakes"),
     bake_timeout: float = typer.Option(300.0, "--bake-timeout", help="Bake subprocess timeout in seconds (4K bakes need ~16x the 1K time; 3600 is comfortable)"),
+    bake_device: str = typer.Option("auto", "--bake-device", help="Cycles compute device for bakes: auto (OptiX>CUDA>HIP>ONEAPI>METAL, CPU fallback), a specific type (optix/cuda/...), or cpu"),
 ):
     """Assemble the client delivery package (§4.1) + qa_report.json, then validate it.
 
@@ -415,7 +416,8 @@ def package(
                 report = finish_delivery(job_card, object_spec, out_root=Path(out_root),
                                          runner=runner, log=console.print,
                                          resolution=resolution,
-                                         bake_timeout_sec=bake_timeout)
+                                         bake_timeout_sec=bake_timeout,
+                                         bake_device=bake_device)
         elif spec:
             from .client.package import finish_delivery
             from .spec.schema import ObjectSpec
@@ -433,7 +435,8 @@ def package(
                 report = finish_delivery(job_card, object_spec, out_root=Path(out_root),
                                          runner=runner, log=console.print,
                                          resolution=resolution,
-                                         bake_timeout_sec=bake_timeout)
+                                         bake_timeout_sec=bake_timeout,
+                                         bake_device=bake_device)
         else:
             from .client.package import package_delivery
 

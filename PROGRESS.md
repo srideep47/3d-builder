@@ -1171,3 +1171,164 @@ label black/white/blue with 0% magenta.
    frame edge, vertical pixel span grows >1.3× vs the whole-model view.
 
 MAYA00053153 dims untouched (rule 9). Committed, no push.
+
+## Session log — 2026-09-02 (round 5: Cycles never touched the GPU — device parameterised, measured, reported honestly)
+
+### The bug
+
+`scene.cycles.device` was hardcoded `"CPU"` at two sites in
+`src/blender/harness_script.py` (op_bake_materials ~1945, op_bake_maps ~2851).
+Reviewer's 4K evidence: 531 s wall, GPU 0 % utilisation / 0 MiB VRAM the whole
+bake, 1348 CPU-seconds. Zero GPU setup anywhere (no compute_device_type, no
+get_devices(), no device enabling).
+
+### The trap (recorded per the work order)
+
+The round-3 heuristic "~19 min means CPU, minutes means GPU" was WRONG on this
+machine: a CPU 4K bake here is **~8.8 min — which IS minutes**. Elapsed time
+was the proxy; **GPU utilisation is the mechanism**. The heuristic would have
+passed while the GPU sat idle (it did, for a full session). Same class of
+error as round 4's symmetry-ratio metric. DESKTOP_SETUP §5 now says this
+explicitly with the nvidia-smi one-liner. **Measure the mechanism, not the
+proxy.**
+
+### The fix (exactly like bake_timeout_sec, per master prompt §I)
+
+- `--bake-device` CLI option → `finish_delivery(bake_device=...)` → bake op
+  params `"device"` → harness `_configure_cycles_device()`. The harness reads
+  NO config; the parameter arrives as an op parameter, threaded from the caller.
+- Proper enablement order: `preferences.compute_device_type` →
+  `get_devices()` → per-device `use` flags → **then** `scene.cycles.device`
+  (setting the scene device alone silently does nothing).
+- `auto` (default) tries OPTIX → CUDA → HIP → ONEAPI → METAL; explicit
+  `optix`/`cuda`/… or `cpu`. No usable GPU → clean CPU fallback with a loud
+  `fallback_reason` recorded in the bake result AND qa_report
+  (`finish.bake_device_resolved`: requested, GPU/CPU, compute type, enabled
+  devices, fallback reason). CI and the laptop fall back silently-clean.
+- 7 new tests (`tests/test_bake_device.py`): threading, default, evidence in
+  report, step timings, plus blender-marked live device-evidence shape tests.
+
+### Measurements (4K, TEST-QUEEN, the reviewer's exact workload)
+
+| device | wall | GPU util | VRAM | notes |
+|---|---|---|---|---|
+| CPU | **531.0 s** | 0 % / 0 MiB | 0 | the bug signature, reproduced |
+| OptiX | 590.0 s | mean 13.2 %, max 76 % | 4067 MiB | GPU engaged, evidenced |
+| OptiX + persistent_data | **555.5 s** | mean 11.5 %, max 54 % | 2086 MiB | −6 % vs non-persistent |
+| CUDA (run 1) | crashed ~525 s | — | — | native exit −1 at the FIRST metallic session, no error text; ao/normal/basecolor/roughness already saved |
+| CUDA (repro) | **560.6 s** | mean 10.6 %, max 73 % | 2068 MiB | identical command — crash NOT reproducible (1-in-2 flaky) |
+
+256 px smoke: CPU 23.6 s vs OptiX 76.6 s (overhead-dominated at small res).
+Full data: `output/bakeoff/bake_device_bench.json` (consolidated, all legs +
+run-to-run baselines), `scripts/bench_bake_device.py` (GpuSampler: 1 Hz
+nvidia-smi + per-process Blender CPU-seconds).
+
+**Verdict: GPU is engaged and evidenced, but on THIS workload it is 5–11 %
+SLOWER than CPU.** DESKTOP_SETUP §7's "2–4 min on OptiX" is not achievable by
+device choice — see next section. Default stays `auto` (per the work order);
+`--bake-device cpu` is the fast path on this machine today.
+
+### Why no device wins: the bake op is session-overhead-bound
+
+Profiled a full OptiX 4K bake via a direct subprocess with Cycles' timestamped
+stdout (`output/tmp/profile_optix/blender_stdout.txt`, 266 bake sessions):
+each "Loading <map>" marker is one Cycles session; the AO/detail/emission
+loops show exactly 14 sessions each (one per LP object), but the
+selected-to-active NORMAL loop shows **196 = 14 LP targets × 14 HP sources**:
+Blender splits each bake call (all HP shells selected) into one internal
+session PER SELECTED SOURCE. Per-session cost ~1.8 s with a full scene
+re-sync (14 LP + 14 HP + 14 CAGE objects) between every session:
+
+| phase | sessions | seconds | % of bake |
+|---|---|---|---|
+| ao (self-AO per object) | 14 | 30.3 | 5 % |
+| **normal (selected-to-active)** | **196** | **352.0** | **64 %** |
+| normal_detail (self, bump) | 14 | 41.5 | 8 % |
+| basecolor/roughness/metallic | 42 | 94.7 | 17 % |
+
+GPU ray-traces only ~60–80 s of the ~555 s op — hence mean utilisation ~12 %.
+`use_persistent_data` keeps the BVH alive (−6 %, 590→555.5) but cannot remove
+the per-session sync. **Identified follow-up (NOT done — it changes bake
+semantics and pinned outputs, owner decision): select only the CORRESPONDING
+HP shell as source per LP target → 196 sessions → 14, normal phase ~352 s →
+~25 s. That, not the device, is where the 2–4 min lives.**
+
+### Determinism verdict (work-order constraint 4)
+
+Three layers, all measured:
+
+1. **Fixture level — what the 250 tests actually pin**: bit-identical across
+   devices. `scripts/check_bake_determinism.py` reproduces the
+   test_delivery_finish.py fixtures verbatim (512 px ramp normal, AO cavity);
+   the exact pinned pixels (G=105/85/68 at wy=0.15/0.30/0.45, Δ+0/+1/+1;
+   neutral 128/128/255; AO 0/255) are the SAME on cpu, optix and cuda, and
+   the whole maps diff **0 LSB**.
+2. **Real 4K workload**: CPU vs OptiX/CUDA — normal ≤3, basecolor ≤5,
+   roughness ≤3 LSB max (mean ~0.001 LSB, 0.000 % of texels beyond 2 LSB);
+   metallic byte-identical. The AO channel's 16-LSB tail on 0.008 % of texels
+   appears **between two CPU runs too** (reviewer's chain maps vs bench leg:
+   normal/basecolor/roughness/metallic 0 LSB — CPU is bit-stable run-to-run;
+   AO is the one stochastic channel).
+3. **Full suite with GPU active** (auto→OptiX on this machine):
+   **263 passed in 122 s** (250 baseline + 13 new). No pinned value shifted;
+   nothing re-baselined.
+
+**Verdict: GPU output is equivalent within tolerance — exact (0 LSB) at the
+pinned fixtures, ≤5 LSB worst-channel at 4K where the same-device run-to-run
+floor is 0–1 LSB. No re-baselining needed or performed.**
+
+### Queued item 1 — per-step timings in qa_report (PLAN_AUTONOMOUS §7)
+
+`finish_delivery` now records `finish.step_timings_sec`
+(prepare_scene/bake_maps/decimate_lp/export_fbx/export_usdz/review_renders +
+total_chain) in every qa_report — the §7 per-step budgets are now verifiable
+from delivered reports. Pinned by test.
+
+### Queued item 2 — vision escalation wired (VISION_CONFIG §3)
+
+`config/ai.yaml` `vision.vlm.escalation_model: gemini-3.6-flash` (reviewer's
+`model: gemini-3.5-flash-lite` pin untouched); `vlm.py` validates it with the
+same pinned-version rule (-latest rejected); the agent loop escalates ONCE on
+gate disagreement (parsed verdict ≠ matches_reference) and records
+`escalated_from`. No hardcoding; no live calls (S1: billing unconfirmed).
+4 new tests.
+
+### Phase 3.0 — execute_blender_script removed
+
+Gone from `AGENT_TOOLS_SCHEMA` and the executor; the executor's fallthrough
+intentionally refuses it. Pinned by `tests/test_agent_surface.py` (schema
+absence + executor refusal). The validated-spec boundary is now enforced by
+test, not convention.
+
+### Brain test (GLM_PROMPT_BRAIN_TEST.md)
+
+S2 RESOLVED mid-session: the reviewer filled §4 (three hand-written
+descriptions with stated dimensions; reference images committed under
+input/references/BRAINTEST-*). S1 still blocks VISION calls only — the brain
+test needs none (descriptions are the input by design). Authored the three
+ObjectSpecs cold, one shot each, no builds/renders/measure-feedback (schema
+validation only): `output/braintest_specs/braintest_a_writing_desk.json`,
+`braintest_b_teacup.json`, `braintest_c_doormat.json` + generation script.
+Delivered in the session report with §5 notes blocks; the reviewer builds and
+judges per §7.
+
+### New gotchas (round 5)
+
+1. **Blender splits selected-to-active bakes per selected source** — N
+   sources = N internal Cycles sessions per bake call, each with a full scene
+   re-sync. Selecting "all HPs" for every LP object costs 196 sessions where
+   14 suffice. (Measured, not documented anywhere in Blender's docs.)
+2. **CUDA bake is flaky on this driver/Blender build** — 1 native hard crash
+   (exit −1, no error text) in 2 identical 4K runs, at a metallic self-bake
+   session. OptiX ran the identical workload twice, clean. `auto` prefers
+   OptiX before CUDA — keep that order.
+3. **AO is the one stochastic bake channel** — 16-LSB tails on 0.008 % of
+   texels between two CPU runs; never treat an AO pixel diff as device drift
+   without a same-device run-to-run baseline. CPU-vs-CPU: everything else
+   bit-stable.
+4. **os.times() does not account child CPU on Windows** — poll
+   `Get-Process blender` instead (GpuSampler).
+5. **A crash that kills the measuring script loses the report** — bench and
+   determinism scripts now record device crashes as findings and continue.
+
+MAYA00053153 dims untouched (rule 9). 263 tests green. Committed, no push.

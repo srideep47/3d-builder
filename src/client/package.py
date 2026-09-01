@@ -29,6 +29,7 @@ import json
 import platform
 import shutil
 import sys
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -301,6 +302,7 @@ def finish_delivery(
     resolution: int = 1024,
     review_renders: bool = True,
     bake_timeout_sec: float = 300.0,
+    bake_device: str = "auto",
 ) -> dict[str, Any]:
     """T3 full-quality finishing chain for a verified spec.
 
@@ -315,6 +317,13 @@ def finish_delivery(
     larger value (3600 is comfortable for 4K on this hardware) whenever
     ``resolution`` > 1024.
 
+    ``bake_device``: Cycles compute device for the bake — "auto" (default;
+    OptiX → CUDA → HIP → ONEAPI → METAL, CPU when none is present), a
+    specific type ("optix", "cuda", ...), or "cpu". The device actually
+    used is recorded in qa_report.json under ``finish.bake_device_resolved``
+    (requested type, GPU/CPU, enabled device names, fallback reason) —
+    a GPU bake must be a recorded fact, never an assumption.
+
     Owner decision (recorded in PROGRESS.md): the deliverable FBX is exported
     from the LIVE QUAD-CLEAN SCENE (scene.blend), not the triangulated GLB —
     the client n-gon gate is only meaningful on a non-triangulated mesh,
@@ -322,8 +331,10 @@ def finish_delivery(
     their human QA judges artist topology. The LP GLB is the decimated
     export; the HP GLB is the pre-deletion detail shell.
 
-    Mechanical evidence (bake stats, UV diagnostics, HP/LP tri counts)
-    travels in qa_report.json under ``finish`` — the operator is text-only:
+    Mechanical evidence (bake stats, UV diagnostics, HP/LP tri counts,
+    per-step wall clocks under ``finish.step_timings_sec`` — the §7
+    throughput budgets are only checkable with numbers) travels in
+    qa_report.json under ``finish`` — the operator is text-only:
     numbers, not eyeballs. Returns the report dict; raises loudly on any
     step failure (a package that cannot be audited must not ship).
     """
@@ -354,19 +365,31 @@ def finish_delivery(
             raise RuntimeError(f"finish_delivery step {step!r} failed: {res.get('error')}")
         return res
 
+    # Per-step wall clocks (PLAN_AUTONOMOUS §7 states budgets; qa_report
+    # records reality so any budget miss is a measured fact, not a feeling).
+    timings: dict[str, float] = {}
+    _t_chain_start = time.perf_counter()
+
+    def _timed(step: str, fn):
+        _t0 = time.perf_counter()
+        try:
+            return fn()
+        finally:
+            timings[step] = round(time.perf_counter() - _t0, 3)
+
     # ── 1. prepare: build, verify quads, UV atlas, save the live scene ──────
     build_params = resolve_spec_to_build_params(spec)
-    prep = _require(runner.execute_op("prepare_delivery_scene", {
+    prep = _timed("prepare_scene", lambda: _require(runner.execute_op("prepare_delivery_scene", {
         "build": build_params,
         "out_blend": str(scene_blend),
-    }), "prepare_delivery_scene")
+    }), "prepare_delivery_scene"))
     log(f"prepared quad-clean scene: {scene_blend} "
         f"(atlas pack_scale {prep.get('uv_atlas', {}).get('pack_scale', '?')})")
 
     # ── 2. bake: real 5-map texture set from the HP detail shell ────────────
     detail_map = {p["name"]: p["detail"] for p in build_params["spec"]["parts"]
                   if p.get("detail")}
-    bake = _require(runner.execute_op("bake_maps", {
+    bake = _timed("bake_maps", lambda: _require(runner.execute_op("bake_maps", {
         "input": str(scene_blend),
         "out_dir": str(maps_dir),
         "maps": None,
@@ -377,18 +400,21 @@ def finish_delivery(
         "detail_normal": True,
         "hp_glb": str(hp_glb),
         "save_blend": str(scene_blend),
-    }, timeout_sec=bake_timeout_sec), "bake_maps")
-    log(f"baked maps: {sorted(k for k, v in bake.get('maps', {}).items() if isinstance(v, dict) and 'stats' in v)}")
+        "device": bake_device,
+    }, timeout_sec=bake_timeout_sec), "bake_maps"))
+    log(f"baked maps ({bake.get('device', {}).get('device', '?')} via "
+        f"{bake.get('device', {}).get('compute_device_type') or 'CPU'}): "
+        f"{sorted(k for k, v in bake.get('maps', {}).items() if isinstance(v, dict) and 'stats' in v)}")
 
     # ── 3. LP: decimate the delivery scene to the tier budget ───────────────
     budget = TIER_TRI_CEILINGS.get(job.complexity)
     if budget is None:
         budget = int(getattr(spec, "tri_budget", 60_000))
-    dec = _require(runner.execute_op("decimate_to_budget", {
+    dec = _timed("decimate_lp", lambda: _require(runner.execute_op("decimate_to_budget", {
         "input": str(scene_blend),
         "output": str(lp_glb),
         "budget": budget,
-    }), "decimate_to_budget")
+    }), "decimate_to_budget"))
     log(f"LP exported: {dec.get('triangle_equivalent')} tri-eq "
         f"(budget {budget}, decimated={dec.get('decimated')})")
 
@@ -400,12 +426,12 @@ def finish_delivery(
              "pad": c.pad, "frame": c.frame}
             for c in (getattr(spec, "review_closeups", None) or [])
         ]
-        rv = _require(runner.execute_op("render_views", {
+        rv = _timed("review_renders", lambda: _require(runner.execute_op("render_views", {
             "model_path": str(lp_glb),
             "output_dir": str(review_dir),
             "prefix": job.job_code,
             "closeups": closeups,
-        }), "render_views")
+        }), "render_views"))
         if rv.get("closeup_skips"):
             log(f"review close-ups skipped: {rv['closeup_skips']}")
         files_rendered = sorted(str(p) for p in review_dir.glob("*.png"))
@@ -442,6 +468,10 @@ def finish_delivery(
                 "lp_budget": budget,
                 "texture_resolution": resolution,
                 "bake_timeout_sec": bake_timeout_sec,
+                "bake_device": bake_device,
+                "bake_device_resolved": bake.get("device"),
+                "step_timings_sec": {**timings,
+                                     "total_chain": round(time.perf_counter() - _t_chain_start, 3)},
                 "detail_parts": detail_map,
                 "uv_atlas": prep.get("uv_atlas"),
                 "uv_diagnostics": prep.get("uv"),
@@ -481,21 +511,21 @@ def finish_delivery(
         })
 
     fbx_path = package_dir / f"{job.job_code}.fbx"
-    _require(runner.execute_op("export_fbx", {
+    _timed("export_fbx", lambda: _require(runner.execute_op("export_fbx", {
         "input": str(scene_blend),
         "path": str(fbx_path),
         "axis_up": FBX_AXIS_UP,
         "axis_forward": FBX_AXIS_FORWARD,
-    }), "export_fbx")
+    }), "export_fbx"))
     _record(fbx_path, note="exported from the LIVE QUAD-CLEAN SCENE (owner "
                            "decision): quads preserved, n-gon gate meaningful, "
                            "polycount counted as authored")
 
     usdz_path = package_dir / f"{job.job_code}_LP.usdz"
-    usdz_res = _require(runner.execute_op("export_usdz", {
+    usdz_res = _timed("export_usdz", lambda: _require(runner.execute_op("export_usdz", {
         "input": str(lp_glb),
         "path": str(usdz_path),
-    }), "export_usdz")
+    }), "export_usdz"))
     _record(usdz_path, note=f"export method: {usdz_res.get('method', '?')} "
                             f"(from the decimated LP GLB)")
 
@@ -522,6 +552,7 @@ def finish_delivery(
     if review_renders:
         review_files = _render_review()
 
+    # ── 6. close the timing ledger: assembly + total ────────────────────────
     finish_section = {
         "fbx_source": "live_quad_scene",
         "lp_tri_equivalent": dec.get("triangle_equivalent"),
@@ -530,6 +561,10 @@ def finish_delivery(
         "lp_decimated": dec.get("decimated"),
         "texture_resolution": resolution,
         "bake_timeout_sec": bake_timeout_sec,
+        "bake_device": bake_device,
+        "bake_device_resolved": bake.get("device"),
+        "step_timings_sec": {**timings,
+                             "total_chain": round(time.perf_counter() - _t_chain_start, 3)},
         "detail_parts": detail_map,
         "uv_atlas": prep.get("uv_atlas"),
         "uv_diagnostics": prep.get("uv"),

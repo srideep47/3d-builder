@@ -108,7 +108,7 @@
   guess a standard size.
 
 ## Verification
-- `python -m pytest tests -q` — 238 tests; `blender`-marked tests auto-skip
+- `python -m pytest tests -q` — 263 tests; `blender`-marked tests auto-skip
   when no Blender is found.
 - Client packages: `python -m src.cli package --spec <spec.json> --job
   job.yaml` runs the full T3 finish chain (build → quad-verify + per-island

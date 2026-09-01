@@ -3,6 +3,14 @@
 Used by native tool-calling loops. Every Blender op runs in its own process, so
 stateful tools (measure/render) track the last built GLB and pass its path —
 there is no shared scene between ops.
+
+The brain never writes raw Blender Python: `execute_blender_script` was
+REMOVED (master work order Phase 3.0) because arbitrary-script access
+destroys the validated-spec boundary — *3DCodeBench* (arXiv 2606.01057)
+measured API-mismatch and floating-geometry failures as the two dominant
+modes when models author procedural code. `run_script` remains a HARNESS op
+(test fixtures and developer tooling), not an agent tool; the removal is
+pinned by tests/test_agent_surface.py.
 """
 
 from __future__ import annotations
@@ -71,23 +79,6 @@ AGENT_TOOLS_SCHEMA: list[dict[str, Any]] = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "execute_blender_script",
-            "description": "Execute arbitrary custom Python code inside Blender for specialized geometric modifications. Set the variable RESULT to a JSON-serializable value to return data.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "Python code using the 'bpy' API.",
-                    }
-                },
-                "required": ["code"],
-            },
-        },
-    },
 ]
 
 
@@ -139,11 +130,7 @@ class AgentToolExecutor:
             }
             return self.runner.execute_op("render_views", params)
 
-        if tool_name == "execute_blender_script":
-            code = args.get("code", "")
-            params: dict[str, Any] = {"code": code}
-            if self.last_built_glb:
-                params["input"] = self.last_built_glb
-            return self.runner.execute_op("run_script", params)
-
+        # execute_blender_script is INTENTIONALLY not callable: the brain
+        # never writes raw Blender Python (validated-spec boundary; the
+        # removal is pinned by tests/test_agent_surface.py).
         return {"success": False, "error": f"Unknown tool '{tool_name}'"}

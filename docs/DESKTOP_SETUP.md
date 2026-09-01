@@ -91,17 +91,46 @@ could not do meaningful GPU Cycles baking, so 4K bakes ran on CPU at **~19
 minutes** and the generic 300 s op timeout silently killed them mid-chain
 (now a real `bake_timeout_sec` parameter, exposed as `--bake-timeout`).
 
-The 4080 Super has 16 GB. Confirm Cycles is actually using CUDA/OptiX and not
-silently falling back to CPU, then run a real 4K bake and **record the wall
-clock**:
+The 4080 Super has 16 GB. Confirm Cycles is actually using CUDA/OptiX and
+not silently falling back to CPU, then run a real 4K bake and **record the
+wall clock**:
 
 ```bash
 uv run python -m src.cli package --job input/jobs/TEST-QUEEN.yaml --res 4096
 ```
 
-Expect minutes, not tens of minutes. If it still takes ~19 minutes, Cycles is
-on CPU — fix that before building anything else, because the whole throughput
-plan assumes GPU baking.
+> **Elapsed time is the WRONG signal here — GPU utilisation is the right
+> one.** This machine does a CPU 4K bake in ~8 minutes, which IS "minutes";
+> the original "~19 min means CPU" heuristic would have passed while the
+> GPU sat idle (it did — 531 s wall, GPU pinned at 0% / 0 MiB, because
+> `scene.cycles.device` was hardcoded "CPU"). Measure the mechanism, not
+> the proxy:
+>
+> ```bash
+> nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv -l 1
+> ```
+>
+> Non-zero VRAM during the bake is the proof. The device actually used is
+> also recorded in qa_report.json under `finish.bake_device_resolved`
+> (requested type, GPU/CPU, enabled devices, fallback reason), and
+> `scripts/bench_bake_device.py` measures utilisation + wall clock per
+> device (CPU/OptiX/CUDA) on the real 4K workload with map diffs.
+
+Expect minutes, not tens of minutes, AND non-zero GPU utilisation. If the
+GPU stays at 0%, the bake is on CPU — fix that before building anything
+else, because the whole throughput plan assumes GPU baking.
+
+> **Measured on the real TEST-QUEEN 4K workload (2026-09-02,
+> `output/bakeoff/bake_device_bench.json`):** CPU 531 s · OptiX 590 s
+> (555 s with persistent data) · CUDA 560 s but hard-crashed Blender
+> natively in 1 of 2 identical runs. The GPU is ENGAGED (utilisation +
+> VRAM evidenced) yet not faster than CPU on this workload — the bake op
+> is ~266 small serial Cycles sessions (the selected-to-active normal
+> pass alone is 196 of them) with a full scene re-sync between each, so
+> wall time is sync-overhead-bound, not ray-bound. Device choice cannot
+> deliver 2–4 min here; the pass-structure fix (per-target HP source
+> selection) is the identified follow-up. `--bake-device cpu` picks CPU
+> explicitly; default `auto` prefers OptiX → CUDA → … → CPU.
 
 ## 6. Optional — local Qwen 27B as vision fallback
 
@@ -119,7 +148,7 @@ take the verdict, unload, hand the GPU back. Never inside the hot loop.
 
 | Capability | Laptop (GTX 1650 Ti 4 GB) | Desktop (RTX 4080 Super 16 GB) |
 |---|---|---|
-| GPU Cycles baking | unusable — 19 min per 4K on CPU | 2–4 min on GPU |
+| GPU Cycles baking | unusable — 19 min per 4K on CPU | engaged + evidenced (measured: ~9–10 min, CPU-parity — the workload is session-overhead-bound, not ray-bound; see §5) |
 | TRELLIS 2 image-to-3D, 512³ | impossible | fits — 16 GB is the stated minimum, 5–10 s/asset |
 | Hunyuan3D 2.1 | impossible | fits — 12–16 GB |
 | Local VLM 8B Q4 | no | yes, ~6 GB |

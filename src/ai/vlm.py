@@ -19,6 +19,12 @@ the Gemini provider also falls back to ``GEMINI_API_KEY``, which holds the
 same value). Gemini models must be PINNED versions (``gemini-3.6-flash``),
 never ``-latest`` aliases.
 
+Two model tiers (``docs/VISION_CONFIG.md`` §3): the default ``model``
+serves every iteration; ``escalation_model`` (optional, same config block)
+serves the ONE escalated verdict before packaging and whenever the default
+disagrees with the measured gates. Both ids come from config — never
+hardcoded.
+
 Everything fails soft: an absent, misconfigured, or unreachable provider
 leaves the pipeline fully functional.
 """
@@ -50,6 +56,17 @@ _IMAGE_MIME = {
 DEFAULT_API_KEY_ENV = "THREED_VLM_API_KEY"
 GEMINI_API_KEY_ENV = "GEMINI_API_KEY"  # holds the same value (owner setup)
 GEMINI_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com"
+
+
+def _reject_floating_alias(model: str, role: str) -> None:
+    """Gemini models must be PINNED versions — ``-latest`` aliases are
+    rejected at construction so a silent model drift cannot pass review."""
+    if str(model).endswith("-latest"):
+        raise ValueError(
+            f"gemini {role} model {model!r} is a floating alias — pin a "
+            "specific version (e.g. gemini-3.6-flash) so results are "
+            "reproducible"
+        )
 
 
 def _image_b64(path: Path) -> tuple[str, str]:
@@ -97,8 +114,11 @@ class VisionProvider(abc.ABC):
         system: str | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.2,
+        model: str | None = None,
     ) -> str:
-        """One vision chat round. Raises on HTTP errors; callers fail soft."""
+        """One vision chat round. ``model`` overrides the provider's default
+        (the escalation tier); None means the default. Raises on HTTP
+        errors; callers fail soft."""
 
     # ── Integration point 1: reference analysis for the analyst ────────────
 
@@ -139,9 +159,17 @@ class VisionProvider(abc.ABC):
         render_paths: dict[str, str],
         reference_paths: list[str | Path],
         model_summary: str = "",
+        escalate: bool = False,
     ) -> dict[str, Any]:
         """Compare renders against references. Returns a verdict dict:
-        {available, matches_reference, score, issues, summary}."""
+        {available, matches_reference, score, issues, summary, model,
+        escalated}.
+
+        ``escalate=True`` routes the ONE escalated call to the configured
+        escalation model (``docs/VISION_CONFIG.md`` §3: before packaging,
+        and whenever the default model disagrees with the measured gates).
+        With no escalation model configured the default serves the call and
+        ``escalated`` records False — an honest no-op, never a crash."""
         if not self.is_available():
             return {"available": False, "reason": "vision provider not available"}
         try:
@@ -157,10 +185,12 @@ class VisionProvider(abc.ABC):
             )
             if model_summary:
                 text += f"\nGenerated model summary: {model_summary}"
-            raw = self.chat_vision(text, all_paths, max_tokens=3072)
+            model = (self.escalation_model if escalate else None) or None
+            raw = self.chat_vision(text, all_paths, max_tokens=3072, model=model)
             parsed = extract_json_from_text(raw) or self._loose_verdict(raw)
             if not parsed:
-                return {"available": True, "parsed": False, "raw": raw[:800]}
+                return {"available": True, "parsed": False, "raw": raw[:800],
+                        "model": model or self.model, "escalated": False}
             return {
                 "available": True,
                 "parsed": True,
@@ -168,6 +198,8 @@ class VisionProvider(abc.ABC):
                 "score": parsed.get("score"),
                 "issues": parsed.get("issues") or [],
                 "summary": parsed.get("summary"),
+                "model": model or self.model,
+                "escalated": bool(model and model != self.model),
             }
         except Exception as e:
             return {"available": True, "parsed": False, "error": str(e)[:400]}
@@ -192,11 +224,15 @@ class OpenAICompatibleVisionProvider(VisionProvider):
         model: str | None = None,
         api_key: str | None = None,
         timeout_sec: float | None = None,
+        escalation_model: str | None = None,
     ):
         cfg = self._load_vision_config()
         vlm_cfg = cfg.get("vlm", {}) or {}
         self.base_url = (base_url or vlm_cfg.get("base_url") or "").rstrip("/")
         self.model = model or vlm_cfg.get("model") or ""
+        self.escalation_model = (
+            escalation_model or vlm_cfg.get("escalation_model") or None
+        )
         self.api_key = api_key or vlm_cfg.get("_api_key")  # resolved below
         self.timeout_sec = float(timeout_sec or vlm_cfg.get("timeout_sec", 120))
         if not self.api_key:
@@ -236,6 +272,7 @@ class OpenAICompatibleVisionProvider(VisionProvider):
         system: str | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.2,
+        model: str | None = None,
     ) -> str:
         if not self.is_available():
             raise RuntimeError("local VLM not available")
@@ -255,7 +292,7 @@ class OpenAICompatibleVisionProvider(VisionProvider):
             f"{self.base_url}/chat/completions",
             headers=self._headers(),
             json={
-                "model": self.model,
+                "model": model or self.model,
                 "messages": messages,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
@@ -289,16 +326,19 @@ class GeminiVisionProvider(VisionProvider):
         api_key: str | None = None,
         base_url: str | None = None,
         timeout_sec: float | None = None,
+        escalation_model: str | None = None,
     ):
         cfg = self._load_vision_config()
         vlm_cfg = cfg.get("vlm", {}) or {}
         self.model = model or vlm_cfg.get("model") or ""
-        if self.model.endswith("-latest"):
-            raise ValueError(
-                f"gemini model {self.model!r} is a floating alias — pin a "
-                "specific version (e.g. gemini-3.6-flash) so results are "
-                "reproducible"
-            )
+        _reject_floating_alias(self.model, "default")
+        # Escalation tier (VISION_CONFIG §3): one call before packaging and
+        # whenever the default model disagrees with the measured gates.
+        self.escalation_model = (
+            escalation_model or vlm_cfg.get("escalation_model") or None
+        )
+        if self.escalation_model:
+            _reject_floating_alias(self.escalation_model, "escalation")
         self.base_url = (
             base_url or vlm_cfg.get("base_url") or GEMINI_DEFAULT_BASE_URL
         ).rstrip("/")
@@ -337,6 +377,7 @@ class GeminiVisionProvider(VisionProvider):
         system: str | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.2,
+        model: str | None = None,
     ) -> str:
         if not self.is_available():
             raise RuntimeError("gemini vision provider not available")
@@ -355,7 +396,7 @@ class GeminiVisionProvider(VisionProvider):
             body["systemInstruction"] = {"parts": [{"text": system}]}
 
         resp = httpx.post(
-            f"{self.base_url}/v1beta/models/{self.model}:generateContent",
+            f"{self.base_url}/v1beta/models/{model or self.model}:generateContent",
             headers=self._headers(),
             json=body,
             timeout=self.timeout_sec,

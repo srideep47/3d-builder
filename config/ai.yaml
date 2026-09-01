@@ -52,8 +52,11 @@ vision:
     provider: gemini  # local (OpenAI-compatible vLLM/Qwen-VL) | gemini (Google v1beta)
     base_url: null   # local: e.g. http://127.0.0.1:8001/v1 (includes /v1);
                      # gemini: host root, default https://generativelanguage.googleapis.com
-    model: gemini-3.6-flash  # local: e.g. Qwen/Qwen2.5-VL-7B-Instruct
+    model: gemini-3.5-flash-lite  # local: e.g. Qwen/Qwen2.5-VL-7B-Instruct
                      # gemini: PINNED version only (-latest is rejected)
+    escalation_model: gemini-3.6-flash  # VISION_CONFIG §3: ONE escalated
+                     # verdict before packaging / on gate disagreement;
+                     # pinned version, same rules as `model`
     api_key_env: THREED_VLM_API_KEY  # key comes from the ENV only, never this file;
                      # gemini also falls back to GEMINI_API_KEY (same value)
     timeout_sec: 120

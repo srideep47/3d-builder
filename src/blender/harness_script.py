@@ -1928,6 +1928,99 @@ def op_apply_material(params):
     return {"success": True, "path": out, "material": applied}
 
 
+# Cycles compute_device_type enum values, in the order _configure_cycles_device
+# prefers them when auto-detecting (OptiX is fastest where present; CUDA is the
+# universal NVIDIA fallback; HIP/ONEAPI/METAL cover AMD/Intel/Apple so the same
+# parameter works on any host).
+_CYCLE_COMPUTE_TYPES = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
+
+
+def _configure_cycles_device(scene, device_param):
+    """Point Cycles at a compute device, PROPERLY. GPU setup is three RNA
+    writes, not one: compute_device_type in the Cycles addon preferences,
+    a get_devices() refresh, per-device `use` flags — and only THEN
+    scene.cycles.device = "GPU". Setting the scene device alone silently
+    does nothing (the GPU stays at 0% while the bake burns CPU for ~9
+    minutes — the exact bug this replaced).
+
+    device_param (mirrors bake_timeout_sec as an op parameter):
+      "auto" (default) — first available type of _CYCLE_COMPUTE_TYPES;
+      "gpu"            — same order as auto, explicit;
+      "optix"/"cuda"/"hip"/"oneapi"/"metal" — one specific type;
+      "cpu"            — CPU, no GPU probing.
+    Unknown types and absent hardware fall back to CPU CLEANLY (the bake
+    still succeeds) and say why in the returned evidence, so CI and
+    GPU-less hosts keep working unchanged.
+
+    Returns {"requested", "device", "compute_device_type", "devices_enabled",
+    "fallback_reason"} — mechanical evidence for qa_report.json: the
+    operator is text-only, "it used the GPU" must be a recorded fact.
+    """
+    import bpy
+
+    requested = str(device_param or "auto").strip().lower()
+    if requested in ("", "none", "null"):
+        requested = "auto"
+    result = {
+        "requested": requested,
+        "device": "CPU",
+        "compute_device_type": None,
+        "devices_enabled": [],
+        "fallback_reason": None,
+    }
+    if requested == "cpu":
+        scene.cycles.device = "CPU"
+        return result
+
+    prefs = bpy.context.preferences.addons["cycles"].preferences
+    candidates = (
+        list(_CYCLE_COMPUTE_TYPES)
+        if requested in ("auto", "gpu")
+        else [requested.upper()]
+    )
+    for compute_type in candidates:
+        try:
+            prefs.compute_device_type = compute_type
+        except Exception:
+            continue  # not in this build's enum — try the next candidate
+        try:
+            prefs.get_devices()
+        except Exception:
+            pass
+        enabled = []
+        for dev in getattr(prefs, "devices", []):
+            try:
+                dev.use = dev.type == compute_type
+            except Exception:
+                continue
+            if dev.use:
+                enabled.append(dev.name)
+        if enabled:
+            scene.cycles.device = "GPU"
+            result.update(
+                device="GPU", compute_device_type=compute_type,
+                devices_enabled=enabled,
+            )
+            return result
+    # Nothing usable: back to CPU, cleanly and loudly.
+    try:
+        prefs.compute_device_type = "NONE"
+    except Exception:
+        pass
+    scene.cycles.device = "CPU"
+    if requested in ("auto", "gpu"):
+        result["fallback_reason"] = (
+            f"no usable GPU compute device found (tried "
+            f"{', '.join(candidates)}); baked on CPU"
+        )
+    else:
+        result["fallback_reason"] = (
+            f"compute device type {requested.upper()!r} is not available on "
+            f"this host; baked on CPU"
+        )
+    return result
+
+
 def op_bake_materials(params):
     """Bake material colors to image textures so node-driven shaders survive
     glTF export. Requires UVs (smart-projected automatically if missing)."""
@@ -1942,7 +2035,7 @@ def op_bake_materials(params):
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
     scene.cycles.samples = int(params.get("samples", 16))
-    scene.cycles.device = "CPU"
+    device_info = _configure_cycles_device(scene, params.get("device", "auto"))
 
     out_dir = params.get("texture_dir")
     if out_dir:
@@ -1986,7 +2079,7 @@ def op_bake_materials(params):
                 image.save()
             baked.append(f"{obj.name}:{mat.name}")
 
-    result = {"success": True, "baked": baked}
+    result = {"success": True, "baked": baked, "device": device_info}
     if params.get("output"):
         result["path"] = export_any(str(params["output"]))
     return result
@@ -2848,7 +2941,17 @@ def op_bake_maps(params):
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
     scene.cycles.samples = samples
-    scene.cycles.device = "CPU"
+    device_info = _configure_cycles_device(scene, params.get("device", "auto"))
+    if device_info.get("fallback_reason"):
+        warnings.append(device_info["fallback_reason"])
+    # Persistent data keeps the Cycles session (BVH) alive across the MANY
+    # bpy.ops.object.bake calls this op makes (~20: per-object AO, caged
+    # normal, per-map self-bakes). Without it every call rebuilds the
+    # session — cheap on CPU, expensive enough on OptiX/CUDA to make a 4K
+    # GPU bake SLOWER than CPU (measured: 590 s vs 531 s at 4K before this
+    # flag; see output/bakeoff/bake_device_bench.json). One process per op
+    # means the session dies with the process — no cross-op contamination.
+    scene.cycles.use_persistent_data = bool(params.get("persistent_data", False))
 
     bounds = get_mesh_bounds(lp_objs)
     max_dim = max(bounds["dimensions"]) if bounds else 1.0
@@ -3120,6 +3223,7 @@ def op_bake_maps(params):
         "ray_distance_m": ray_distance,
         "resolution": resolution,
         "samples": samples,
+        "device": device_info,
     }
 
 

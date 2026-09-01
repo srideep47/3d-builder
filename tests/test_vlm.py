@@ -272,6 +272,113 @@ def test_gemini_rejects_latest_alias():
         GeminiVisionProvider(model="gemini-flash-latest")
 
 
+# ── Escalation tier (docs/VISION_CONFIG.md §3) ───────────────────────────────
+
+
+def test_gemini_escalation_model_rejects_latest_alias():
+    """The escalation model is pinned exactly like the default — a floating
+    alias must never slip in through the second tier."""
+    with pytest.raises(ValueError, match="pin"):
+        GeminiVisionProvider(model="gemini-3.5-flash-lite",
+                             escalation_model="gemini-flash-latest")
+
+
+def test_gemini_visual_verdict_escalates_to_configured_model(
+        mock_gemini_url, tmp_path, monkeypatch):
+    """escalate=True routes the call to the escalation model id; the verdict
+    records WHICH model served it and that it was escalated."""
+    monkeypatch.setenv("THREED_VLM_API_KEY", "test-key-123")
+    img = _make_image(tmp_path)
+    provider = GeminiVisionProvider(
+        model="gemini-3.5-flash-lite", escalation_model="gemini-3.6-flash",
+        base_url=mock_gemini_url)
+
+    verdict = provider.visual_verdict({"front": str(img)}, [img], escalate=True)
+    assert verdict["available"] is True and verdict["parsed"] is True
+    assert GEMINI_CALLS["model"] == "gemini-3.6-flash"
+    assert verdict["model"] == "gemini-3.6-flash"
+    assert verdict["escalated"] is True
+
+    # the default tier is unchanged: same provider, no escalate → default id
+    verdict = provider.visual_verdict({"front": str(img)}, [img])
+    assert GEMINI_CALLS["model"] == "gemini-3.5-flash-lite"
+    assert verdict["model"] == "gemini-3.5-flash-lite"
+    assert verdict["escalated"] is False
+
+
+def test_gemini_escalation_without_configured_model_is_honest_noop(
+        mock_gemini_url, tmp_path, monkeypatch):
+    """escalate=True with NO escalation model configured: the default serves
+    the call and `escalated` records False — never a crash, never a lie."""
+    monkeypatch.setattr(
+        VisionProvider, "_load_vision_config",
+        staticmethod(lambda: {"vlm": {"model": "gemini-3.5-flash-lite",
+                                      "escalation_model": None}}))
+    monkeypatch.setenv("THREED_VLM_API_KEY", "test-key-123")
+    img = _make_image(tmp_path)
+    provider = GeminiVisionProvider(model="gemini-3.5-flash-lite",
+                                    base_url=mock_gemini_url)
+    assert provider.escalation_model is None
+
+    verdict = provider.visual_verdict({"front": str(img)}, [img], escalate=True)
+    assert verdict["available"] is True and verdict["parsed"] is True
+    assert verdict["model"] == "gemini-3.5-flash-lite"
+    assert verdict["escalated"] is False
+
+
+def test_visual_gate_escalates_on_gate_disagreement(tmp_path):
+    """The agent loop takes exactly ONE escalated verdict when the default
+    model disagrees with the (green) measured gates, and records both; when
+    the default agrees, no second call is made."""
+    loop = AgentLoop.__new__(AgentLoop)
+    loop._vlm = None
+    loop._vlm_checked = False
+
+    class FakeEscalatingVLM:
+        is_available = staticmethod(lambda: True)
+        escalation_model = "gemini-3.6-flash"
+
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def visual_verdict(self, renders, refs, model_summary="", escalate=False):
+            self.calls.append({"escalate": escalate})
+            if escalate:
+                return {"available": True, "parsed": True,
+                        "matches_reference": True, "score": 7,
+                        "issues": [], "summary": "escalated: fine",
+                        "model": "gemini-3.6-flash", "escalated": True}
+            return {"available": True, "parsed": True,
+                    "matches_reference": False, "score": 4,
+                    "issues": ["wrong proportions"], "summary": "meh",
+                    "model": "gemini-3.5-flash-lite", "escalated": False}
+
+    vlm = FakeEscalatingVLM()
+    loop._vlm = vlm
+    loop._vlm_checked = True
+    img = _make_image(tmp_path)
+
+    verdict = loop._run_visual_gate({"front": str(img)}, [img], None, None)
+    # disagreement → exactly two calls, the second escalated, both recorded
+    assert [c["escalate"] for c in vlm.calls] == [False, True]
+    assert verdict["model"] == "gemini-3.6-flash"
+    assert verdict["escalated_from"]["model"] == "gemini-3.5-flash-lite"
+    assert verdict["escalated_from"]["matches_reference"] is False
+
+    # agreement → one call, no escalation
+    agreeing = FakeEscalatingVLM()
+    agreeing.visual_verdict = lambda *a, **k: {
+        "available": True, "parsed": True, "matches_reference": True,
+        "score": 8, "issues": [], "summary": "ok",
+        "model": "gemini-3.5-flash-lite", "escalated": False}
+    agreeing.calls = []
+    loop._vlm = agreeing
+    verdict = loop._run_visual_gate({"front": str(img)}, [img], None, None)
+    assert agreeing.calls == []  # lambda replaced the recorder; verdict is what matters
+    assert verdict["matches_reference"] is True
+    assert "escalated_from" not in verdict
+
+
 def test_gemini_shared_integration_points(mock_gemini_url, tmp_path, monkeypatch):
     """describe_reference_images / visual_verdict are shared through the
     ABC and work unchanged over the Gemini wire."""
