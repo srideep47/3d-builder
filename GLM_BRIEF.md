@@ -146,12 +146,14 @@ pillows, no room, no bedding.
 
 ### 5.2 Layer structure, top to bottom (from a corner close-up and a clean side elevation)
 
-> **CORRECTED 2026-09-01 (round 3).** The owner reviewed the reference
-> photos directly and corrected this section — the corrections below come
-> from the **reviewer's eyes**, not from GLM (GLM is text-only; its only
-> photo access is the advisory Gemini describe, which DISAGREES on the
-> quilt pattern — see band 1). Where the original transcription and a
-> correction conflict, **the correction wins.**
+> **CORRECTED 2026-09-01 (round 3), re-corrected round 4.** The owner
+> reviewed the reference photos directly and corrected this section — the
+> corrections below come from the **reviewer's eyes**, not from GLM (GLM is
+> text-only; its only photo access is the advisory Gemini describe, which
+> DISAGREES on the quilt pattern — see band 1). Where the original
+> transcription and a correction conflict, **the correction wins**; where
+> round 3 and round 4 conflict (band 5), **round 4 wins** — the reviewer
+> re-zoomed both reference photos on the border.
 
 The silhouette is a **rounded box**: a domed, quilted top over a straight-sided
 border. Reading down the side face:
@@ -162,7 +164,7 @@ border. Reading down the side face:
 | 2 | **Tape edge (top)** | **Black/near-black binding cord** wrapping the top perimeter edge — reads as a **rounded cord ≈ 2-3% of the mattress height** (the first-pass "thin tape" over-corrected to ~1% of H — too thin). Herringbone / diagonal twill weave. |
 | 3 | **Air-mesh band** | **White 3D spacer mesh** — a perforated, honeycomb/oval-hole pattern; **holes ≈ 10 mm** (not 6). Distinctly open and textural. Roughly the tallest single light band. |
 | 4 | **Tape edge (mid)** | As #2, below the air-mesh band. |
-| 5 | **Border stack** | Top to bottom: **WHITE KNIT RIB directly under the air-mesh, then velvet, rib, velvet, rib, velvet, then a WHITE BAND above the base** — the stack starts with knit (not velvet) and ends with a white band (not a third velvet at the bottom). **3 dark velvet bands** separated by knit ribs. Velvet reads **darker than the first-pass tint 0.16 — closer to 0.08-0.10 lightness — with vertical nap streaks**. |
+| 5 | **Border stack** | **ROUND 4 (reviewer's re-read, supersedes round 3): ONE dark velvet mass with two FAINT STITCHED SEAMS inside it, bounded by exactly TWO white knit ribs — one above, one below. There are NO white ribs between the velvet bands** (the round-3 "rib, velvet, rib, velvet, rib, velvet" interleaving was wrong and rendered as a grille). The seams are **stitch lines, not colour changes** — the three velvet sub-bands read as **one continuous dark mass at normal viewing distance**. Reviewer's measured fractions of total height: crown .28 / air-mesh .15 / knit rib .09 / velvet ×3 .09 each (one mass, faint seams between) / knit rib .11 / base .10. Velvet reads **~0.08-0.10 lightness with vertical nap streaks**. |
 | 6 | **Tape edge (bottom)** | As #2, wrapping the bottom perimeter edge. |
 | 7 | **Base** | Flat underside, dark non-slip fabric. Rarely visible — keep it cheap. |
 
@@ -176,8 +178,14 @@ border. Reading down the side face:
   bottom: `NISIEN` (wide-tracked serif caps) / `PURE COMFORT` (smaller caps) /
   `with body support` (small lowercase) / a **blue rounded-square icon**
   showing a white mattress glyph with three downward arrows / `Perfect Night`
-  in italic script. **Best source: crop this directly from the corner close-up
-  photo** — it is clean, well-lit, and nearly orthographic.
+  in italic script. **Colour verified round 4 off the photo crop
+  (9.28.22): black patch [0.12, 0.13, 0.15], white text [0.93, 0.93, 0.94],
+  blue icon fill [0.07, 0.61, 0.86].** The first decal texture was a
+  synthetic stand-in created before the reference photos arrived; it carried
+  2% scattered magenta noise that averaged to a purple cast at render scale —
+  replaced by a real crop of photo 9.28.22 (`output/make_decal_crop.py`
+  documents the crop box and the colour measurements). **Best source: the
+  9.28.22 crop** — clean, well-lit, near-fronto-parallel, ~3.4 px/mm.
 - **Carry handles — OPEN QUESTION CLOSED (reviewer, round 3).** Photo 9.28.35
   clearly shows **vertical dark straps crossing the FULL border stack at
   intervals along the long sides** — these ARE carry handles and they ARE to

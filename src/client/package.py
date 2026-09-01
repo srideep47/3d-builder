@@ -393,11 +393,21 @@ def finish_delivery(
         f"(budget {budget}, decimated={dec.get('decimated')})")
 
     def _render_review() -> list[str]:
+        # Close-ups (round 4) come from the spec's template — the finishing
+        # layer never decides WHAT to frame, only threads it through.
+        closeups = [
+            {"name": c.name, "part": c.part, "direction": c.direction,
+             "pad": c.pad, "frame": c.frame}
+            for c in (getattr(spec, "review_closeups", None) or [])
+        ]
         rv = _require(runner.execute_op("render_views", {
             "model_path": str(lp_glb),
             "output_dir": str(review_dir),
             "prefix": job.job_code,
+            "closeups": closeups,
         }), "render_views")
+        if rv.get("closeup_skips"):
+            log(f"review close-ups skipped: {rv['closeup_skips']}")
         files_rendered = sorted(str(p) for p in review_dir.glob("*.png"))
         log(f"review renders awaiting owner review: {files_rendered}")
         return files_rendered

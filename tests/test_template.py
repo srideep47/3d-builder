@@ -49,14 +49,13 @@ def _part(spec, name):
 
 
 def test_mattress_template_loads_and_validates(mattress):
-    # §5.2 structure (round-3 correction, reviewer's eyes): crown + air-mesh
-    # + knit/velvet x3 (rib FIRST below the air-mesh) + white band + base
+    # §5.2 structure (round-4 correction, reviewer's re-read): crown +
+    # air-mesh + knit rib + ONE velvet mass (two faint seams inside) +
+    # knit rib + base — NO white ribs between velvet bands
     assert mattress.product_class == "mattress"
-    assert len(mattress.bands) == 10
+    assert len(mattress.bands) == 6
     assert [b.name for b in mattress.bands] == [
-        "crown", "air_mesh", "knit_1", "velvet_1",
-        "knit_2", "velvet_2", "knit_3", "velvet_3",
-        "white_band", "base",
+        "crown", "air_mesh", "knit_top", "velvet", "knit_bottom", "base",
     ]
     assert len(mattress.tape_edges) == 3  # §5.2 bands 2/4/6
     assert mattress.crown is not None and mattress.crown.quilt is not None
@@ -139,7 +138,7 @@ def test_bands_stack_to_full_height(compiled):
                   if p.name != "decal_patch"
                   and not p.name.startswith("tape_")
                   and not p.name.startswith("handle_")]
-    assert len(band_parts) == 10
+    assert len(band_parts) == 6
     assert sum(p.dimensions[2] for p in band_parts) == pytest.approx(ez, abs=1e-6)
     # and they stack: sorted by z-base, bases chain exactly
     ordered = sorted(band_parts, key=lambda p: p.position[2])
@@ -305,3 +304,57 @@ def test_no_warnings_on_sane_dims(mattress):
 
 def test_tri_budget_flows_into_spec(compiled, mattress):
     assert compiled.tri_budget == mattress.tri_budget
+
+
+# ── round 4: seam rings + review close-ups ──────────────────────────────────
+
+
+def test_velvet_seams_compile_to_metre_ring_spec(compiled, mattress):
+    """Round-4 band correction: the velvet border is ONE part carrying two
+    faint pressed seam rings (stitch lines, not colour changes). The
+    template's band-relative fractions must land as metre z/depth on the
+    part, derived from the band height and min(L, W, H)."""
+    job = load_job(JOB)
+    ez = job.expected_bounds_m()["z"]
+    scale = min(job.expected_bounds_m().values())
+    velvet = _part(compiled, "velvet")
+    band = next(b for b in mattress.bands if b.name == "velvet")
+    h = band.height_fraction * ez
+    assert velvet.seam_rings is not None and len(velvet.seam_rings) == 2
+    for seam, spec_ring in zip(band.seams, velvet.seam_rings):
+        assert spec_ring.z == pytest.approx(seam.height_fraction * h)
+        assert spec_ring.depth == pytest.approx(seam.depth_fraction * scale)
+    # the one-mass contract: no other band carries seams
+    others = [p for p in compiled.parts if p.seam_rings and p.name != "velvet"]
+    assert others == []
+
+
+def test_review_closeups_flow_into_spec(mattress):
+    """Round 4: the label/border close-ups are template product knowledge,
+    threaded verbatim into the ObjectSpec for the render op — the finishing
+    layer never decides WHAT to frame."""
+    spec, _warnings = compile_spec(mattress, _job(2.032, 1.524, 0.254, code="Q4"))
+    assert spec.review_closeups is not None
+    by_name = {c.name: c for c in spec.review_closeups}
+    assert set(by_name) == {"label", "border"}
+    assert by_name["label"].part == "decal_patch"
+    assert by_name["label"].frame == "part"
+    assert by_name["border"].frame == "model_height"
+    assert by_name["border"].direction == "front"
+
+
+def test_closeup_part_must_exist_in_template():
+    data = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    data["review_closeups"] = [{"name": "x", "part": "not_a_part"}]
+    with pytest.raises(ValueError, match="not a part"):
+        TemplateSpec.model_validate(data)
+
+
+def test_decal_is_centred_on_the_velvet_mass(compiled, mattress):
+    """Round 4: with the single velvet mass at z 0.21..0.48 of H, the label
+    is re-centred on it (0.345 of H) — the patch overhangs the ribs like a
+    sewn patch, and still clears both tapes it spans between."""
+    job = load_job(JOB)
+    ez = job.expected_bounds_m()["z"]
+    decal = _part(compiled, "decal_patch")
+    assert decal.position[2] == pytest.approx(0.345 * ez)

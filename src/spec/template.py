@@ -40,7 +40,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..client.job import JobCard
 from .schema import (ConstraintSpec, DetailSpec, ObjectSpec,
-                     PBRMaterial, PartSpec)
+                     PBRMaterial, PartSpec, ReviewCloseupSpec,
+                     SeamRingSpec)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TEXTURES_ROOT = PROJECT_ROOT / "assets" / "textures"
@@ -64,6 +65,33 @@ class TemplateBand(BaseModel):
     name: str
     height_fraction: float = Field(gt=0)  # of total H
     material: str  # key into textures
+    seams: list["BandSeamSpec"] | None = None  # faint stitched lines INSIDE the band
+
+
+class BandSeamSpec(BaseModel):
+    """A faint stitched seam line inside a band (round 4, reviewer's eyes:
+    the velvet border is ONE dark mass with two faint seams — NOT white
+    ribs between velvet bands). The seam is real geometry (a pressed crease
+    in the wall), so it shades under raking light and reads as a stitch
+    line, not a colour change — the mass stays continuous at normal viewing
+    distance. Fractions: height is of the BAND, depth of min(L, W, H)."""
+
+    height_fraction: float = Field(gt=0, lt=1)  # of the band height, from its base
+    depth_fraction: float = Field(gt=0)         # crease depth, of min(L, W, H)
+
+
+class CloseupSpec(BaseModel):
+    """Review-render close-up on one part (round 4): whole-model views
+    crush small features, and the reviewer's eyes are the quality gate.
+    `frame: part` frames the part's own bounds; `frame: model_height`
+    keeps the part's x/y but frames the model's full height (the part in
+    its stack context)."""
+
+    name: str
+    part: str
+    direction: Literal["front", "back", "left", "right"] = "front"
+    pad: float = Field(default=0.3, gt=0)
+    frame: Literal["part", "model_height"] = "part"
 
 
 class TapeEdgeSpec(BaseModel):
@@ -194,6 +222,7 @@ class TemplateSpec(BaseModel):
     decal: DecalSpec | None = None
     textures: dict[str, SurfaceSpec]
     features: FeaturesSpec = Field(default_factory=FeaturesSpec)
+    review_closeups: list[CloseupSpec] = Field(default_factory=list)
     tri_budget: int = Field(default=50000, gt=0)
 
     @field_validator("product_class")
@@ -238,6 +267,23 @@ class TemplateSpec(BaseModel):
                 )
         if self.crown is not None and self.crown.quilt is not None and len(names) < 2:
             raise ValueError("a quilted crown needs at least one band below it for the tape to sit on")
+        part_names = {b.name for b in self.bands}
+        part_names |= {f"tape_{i + 1}" for i in range(len(self.tape_edges))}
+        if self.features.carry_handles is not None and self.features.carry_handles.enabled:
+            ch = self.features.carry_handles
+            part_names |= {
+                f"handle_{face}_{k + 1}"
+                for face in ("front", "back")
+                for k in range(ch.count_per_side)
+            }
+        if self.decal is not None:
+            part_names.add("decal_patch")
+        for cu in self.review_closeups:
+            if cu.part not in part_names:
+                raise ValueError(
+                    f"review_closeups part {cu.part!r} is not a part this template "
+                    f"builds ({sorted(part_names)})"
+                )
         return self
 
 
@@ -558,6 +604,14 @@ def compile_spec(template: TemplateSpec, job: JobCard) -> tuple[ObjectSpec, list
                 caps="fan",
                 smooth_shade=True,
             )
+            if band.seams:
+                # Faint stitched seams INSIDE the band (round 4): fractions
+                # -> metres here; the harness presses the crease into the
+                # wall as real LP geometry (see SeamRingSpec).
+                part.seam_rings = [
+                    SeamRingSpec(z=s.height_fraction * h, depth=s.depth_fraction * scale)
+                    for s in band.seams
+                ]
         part.material = _material_for(template, band.material, "band")
         if is_crown and template.crown.quilt is not None:
             # The quilt is REAL LP geometry now (round 3): the HP exists only
@@ -724,5 +778,12 @@ def compile_spec(template: TemplateSpec, job: JobCard) -> tuple[ObjectSpec, list
         measurements=measurements,
         constraints=[ConstraintSpec(type="ground_contact", parts=[ground_band])],
         tri_budget=template.tri_budget,
+        review_closeups=[
+            ReviewCloseupSpec(
+                name=cu.name, part=cu.part, direction=cu.direction,
+                pad=cu.pad, frame=cu.frame,
+            )
+            for cu in template.review_closeups
+        ] or None,
     )
     return spec, warnings

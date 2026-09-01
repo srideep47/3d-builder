@@ -4,26 +4,26 @@
 # no absolute size exists here, and none may ever be added (rule 9: the
 # owner supplies dimensions; a standard queen size must never be inferred).
 #
-# Structure and wording track the §5.2 written transcription of the
-# reference photos (CORRECTED round 3, reviewer's eyes — ten bands):
+# Structure and wording track the §5.2 transcription of the reference
+# photos (CORRECTED round 4, reviewer's eyes — six bands, one velvet
+# mass):
 #   1 pillowtop crown (domed, puffed quilt panel, white knit + faint grey
 #     chevron micro-print)          -> band `crown` + real quilt geometry
 #   2 tape edge (top perimeter)     -> tape below crown
-#   3 air-mesh band (white 3D spacer mesh, tallest light band)
+#   3 air-mesh band (white 3D spacer mesh, tall light band)
 #                                   -> band `air_mesh`
 #   4 tape edge (mid)               -> tape below air_mesh
-#   5 border stack: white knit rib, then velvet, rib, velvet, rib, velvet
-#     (the rib comes FIRST below the air-mesh — round-3 correction)
-#                                   -> bands knit_1..3, velvet_1..3
-#   6 white band (plain, above the base — round-3 correction)
-#                                   -> band `white_band`
-#   7 tape edge (bottom perimeter)  -> tape below white_band
-#   8 base (dark, rarely visible, cheap)
+#   5 border stack: white knit rib, then ONE dark velvet mass with two
+#     FAINT STITCHED SEAMS inside it (round-4 correction: there are NO
+#     white ribs between velvet bands — the seams are stitch lines, not
+#     colour changes), then a white knit rib
+#                                   -> bands knit_top, velvet (+seams), knit_bottom
+#   6 tape edge (bottom perimeter)  -> tape below knit_bottom
+#   7 base (dark, rarely visible, cheap)
 #
-# Band proportions are a FIRST PASS from the §5.2 reading ("air-mesh is
-# roughly the tallest single light band"; velvet bands slightly taller
-# than the knit ribs). They are owner-tunable numbers — review the
-# rendered output against the reference before delivery and adjust.
+# Band proportions are the reviewer's round-4 photo measurements (fractions
+# of total height); they are owner-tunable numbers — review the rendered
+# output against the reference before delivery and adjust.
 product_class: mattress
 description: >
   Pillowtop hybrid mattress: domed quilted crown over a straight-sided
@@ -40,29 +40,23 @@ bands:                 # top to bottom; height_fractions MUST sum to 1.0
     height_fraction: 0.28
     material: knit_white
   - name: air_mesh
-    height_fraction: 0.162
+    height_fraction: 0.15
     material: mesh_white
-  - name: knit_1
-    height_fraction: 0.062
+  - name: knit_top
+    height_fraction: 0.09
     material: knit_white
-  - name: velvet_1
-    height_fraction: 0.072
+  - name: velvet           # ONE dark mass (round 4): two faint stitched
+    height_fraction: 0.27  # seams inside, bounded by the two knit ribs
     material: velvet_charcoal
-  - name: knit_2
-    height_fraction: 0.062
+    seams:                 # stitch lines, NOT colour changes — the mass
+                           # reads continuous at normal viewing distance
+      - height_fraction: 0.3333  # of the band, from its base
+        depth_fraction: 0.0065   # ~2mm pressed crease on a queen
+      - height_fraction: 0.6667
+        depth_fraction: 0.0065
+  - name: knit_bottom
+    height_fraction: 0.11
     material: knit_white
-  - name: velvet_2
-    height_fraction: 0.072
-    material: velvet_charcoal
-  - name: knit_3
-    height_fraction: 0.062
-    material: knit_white
-  - name: velvet_3
-    height_fraction: 0.072
-    material: velvet_charcoal
-  - name: white_band
-    height_fraction: 0.056
-    material: plain_white
   - name: base
     height_fraction: 0.10
     material: base_dark
@@ -106,7 +100,7 @@ tape_edges:            # thin binding tape (§5.2): flush-seated sweeps on the
     width_fraction: 0.023
     protrusion_fraction: 0.023
     material: tape_black
-  - at_boundary_below: white_band
+  - at_boundary_below: knit_bottom
     width_fraction: 0.023
     protrusion_fraction: 0.023
     material: tape_black
@@ -114,17 +108,21 @@ tape_edges:            # thin binding tape (§5.2): flush-seated sweeps on the
 decal:                 # brand label (§5.3): front-left side border, portrait
                        # Round-3 correction (reviewer's eyes): TALLER and
                        # NARROWER — spans nearly the whole velvet stack.
-                       # Measured off the corner close-up: aspect ~0.45,
+                       # Measured off the reference close-up: aspect ~0.45,
                        # ~74% of the tape-to-tape border stack height.
+                       # Round 4: re-centred on the single velvet mass
+                       # (z 0.21..0.48 of H); the patch overhangs the ribs
+                       # by ~10mm each side, as a sewn patch does.
   face: front
   along_fraction: -0.35     # left of face centre as seen from the front
-  center_height_fraction: 0.33    # centred on the velvet/rib border stack
-  aspect: 0.46              # patch width / height (portrait; the albedo crop
-                            # is 0.5 — the 8% squeeze is imperceptible)
-  height_fraction: 0.34     # of H; spans z 0.16..0.50 — inside the velvet
-                            # stack (0.156..0.558), clears tape_3 (0.10) and
-                            # tape_2 (0.558)
-  texture: input/decals/MAYA00053153   # dir with albedo.png (photo crop)
+  center_height_fraction: 0.345   # velvet mass centre (0.21+0.48)/2
+  aspect: 0.46              # patch width / height (portrait; the photo crop
+                            # is 0.45 — the 2% stretch is imperceptible)
+  height_fraction: 0.34     # of H; spans z 0.175..0.515 — clears tape_3
+                            # (bottom, z 0.10) and tape_2 (mid, z 0.57)
+  texture: input/decals/MAYA00053153   # dir with albedo.png (photo crop of
+                            # the real label: black patch, white text, blue
+                            # icon — round 4, replaced the synthetic stand-in)
 
 textures:
   knit_white:
@@ -193,15 +191,6 @@ textures:
         height_delta: 0.12
         roughness_delta: -0.05
 
-  plain_white:
-    base: flat
-    tint: [0.88, 0.88, 0.87]         # plain white band above the base (§5.2
-                                      # band 9, round-3 correction — smooth,
-                                      # not the ribbed knit)
-    tile_m: 0.30
-    resolution: 1024
-    roughness: 0.72
-
   base_dark:
     base: flat
     tint: [0.10, 0.10, 0.10]         # dark non-slip underside (§5.2 band 7)
@@ -218,8 +207,22 @@ features:
     protrusion_fraction: 0.92  # of the tape protrusion — outer face just
                              # behind the tape plane (no z-fighting where
                              # the straps cross the tapes)
-    from_boundary: white_band  # strap bottom at the bottom tape line
+    from_boundary: knit_bottom  # strap bottom at the bottom tape line
     to_boundary: crown         # strap top at the top tape line (full stack)
     material: tape_black
+
+review_closeups:         # round 4: whole-model views crush the label to
+                         # ~21x45 px — the reviewer's eyes need it readable.
+  - name: label          # tight on the sewn patch
+    part: decal_patch
+    direction: front
+    pad: 0.5
+    frame: part
+  - name: border         # full-height side strip at the label's position:
+                         # the border stack, seams and tapes in context
+    part: decal_patch
+    direction: front
+    pad: 0.1
+    frame: model_height
 
 tri_budget: 50000     # Simple tier provisional ceiling (open question §9.2)

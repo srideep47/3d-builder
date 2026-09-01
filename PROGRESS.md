@@ -19,11 +19,16 @@
 5. Polycount semantics: triangles or faces? (we use triangle-equivalent,
    the conservative reading)
 6. File-size caps: decimal MB or binary MiB? (we enforce decimal, stricter)
-7. Are the vertical side straps carry handles, and should they be modelled?
+7. ~~Are the vertical side straps carry handles, and should they be
+   modelled?~~ **CLOSED round 3** (owner's eyes + photo 9.28.35): yes, they
+   are carry handles and they ARE modelled (2 per long side, quarter
+   points). The owner independently confirmed seeing them in the round-3
+   render — the Gemini "missing straps" read was a VLM miss.
 
-Plus one from the visual review: **replace the NISIEN label placeholder**
-`input/decals/MAYA00053153/albedo.png` with the photo crop from §5.3
-(portrait, ~0.7 aspect) — the compile picks it up automatically.
+~~Replace the NISIEN label placeholder~~ **DONE round 4**:
+`input/decals/MAYA00053153/albedo.png` is now the real photo crop from
+9.28.22 (see `output/make_decal_crop.py`); the synthetic stand-in and its
+magenta-noise purple cast are gone.
 
 ---
 
@@ -1037,3 +1042,132 @@ op). Closes the round-2 operational finding: a 4K mattress bake takes
 MAYA00053153 dims untouched (rule 9). `Temp/` (the owner's raw WhatsApp
 photo drop — duplicate of `input/references/MAYA00053153/`) gitignored.
 Committed, no push.
+
+## Session log — 2026-09-01 (round 4: the review rig IS the measuring instrument)
+
+Owner's round-4 order, in priority sequence: (1) FIX THE RENDER RIG FIRST —
+it had produced three wrong reads (190mm aliasing beat, quilt axis, velvet
+tone); "a rig that produces misleading images is a worse problem than any
+remaining model defect"; add label/border CLOSE-UPS, keep the four standard
+views. (2) Band structure: ONE dark velvet mass with two FAINT STITCHED
+SEAMS inside, bounded by exactly two white knit ribs — no white ribs between
+velvet bands (reviewer's photo fractions: crown .28 / air_mesh .15 /
+knit_top .09 / velvet .27 with seams / knit_bottom .11 / base .10); decide
+three-parts-shared-material vs one-part-with-seam-detail and say which+why.
+(3) Label rendering purple → black/white/blue. (4) Re-run the Gemini verdict
+on the NEW rig once quota resets; the 4/10 history is unreliable (scored
+against misleading renders). Keep the square-vs-diamond quilt flag open; do
+not push; MAYA00053153 dims untouched. Suite: **250 passed** (+7 round-4
+tests).
+
+### Task 1 — cross-key rig + close-ups (the instrument rework)
+
+`setup_studio_lighting()` rewritten as **KeyA/KeyB cross keys**: two SUNs of
+equal energy 1.8 at elevations 40°, azimuths 90° apart (travel along −X and
+−Y), so NEITHER quilt axis is privileged — a square grid now shades on both
+axes. Fill 0.7 from the camera-ish −45° azimuth, rim 1.2 from behind.
+Direction math pinned: sun direction = Rz(rz)·Rx(rx)·(0,0,−1); horizontal
+travel azimuth = 90+rz°, elevation = 90−rx°. Suns are direction-only
+(4-tuples; no location). `test_review_rig_is_cross_key_without_axis_privilege`
+pins the rig (both keys downward, axis-aligned X vs Y, total energy < 7).
+
+New `frame_closeup_ortho()` + `closeups` param on `render_views`:
+`frame="part"` (target bounds + pad) or `"model_height"` (target x/y, model
+full height — the "border stack in context" view). Part resolution: exact
+then prefix match; unresolved parts are reported in `closeup_skips`, never a
+crash. Close-ups are threaded from the template (`review_closeups` →
+`ReviewCloseupSpec` → `_render_review`), NOT hardcoded in the finishing
+layer (rule 11): label (decal_patch, part frame, pad 0.5) + border
+(decal_patch, model_height, pad 0.1).
+
+**Instrument-only evidence** (old LP GLB, new rig —
+`output/finish/TEST-QUEEN/review_rigtest/`, isolating the rig change from
+the model changes): top-view FFT quilt power axis ratio **12.0 → 0.87**;
+clipped (≥0.995) pixels **0.06% → 0.000%**; white bands read **0.51–0.75**
+(vs pure white before), velvet **~0.05**; the label close-up frames the
+patch at ~327×717 px vs **21×45 px** in the old full-frame render (~15×).
+Result keys report `render_engine` + `view_transform` (EEVEE Next, AgX).
+
+### Task 2 — ONE velvet mass with stitched seams (decision: ONE part + seam geometry)
+
+**Decision: one part with seam detail as real LP geometry, NOT three parts
+sharing a material.** Why: (a) three shared-material parts would show NO
+seam at all — the wall is continuous with matching normals at part
+boundaries, so the seams must be authored either way; (b) texture-space
+seams cannot be positioned reliably against the atlas packer (island
+assignment is arbitrary) and stitches displace the surface — a pressed
+crease is resolution-independent, survives decimation (decimate is a no-op
+at 15.4k/50k), shades under raking light and picks up bake AO; (c) one part
+keeps the velvet nap streaks continuous (the "one dark mass" reading) and
+the part count drops 18 → 14.
+
+Mechanism: `SeamRingSpec(z, depth)` on PartSpec → `_build_extrude` grows a
+ring stack — each seam at z expands to rings (z−w, 0), (z, depth), (z+w, 0)
+with w = 2·depth, each ring inset along the local 2D outward wall normal;
+the wall is rebuilt per ring pair. Template: velvet .27 of H with seams at
+1/3 and 2/3 of the band, depth 0.0065×min(L,W,H) ≈ 2mm pressed crease.
+Verified: 8 rings at the expected z, crease rings inset ~2mm inside the
+wall, velvet = 7×48 quads + 2×48 fan tris, zero n-gons.
+
+Render evidence (side view, centre column band, 1K): exactly **ONE dark
+run z 0.216–0.475** (mean luminance 0.106 ≈ the 9.4% baked velvet) between
+the two white knit ribs (0.113–0.214 and 0.478–0.560) — no white between;
+border close-up: seams dip **0.035–0.045 below the velvet mean** at z
+0.30/0.39 and stay dark (crease, not rib).
+
+### Task 3 — the purple label (root cause: synthetic stand-in)
+
+The old `input/decals/MAYA00053153/albedo.png` predated the reference
+photos: 85% black + blue rounded-rect + **2% scattered pure magenta noise**
+— averaged to purple at render scale. Replaced with a real crop of the label
+from photo 9.28.22 (`output/make_decal_crop.py`, reproducible: crop box
+(495,940,675,1340), border-bleed cleanup, ×2 LANCZOS; 65.4% black / 8.2%
+white / 18.2% blue / **0 magenta**). Label close-up chroma in the new
+render: **51.4% black** (mean rgb [0.123, 0.126, 0.130]), **30.2% white**
+(text), **5.3% blue** (icon, mean [0.162, 0.395, 0.517]), **0.0% magenta**.
+
+### Task 4 — Gemini verdict on the new rig
+
+Attempted after the re-render: **429 again** (daily quota; resets ~12:30 IST
+Sep 2). One-shot retry scheduled for 12:31 IST Sep 2 (workspace automation)
+running `output/verdict_round3.py round4_newrig output/finish/TEST-QUEEN/review`
+— the 6-view set including both close-ups. Per the owner: the 4/10 verdict
+history is NOT a baseline (scored against the old rig's misleading images).
+
+### Full-chain re-render (1K, TEST-QUEEN placeholder card)
+
+`output/run_round3.py 1024` with `_LongBakeRunner` (3600s) — 6 review views
+(front/side/top/iso + label + border), atlas pack_scale 0.5625, LP **15,420
+tri-eq** (budget 50k, decimation no-op — seam geometry survives), REFUSED as
+designed (placeholder dims, rule 9; evidence in `output/blocked/`).
+Verification (all pass, `output/verify_round4_renders.py`): FFT axis ratio
+**0.86**; total clipped **0.010%** (one specular pixel in the front view);
+**1** band-scale dark run in the border stack; seams resolved as creases;
+label black/white/blue with 0% magenta.
+
+### New gotchas (round 4)
+
+1. **The resolver's PartSpec whitelist silently drops new fields** —
+   `seam_rings` compiled by the template but never passed through
+   `_resolve_part` built a seam-free velvet (192 faces, not 768) with no
+   error anywhere. Any new PartSpec field must be added to the resolver
+   passthrough; the seam-ring test now catches this class of bug.
+2. **2D edge normals are winding-dependent** — the left normal (−ty, tx)
+   points INWARD for CCW loops (footprint_outline is CCW), so seam insets
+   went 2mm OUTWARD (radial 1.4744 vs wall 1.4718). `_profile_2d_normals`
+   now orients by signed area: outward = s·(ay+by, −(ax+bx)) with
+   s = sign(area).
+3. **Fan-cap centre vertices land in the base/top z-buckets** — a ring
+   count over z-buckets reads 49 at the base/top rings (48 wall verts + 1
+   cap centre) vs 48 interior. Pin per-ring, not globally.
+4. **np.interp requires increasing xp** — feeding it a decreasing z array
+   silently returns garbage (a whole band-profile read "all dark" and a
+   seam "read as rib" from flipped profiles before the script bug was
+   found; the renders were correct). Measure scripts are instruments too.
+5. **Test-writing lesson (close-up framing)**: assert the
+   geometrically-guaranteed property, not an opaque pixel share — a thin
+   leg tightly framed still covers few opaque pixels (the tabletop intrudes
+   into the frame). The guarantees: framed part centred, model clipped at a
+   frame edge, vertical pixel span grows >1.3× vs the whole-model view.
+
+MAYA00053153 dims untouched (rule 9). Committed, no push.

@@ -148,6 +148,31 @@ class DetailSpec(BaseModel):
     displacement: DisplacementSpec | None = None
 
 
+class SeamRingSpec(BaseModel):
+    """A faint pressed seam ring around an extruded wall (round 4): the wall
+    is subdivided at this height and the ring's vertices are pushed inward
+    by `depth` along the local wall normal, forming a soft crease that
+    shades like a stitched seam. Real LP geometry — resolution-independent,
+    survives decimation — because a texture-space line cannot be positioned
+    reliably against the atlas packer (island phase is arbitrary).
+    """
+    z: float      # ring height above the part base, metres
+    depth: float  # inward inset at the ring, metres
+
+
+class ReviewCloseupSpec(BaseModel):
+    """Review-render close-up on one named part (round 4): whole-model views
+    crush small features (a 48x104 mm label is 21x45 px at 1K) — the close-up
+    frames the part so the reviewer can actually read it. Product knowledge
+    (WHICH part, which side) lives in the template, never in pipeline code.
+    """
+    name: str                                        # file suffix: <prefix>_<name>.png
+    part: str                                        # part name to frame
+    direction: Literal["front", "back", "left", "right"] = "front"
+    pad: float = 0.3                                 # frame margin, fraction of the framed extent
+    frame: Literal["part", "model_height"] = "part"  # part bounds, or full model height at the part's x/y
+
+
 class PartSpec(BaseModel):
     name: str
     shape: ShapeType = ShapeType.ROUNDED_BOX
@@ -173,6 +198,8 @@ class PartSpec(BaseModel):
     code: str | None = None
     # optional high-poly detail instructions for the bake pass (DetailSpec)
     detail: DetailSpec | None = None
+    # pressed seam rings on extruded walls (metres; template converts fractions)
+    seam_rings: list[SeamRingSpec] | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -203,3 +230,6 @@ class ObjectSpec(BaseModel):
     measurements: list[MeasurementSpec] = Field(default_factory=list)
     constraints: list[ConstraintSpec] = Field(default_factory=list)
     tri_budget: int = 60000
+    # review-render close-ups (round 4): threaded verbatim into the
+    # render_views op; product knowledge lives in the template
+    review_closeups: list[ReviewCloseupSpec] | None = None

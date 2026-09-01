@@ -501,25 +501,90 @@ def _fan_cap(bm, ring):
     return faces
 
 
-def _build_extrude(name, profile_points, height, top_scale=None, caps="ngon"):
+def _profile_2d_normals(pts):
+    """Per-vertex 2D wall normals of a closed [[x, y], ...] loop, oriented
+    OUTWARD regardless of the loop's winding (signed-area test — the left
+    normal of an edge points inward for CCW loops, outward for CW)."""
+    import math
+
+    n = len(pts)
+    area = 0.5 * sum(
+        pts[i][0] * pts[(i + 1) % n][1] - pts[(i + 1) % n][0] * pts[i][1]
+        for i in range(n)
+    )
+    # CCW (area > 0): the left edge normal points inward, so outward is the
+    # right normal (dy, -dx); CW loops are the mirror.
+    s = 1.0 if area > 0 else -1.0
+    normals = []
+    for i in range(n):
+        ax, ay = pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]
+        bx, by = pts[(i + 1) % n][0] - pts[i][0], pts[(i + 1) % n][1] - pts[i][1]
+        nx, ny = s * (ay + by), s * -(ax + bx)
+        ln = math.hypot(nx, ny)
+        normals.append((nx / ln, ny / ln) if ln > 1e-12 else (0.0, 0.0))
+    return normals
+
+
+def _build_extrude(name, profile_points, height, top_scale=None, caps="ngon",
+                   seam_rings=None):
     """Extrude a [[x, y], ...] polygon; optional taper toward the profile
     centroid. `caps="fan"` triangulates the end caps from the ring centroid
     (n-gon-free, required for >4-point profiles under the client's strict
-    n-gon gate); "ngon" keeps the historical single-face caps."""
+    n-gon gate); "ngon" keeps the historical single-face caps.
+
+    `seam_rings` (round 4): [{"z": m above base, "depth": inward m}, ...] —
+    each inserts a faint pressed crease: rings at z-w, z (inset `depth`
+    along the local wall normal), z+w, with w = 2*depth. Real LP geometry:
+    the crease shades under raking light and picks up bake AO, so a stitched
+    seam reads without any colour change."""
     import bmesh
 
     if not profile_points or len(profile_points) < 3:
         raise ValueError(f"extrude part '{name}' needs >= 3 profile_points [[x, y], ...]")
     height = float(height)
+    if height <= 0:
+        raise ValueError(f"extrude part '{name}' needs a positive height")
     taper = float(top_scale[0]) if top_scale else 1.0
 
     pts = [(float(p[0]), float(p[1])) for p in profile_points]
     cx = sum(p[0] for p in pts) / len(pts)
     cy = sum(p[1] for p in pts) / len(pts)
+    normals = _profile_2d_normals(pts)
+
+    # ring stack: (z, inset) pairs from base to top; seam creases expand
+    # into three rings each. Rings must stay ordered and non-degenerate.
+    ring_stack = [(0.0, 0.0)]
+    for sr in sorted(seam_rings or [], key=lambda s: float(s["z"])):
+        z, d = float(sr["z"]), float(sr["depth"])
+        if not (0.0 < z < height) or d <= 0:
+            raise ValueError(
+                f"extrude part '{name}': seam ring z={z:.4f} depth={d:.4f} "
+                f"must satisfy 0 < z < {height:.4f} and depth > 0"
+            )
+        w = 2.0 * d
+        if z - w <= ring_stack[-1][0] or z + w >= height:
+            raise ValueError(
+                f"extrude part '{name}': seam crease at z={z:.4f} (half-width "
+                f"{w:.4f}) does not fit between the previous ring "
+                f"({ring_stack[-1][0]:.4f}) and the top ({height:.4f})"
+            )
+        ring_stack += [(z - w, 0.0), (z, d), (z + w, 0.0)]
+    ring_stack.append((height, 0.0))
+
+    def _ring_verts(z, inset):
+        t = z / height
+        verts = []
+        for (x, y), (nx, ny) in zip(pts, normals):
+            bx = (x - cx) * taper + cx
+            by = (y - cy) * taper + cy
+            vx = x + (bx - x) * t - nx * inset
+            vy = y + (by - y) * t - ny * inset
+            verts.append(bm.verts.new((vx, vy, z)))
+        return verts
 
     bm = bmesh.new()
-    bottom = [bm.verts.new((x, y, 0.0)) for x, y in pts]
-    top = [bm.verts.new(((x - cx) * taper + cx, (y - cy) * taper + cy, height)) for x, y in pts]
+    rings = [_ring_verts(z, d) for z, d in ring_stack]
+    bottom, top = rings[0], rings[-1]
     n = len(pts)
     if caps == "fan":
         _fan_cap(bm, list(reversed(bottom)))
@@ -527,8 +592,10 @@ def _build_extrude(name, profile_points, height, top_scale=None, caps="ngon"):
     else:
         bm.faces.new(list(reversed(bottom)))
         bm.faces.new(top)
-    for i in range(n):
-        bm.faces.new((bottom[i], bottom[(i + 1) % n], top[(i + 1) % n], top[i]))
+    for r in range(len(rings) - 1):
+        lo, hi = rings[r], rings[r + 1]
+        for i in range(n):
+            bm.faces.new((lo[i], lo[(i + 1) % n], hi[(i + 1) % n], hi[i]))
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     return _object_from_bmesh(bm, name)
 
@@ -942,7 +1009,8 @@ def _build_shape(part):
     if shape == "extrude":
         height = dims[2] if len(dims) > 2 else 0.1
         return _build_extrude(name, part.get("profile_points"), height, part.get("top_scale"),
-                              caps=str(part.get("caps", "ngon")).lower())
+                              caps=str(part.get("caps", "ngon")).lower(),
+                              seam_rings=part.get("seam_rings"))
     if shape == "sweep":
         return _build_sweep(name, part.get("path_points"), dims,
                             closed=bool(part.get("path_closed", False)))
@@ -1452,22 +1520,50 @@ def op_export_usdz(params):
 
 
 def setup_studio_lighting():
+    """Cross-key review rig (round 4, owner's order): the review renders are
+    the QUALITY GATE, so the rig must not misrepresent the model.
+
+    - TWO axis-aligned raking keys, 90 deg apart in azimuth (each ~40 deg
+      elevation): a single key shades only the relief lines perpendicular
+      to its azimuth, so a correct square quilt grid photographs as
+      one-directional corduroy (measured on the round-3 rig: 12x FFT power
+      asymmetry between the quilt axes in the top render). One key travels
+      along -X (rakes X-gradient relief, lights the +X face the side view
+      sees), the other along +Y (rakes Y-gradient relief, lights the front
+      face) — every surface axis keeps exactly one full-strength raking
+      light, so neither is privileged.
+    - Total energy well under the round-3 rig's 7 W/m^2: bright fabric must
+      land with specular headroom, not clip to pure white ("white-on-white"
+      hid the 9.4% velvet from the reviewer).
+    - A steep diagonal fill lifts the front and side faces without
+      flattening relief; a rim from behind separates the silhouette.
+
+    Sun direction convention (verified against the round-3 rig's light
+    locations): direction = Rz(rz) @ Rx(rx) @ (0, 0, -1), so the horizontal
+    travel azimuth is 90 + rz degrees and the elevation is 90 - rx degrees.
+    """
     import bpy
 
     for obj in list(bpy.data.objects):
         if obj.type in ("LIGHT", "CAMERA"):
             bpy.data.objects.remove(obj, do_unlink=True)
 
+    # (name, energy, (rot_x, rot_y, rot_z) in degrees) — suns are
+    # direction-only; location is irrelevant.
     rigs = [
-        ("KeyLight", "SUN", 3.5, (45, 0, 45), (4.0, -4.0, 5.0)),
-        ("FillLight", "SUN", 1.5, (55, 0, -35), (-4.0, -3.0, 3.0)),
-        ("RimLight", "SUN", 2.0, (-45, 0, 0), (0.0, 5.0, 4.0)),
+        # X-axis key: travels toward -X, elevation 40 (from the +X side).
+        ("KeyA", "SUN", 1.8, (50, 0, 90)),
+        # Y-axis key: travels toward +Y, elevation 40 (from the front).
+        ("KeyB", "SUN", 1.8, (50, 0, 0)),
+        # Steep soft fill from front-right-top (travel az 45, elev 65).
+        ("FillLight", "SUN", 0.7, (25, 0, -45)),
+        # Rim from behind, elevation 35 (travel toward -Y).
+        ("RimLight", "SUN", 1.2, (-55, 0, 0)),
     ]
-    for name, ltype, energy, rot, loc in rigs:
+    for name, ltype, energy, rot in rigs:
         light_data = bpy.data.lights.new(name=name, type=ltype)
         light_data.energy = energy
         light_obj = bpy.data.objects.new(name=name, object_data=light_data)
-        light_obj.location = loc
         light_obj.rotation_euler = (math.radians(rot[0]), math.radians(rot[1]), math.radians(rot[2]))
         bpy.context.collection.objects.link(light_obj)
 
@@ -1501,6 +1597,54 @@ def frame_camera_ortho(cam, bounds, view="iso"):
 
     cam.data.type = "ORTHO"
     cam.data.ortho_scale = ortho_scale * 1.15
+
+
+def frame_closeup_ortho(cam, model_bounds, target_bounds, direction="front",
+                        frame="part", pad=0.3):
+    """Orthographic close-up framed on one target object (round 4: the
+    reviewer needs label/border detail that a whole-model frame crushes to
+    a few pixels).
+
+    direction: which side the camera sits on (front/back = -/+Y,
+    left/right = -/+X), using the same orientations as the standard views.
+    frame: "part" — frame the target's own bounds (plus `pad` fraction);
+          "model_height" — keep the target's x/y but frame the MODEL's
+          full height, showing the target in its stack context.
+    """
+    from mathutils import Euler, Vector
+
+    tc = Vector(target_bounds["center"])
+    mc = Vector(model_bounds["center"])
+    td = Vector(target_bounds["dimensions"])
+    md = Vector(model_bounds["dimensions"])
+    dist = max(md.length, 0.1) * 2.4
+
+    if frame == "model_height":
+        along = td.x if direction in ("front", "back") else td.y
+        scale = max(md.z, along) * (1.0 + pad)
+        center = Vector((tc.x, tc.y, mc.z))
+    else:  # "part"
+        if direction in ("front", "back"):
+            scale = max(td.x, td.z) * (1.0 + pad)
+        else:
+            scale = max(td.y, td.z) * (1.0 + pad)
+        center = tc
+
+    if direction == "front":
+        cam.location = Vector((center.x, center.y - dist, center.z))
+        cam.rotation_euler = Euler((math.radians(90), 0, 0), "XYZ")
+    elif direction == "back":
+        cam.location = Vector((center.x, center.y + dist, center.z))
+        cam.rotation_euler = Euler((math.radians(90), 0, math.radians(180)), "XYZ")
+    elif direction == "left":
+        cam.location = Vector((center.x - dist, center.y, center.z))
+        cam.rotation_euler = Euler((math.radians(90), 0, math.radians(90)), "XYZ")
+    else:  # right
+        cam.location = Vector((center.x + dist, center.y, center.z))
+        cam.rotation_euler = Euler((math.radians(90), 0, math.radians(-90)), "XYZ")
+
+    cam.data.type = "ORTHO"
+    cam.data.ortho_scale = scale
 
 
 def op_render_views(params):
@@ -1548,10 +1692,39 @@ def op_render_views(params):
         bpy.ops.render.render(write_still=True)
         rendered_files[str(v)] = file_path
 
+    # Close-ups (round 4): framed on a named part, e.g. a side label the
+    # whole-model views crush to a few pixels. Definitions come from the
+    # caller (the product template) — the harness only does camera math.
+    closeups = params.get("closeups") or []
+    by_name = {o.name: o for o in meshes}
+    closeup_skips = []
+    for cu in closeups:
+        cu_name = str(cu.get("name") or cu.get("part"))
+        target = by_name.get(str(cu.get("part")))
+        if target is None:
+            # glTF import can suffix object names; accept a prefix match.
+            target = next((o for o in meshes if o.name.startswith(str(cu.get("part")))), None)
+        if target is None:
+            closeup_skips.append(f"{cu_name}: part {cu.get('part')!r} not in scene")
+            continue
+        frame_closeup_ortho(
+            cam, bounds, get_mesh_bounds([target]),
+            direction=str(cu.get("direction", "front")),
+            frame=str(cu.get("frame", "part")),
+            pad=float(cu.get("pad", 0.3)),
+        )
+        file_path = os.path.abspath(os.path.join(out_dir, f"{prefix}_{cu_name}.png"))
+        scene.render.filepath = file_path
+        bpy.ops.render.render(write_still=True)
+        rendered_files[cu_name] = file_path
+
     return {
         "success": True,
         "views": rendered_files,
         "resolution": resolution,
+        "closeup_skips": closeup_skips,
+        "render_engine": scene.render.engine,
+        "view_transform": scene.view_settings.view_transform,
     }
 
 

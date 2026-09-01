@@ -96,6 +96,54 @@ def test_render_views(runner, desk_run, tmp_path):
         assert Path(result["views"][view]).exists()
 
 
+def test_render_views_closeups_frame_the_named_part(runner, desk_run, tmp_path):
+    """Round 4: close-ups are the reviewer's instrument — whole-model views
+    crush small features. The op must frame the NAMED part (not the whole
+    model): the framed part's content is centred in the image, and a bogus
+    part name is reported as a skip, never a crash."""
+    import numpy as np
+    from PIL import Image
+
+    _, glb = desk_run
+    result = runner.execute_op(
+        "render_views",
+        {
+            "model_path": str(glb),
+            "views": ["front"],
+            "output_dir": str(tmp_path),
+            "resolution": [256, 256],
+            "closeups": [
+                {"name": "leg", "part": "leg_fl", "direction": "front",
+                 "frame": "part", "pad": 0.5},
+                {"name": "bogus", "part": "not_a_part", "direction": "front",
+                 "frame": "part", "pad": 0.5},
+            ],
+        },
+    )
+    assert result["success"]
+    assert result["closeup_skips"] == ["bogus: part 'not_a_part' not in scene"]
+    leg_png = Path(result["views"]["leg"])
+    assert leg_png.exists()
+    a = np.asarray(Image.open(leg_png).convert("RGBA"))
+    opaque = a[:, :, 3] > 0
+    assert opaque.any()
+    ys, xs = np.nonzero(opaque)
+    # the framed part is centred (camera aims at its bounds centre)
+    assert abs(xs.mean() - 127.5) < 40 and abs(ys.mean() - 127.5) < 40
+    # ...and the frame is leg-sized, not model-sized: the desk overflows the
+    # tight frame (the tabletop crosses the frame's right edge — the left
+    # edge hangs past the model into background), and the model's vertical
+    # extent grows from ~47% of the image (whole-model view: ortho scale is
+    # 1.15x the largest extent) to ~70% (leg bounds + 50% pad), i.e. the
+    # framed part renders ~1.5x taller in pixels
+    full = np.asarray(Image.open(result["views"]["front"]).convert("RGBA"))
+    full_op = full[:, :, 3] > 0
+    assert opaque[:, 0].any() or opaque[:, -1].any()
+    assert not full_op[:, 0].any() and not full_op[:, -1].any()
+    fys, _ = np.nonzero(full_op)
+    assert (ys.max() - ys.min()) > 1.3 * (fys.max() - fys.min())
+
+
 def test_radial_array_build(runner, tmp_path):
     """A radial array must distribute clones around the world origin, not
     rotate them in place (the bug this test guards against)."""

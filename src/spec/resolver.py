@@ -77,6 +77,11 @@ def _resolve_part(part: PartSpec, unit: Unit) -> dict[str, Any]:
             p_dict["path_closed"] = True
     if part.caps != "ngon":
         p_dict["caps"] = part.caps
+    if part.seam_rings:
+        p_dict["seam_rings"] = [
+            {"z": unit.to_meters(s.z), "depth": unit.to_meters(s.depth)}
+            for s in part.seam_rings
+        ]
     if part.segments:
         p_dict["segments"] = int(part.segments)
     if part.method.value != "parametric":
