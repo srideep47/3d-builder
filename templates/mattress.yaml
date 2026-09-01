@@ -67,19 +67,23 @@ crown:
     amplitude_fraction: 0.07   # of one quilt CELL — puff depth
     exponent: 1.6         # soft-edged puffs, not boxy
 
-tape_edges:            # closed sweeps centred on the inset band wall; the
-                       # outer face lands exactly on the nominal L/W silhouette
+tape_edges:            # thin binding tape (§5.2): flush-seated sweeps on the
+                       # inset band wall, one protrusion proud; the outer
+                       # face lands exactly on the nominal L/W silhouette.
+                       # Fractions of min(L, W, H) — cross-section scale,
+                       # NOT of H (H-based fractions made 74 mm collars on
+                       # the tall placeholder build).
   - at_boundary_below: crown
-    thickness_fraction: 0.045   # vertical, of H
-    protrusion_fraction: 0.035  # radial stick-out, of H
+    width_fraction: 0.045        # vertical strip extent
+    protrusion_fraction: 0.016   # radial stand-off
     material: tape_black
   - at_boundary_below: air_mesh
-    thickness_fraction: 0.045
-    protrusion_fraction: 0.035
+    width_fraction: 0.045
+    protrusion_fraction: 0.016
     material: tape_black
   - at_boundary_below: velvet_3
-    thickness_fraction: 0.045
-    protrusion_fraction: 0.035
+    width_fraction: 0.045
+    protrusion_fraction: 0.016
     material: tape_black
 
 decal:                 # brand label (§5.3): front-left side border, portrait

@@ -161,9 +161,9 @@ def test_crown_quilt_references_cell_size(compiled, mattress):
     square in metres: frequency_y follows the footprint aspect."""
     job = load_job(JOB)
     bounds = job.expected_bounds_m()
-    ex, ey, ez = bounds["x"], bounds["y"], bounds["z"]
+    ex, ey = bounds["x"], bounds["y"]
     q = mattress.crown.quilt
-    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * ez
+    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * min(bounds.values())
     cell = (ex - 2 * p_max) / q.cells_across
     crown = _part(compiled, "crown")
     assert crown.detail is not None
@@ -179,8 +179,8 @@ def test_bands_inset_by_tape_protrusion(compiled, mattress):
     tapes' outer faces land exactly on the nominal L/W silhouette."""
     job = load_job(JOB)
     bounds = job.expected_bounds_m()
-    ex, ey, ez = bounds["x"], bounds["y"], bounds["z"]
-    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * ez
+    ex, ey = bounds["x"], bounds["y"]
+    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * min(bounds.values())
     body = _part(compiled, "air_mesh")
     assert body.dimensions[0] == pytest.approx(ex - 2 * p_max)
     assert body.dimensions[1] == pytest.approx(ey - 2 * p_max)
@@ -189,38 +189,61 @@ def test_bands_inset_by_tape_protrusion(compiled, mattress):
     assert max(xs) == pytest.approx(ex / 2 - p_max)
 
 
-def test_tapes_sweep_the_inset_wall(compiled, mattress):
+def test_tapes_sweep_flush_on_the_inset_wall(compiled, mattress):
+    """§5.2: thin binding tape that WRAPS AND HUGS the perimeter edge — a
+    [protrusion x width] section seated flush on the wall (path offset half
+    a protrusion along the normals), standing proud by one protrusion.
+    This is the DEFECT 1 regression pin: the old [2*protrusion x thickness]
+    section of H rode the wall half-buried and rendered as 58 mm collars."""
     job = load_job(JOB)
     bounds = job.expected_bounds_m()
-    ex, ez = bounds["x"], bounds["z"]
-    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * ez
+    ex = bounds["x"]
+    scale = min(bounds.values())
+    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * scale
     tape = _part(compiled, "tape_1")
     assert tape.shape == "sweep"
     assert tape.path_closed is True
-    protrusion = mattress.tape_edges[0].protrusion_fraction * ez
-    thickness = mattress.tape_edges[0].thickness_fraction * ez
-    assert tape.dimensions == pytest.approx([2 * protrusion, thickness])
-    # the sweep path rides the inset band wall
+    protrusion = mattress.tape_edges[0].protrusion_fraction * scale
+    width = mattress.tape_edges[0].width_fraction * scale
+    assert tape.dimensions == pytest.approx([protrusion, width])
+    # the path rides half a protrusion off the wall so the section's inner
+    # face seats ON it — never buried, never floating
     xs = [p[0] for p in tape.path_points]
-    assert max(xs) == pytest.approx(ex / 2 - p_max)
+    assert max(xs) == pytest.approx(ex / 2 - p_max + protrusion / 2)
     # closed path: no repeated endpoint (the cyclic spline handles the seam)
     assert tape.path_points[0] != tape.path_points[-1]
+
+
+def test_tape_fractions_are_of_the_cross_section_scale(mattress):
+    """Tape size follows min(L, W, H), not H: the same template must give a
+    ~13 mm strip on the tall 12x12x65 in placeholder AND a ~11 mm strip on
+    a queen — a tape is a detail of the side face, not of the height."""
+    for job_dims, expected_width in (((0.3048, 0.3048, 1.651), 0.045 * 0.3048),
+                                     ((2.032, 1.524, 0.254), 0.045 * 0.254)):
+        spec, _warnings = compile_spec(mattress, _job(*job_dims, code="SC"))
+        tape = {p.name: p for p in spec.parts}["tape_1"]
+        assert tape.dimensions[1] == pytest.approx(expected_width), job_dims
 
 
 def test_tape_protrusion_larger_than_footprint_raises(mattress):
     """A template whose tape protrusion swallows the footprint must fail
     loudly at compile time, not produce inverted geometry."""
-    job = _job(0.04, 0.04, 2.0)  # tall+narrow: 0.035*2.0 > 0.04/2
+    data = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    for t in data["tape_edges"]:
+        t["protrusion_fraction"] = 0.6  # > half of min(L, W, H) for any job
+    tpl = TemplateSpec.model_validate(data)
+    job = _job(0.04, 0.04, 2.0)
     with pytest.raises(ValueError, match="protrusion"):
-        compile_spec(mattress, job)
+        compile_spec(tpl, job)
 
 
 def test_decal_sits_on_wall_recessed_behind_tape(compiled, mattress):
     """The label is proud of the band wall (a sewn patch) but recessed
     behind the tape plane — it can never widen the overall silhouette."""
     job = load_job(JOB)
-    ey, ez = job.expected_bounds_m()["y"], job.expected_bounds_m()["z"]
-    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * ez
+    bounds = job.expected_bounds_m()
+    ey = bounds["y"]
+    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * min(bounds.values())
     wall_y = -(ey / 2 - p_max)
     decal = _part(compiled, "decal_patch")
     w, t_patch, h = decal.dimensions

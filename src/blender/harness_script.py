@@ -1880,22 +1880,33 @@ def _uv_face_groups(me):
         linked = edge.link_faces
         if len(linked) < 2:
             continue
+        # UV continuity across a shared edge is per-VERTEX. Collecting "the
+        # loop whose outgoing edge is the shared edge" picks ONE corner per
+        # face, and consistent winding puts those two corners at OPPOSITE
+        # ends of the edge — they can never match, so every face became its
+        # own island (2118 "islands" on the mattress, margin-dominated
+        # packing, ~1/3 target texel density). Key the coordinates by vertex
+        # instead and require BOTH endpoints to agree.
         per_face = []
+        ok = True
         for face in linked:
-            coords = []
+            coords = {}
             for loop in face.loops:
-                if loop.edge == edge:
+                if loop.vert in edge.verts:
                     u = loop[uv_lay].uv
-                    coords.append((u.x, u.y))
+                    coords[loop.vert.index] = (u.x, u.y)
+            if len(coords) != 2:
+                ok = False
+                break
             per_face.append((face.index, coords))
+        if not ok:
+            continue
         for a in range(len(per_face)):
             for b in range(a + 1, len(per_face)):
                 fi, ci = per_face[a]
                 fj, cj = per_face[b]
-                if len(ci) != len(cj) or not ci:
-                    continue
-                if all(any(abs(p[0] - q[0]) < eps and abs(p[1] - q[1]) < eps for q in cj)
-                       for p in ci):
+                if all(any(abs(p[0] - q[0]) < eps and abs(p[1] - q[1]) < eps
+                           for q in cj.values()) for p in ci.values()):
                     union(fi, fj)
 
     groups: dict[int, list[int]] = {}
@@ -2581,7 +2592,14 @@ def op_bake_maps(params):
         os.makedirs(out_dir, exist_ok=True)
     maps = params.get("maps") or list(_BAKE_MAP_SPECS.keys())
     resolution = int(params.get("resolution", 1024))
-    margin_px = int(params.get("margin", 16))
+    # Bake margin must stay BELOW the atlas packer's island gap
+    # (uv_margin 0.01 UV = 0.01 * resolution px) or island-border values
+    # bleed across islands. On the mattress the internal coincident band
+    # caps bake black; a 16 px margin over the ~10 px gaps at 1024 let
+    # that black overwrite most of the 5-8-texel wall islands (the
+    # black-and-white blotch defect). resolution // 128 keeps the bleed
+    # under half the gap at every power-of-two size.
+    margin_px = int(params.get("margin", max(4, resolution // 128)))
     samples = int(params.get("samples", 16))
     hp_levels = int(params.get("hp_levels", 2))
     normal_g = str(params.get("normal_g", "POS"))

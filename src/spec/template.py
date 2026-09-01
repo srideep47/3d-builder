@@ -17,8 +17,9 @@ existing pipeline already understands. The compiler emits:
     superellipse footprint outline (flush wall junctions, zero n-gons);
   - a script-method dome part for the crown band (radial rings over the
     same footprint, quads + triangle pole/cap fans);
-  - one closed-loop `sweep` part per tape edge (rectangular section,
-    centred on the wall outline so it half-buries and half-protrudes);
+  - one closed-loop `sweep` part per tape edge (thin binding strip: the
+    rectangular section seats flush on the band wall and stands proud by
+    exactly one protrusion, outer face on the nominal silhouette);
   - a thin box part for the side decal, standing off past the tapes;
   - overall-extent measurements + a ground-contact constraint.
 
@@ -66,11 +67,16 @@ class TemplateBand(BaseModel):
 
 class TapeEdgeSpec(BaseModel):
     """A closed-loop swept strip centred on the bottom boundary of
-    `at_boundary_below` (the named band)."""
+    `at_boundary_below` (the named band): thin binding tape that hugs the
+    wall (GLM_BRIEF §5.2) — seated flush, standing proud by one protrusion.
+
+    Fractions are of min(L, W, H), the cross-section scale: a tape is a
+    detail of the side face, not a fraction of the product height
+    (H-relative fractions made 74 mm collars on a tall mattress)."""
 
     at_boundary_below: str
-    thickness_fraction: float = Field(gt=0)  # vertical, of H
-    protrusion_fraction: float = Field(gt=0)  # radial stick-out, of H
+    width_fraction: float = Field(gt=0)  # vertical extent, of min(L, W, H)
+    protrusion_fraction: float = Field(gt=0)  # radial stick-out, of min(L, W, H)
     material: str
 
 
@@ -217,6 +223,26 @@ def footprint_outline(a: float, b: float, exponent: float, segments: int) -> lis
     return pts
 
 
+def _offset_loop(points: list[list[float]], delta: float) -> list[list[float]]:
+    """Offset a closed 2D loop outward by `delta` along point normals
+    (from cyclic neighbours). The footprint loop is star-shaped about the
+    origin, so each normal is oriented away from it. Used to seat tape
+    sections flush on the band wall: offsetting the wall loop by half a
+    protrusion puts the section's inner face exactly back on the wall."""
+    n = len(points)
+    out = []
+    for i, (x, y) in enumerate(points):
+        x0, y0 = points[(i - 1) % n]
+        x1, y1 = points[(i + 1) % n]
+        tx, ty = x1 - x0, y1 - y0
+        ln = math.hypot(tx, ty) or 1.0
+        nx, ny = -ty / ln, tx / ln
+        if nx * x + ny * y < 0.0:  # keep the outward side
+            nx, ny = -nx, -ny
+        out.append([x + delta * nx, y + delta * ny])
+    return out
+
+
 # Self-contained dome builder (runs inside Blender via the script-method part;
 # the harness script namespace only exposes bpy). __TOKENS__ are substituted
 # by compile_spec. Builds from z=0 up to __H__ at the origin; the caller
@@ -346,12 +372,17 @@ def compile_spec(template: TemplateSpec, job: JobCard) -> tuple[ObjectSpec, list
     ex, ey, ez = bounds["x"], bounds["y"], bounds["z"]
     a, b = ex / 2.0, ey / 2.0
     fp = template.footprint
-    # Tape edges wrap the band wall and protrude outward. The NOMINAL L/W/H
-    # must remain the outer silhouette (the client dimension gate reads the
+    # Tape edges are thin binding strips that HUG the band wall (GLM_BRIEF
+    # §5.2): the section [protrusion x width] seats its inner face flush on
+    # the wall and stands proud by exactly one protrusion. Tape fractions
+    # are of the CROSS-SECTION scale min(L, W, H) — a tape is a detail of
+    # the side face, not a fraction of the height. The NOMINAL L/W/H must
+    # remain the outer silhouette (the client dimension gate reads the
     # overall bounds at ±0.01 in), so the band body is inset by the largest
     # tape protrusion and every tape's outer face lands exactly on the
     # nominal footprint. The decal stays recessed behind the tape plane.
-    protrusions = [t.protrusion_fraction * ez for t in template.tape_edges]
+    scale = min(ex, ey, ez)
+    protrusions = [t.protrusion_fraction * scale for t in template.tape_edges]
     p_max = max(protrusions) if protrusions else 0.0
     a_body, b_body = a - p_max, b - p_max
     if a_body <= 0 or b_body <= 0:
@@ -410,16 +441,18 @@ def compile_spec(template: TemplateSpec, job: JobCard) -> tuple[ObjectSpec, list
 
     for i, tape in enumerate(template.tape_edges):
         z_tape = bottoms[tape.at_boundary_below]
-        thickness = tape.thickness_fraction * ez
-        protrusion = tape.protrusion_fraction * ez
-        path = [[x, y, z_tape] for x, y in outline]
+        width = tape.width_fraction * scale
+        protrusion = tape.protrusion_fraction * scale
+        # path = the wall loop offset half a protrusion along the point
+        # normals, so the section's inner face seats flush on the wall
+        path = [[x, y, z_tape]
+                for x, y in _offset_loop(outline, protrusion / 2.0)]
         part = PartSpec(
             name=f"tape_{i+1}",
             shape="sweep",
             path_points=path,
             path_closed=True,
-            # section centred on the wall line: half buried, half protruding
-            dimensions=[2.0 * protrusion, thickness],
+            dimensions=[protrusion, width],
             position=[0.0, 0.0, z_tape],
             position_mode="center",
             smooth_shade=True,
@@ -462,7 +495,7 @@ def compile_spec(template: TemplateSpec, job: JobCard) -> tuple[ObjectSpec, list
         # Tape z-spans must stay clear of the patch or the two interpenetrate.
         for i, tape in enumerate(template.tape_edges):
             z_t = bottoms[tape.at_boundary_below]
-            t_t = tape.thickness_fraction * ez / 2.0
+            t_t = tape.width_fraction * scale / 2.0
             if zc - h / 2.0 < z_t + t_t and zc + h / 2.0 > z_t - t_t:
                 warnings.append(
                     f"decal z-span [{zc - h / 2.0:.4f}, {zc + h / 2.0:.4f}] m overlaps "

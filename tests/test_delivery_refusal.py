@@ -69,8 +69,8 @@ class _ChainRecorder:
     def execute_op(self, op, params):
         self.ops.append(op)
         if op == "prepare_delivery_scene":
-            return {"success": True, "uv_atlas": {"pack_scale": 0.32},
-                    "uv": {"islands_total": 2118}}
+            return {"success": True, "uv_atlas": {"pack_scale": 0.98},
+                    "uv": {"islands_total": 114}}
         if op == "bake_maps":
             return {"success": True,
                     "maps": {"basecolor": {"stats": {"std": 0.35}}},
@@ -125,7 +125,7 @@ def test_finish_delivery_runs_chain_then_refuses(tmp_path):
     disp = fin["detail_parts"]["crown"]["displacement"]
     assert disp["pattern"] == "grid_diamond"
     assert disp["amplitude_m"] == pytest.approx(
-        0.07 * (0.3048 - 2 * 0.035 * 1.651) / 8)  # fraction of one quilt CELL
+        0.07 * (0.3048 - 2 * 0.016 * 0.3048) / 8)  # fraction of one quilt CELL
     assert disp["restrict"] == "up"
     assert "unblock" in report
     # and NO package directory was created
@@ -185,7 +185,7 @@ def test_finish_delivery_real_dims_emits_package(tmp_path):
         bands=[TemplateBand(name="top", height_fraction=0.6, material="shell"),
                TemplateBand(name="bottom", height_fraction=0.4, material="shell")],
         tape_edges=[TapeEdgeSpec(at_boundary_below="top",
-                                 thickness_fraction=0.05,
+                                 width_fraction=0.05,
                                  protrusion_fraction=0.03, material="trim")],
         textures={"shell": SurfaceSpec(base="flat", roughness=0.8),
                   "trim": SurfaceSpec(base="flat", roughness=0.6)},

@@ -266,7 +266,13 @@ def test_chiral_uv_diagnostics(runner):
     })
     assert result["success"], result.get("error")
     uv = result["uv"]
-    assert uv["islands_total"] == 12, "expected one island per box face"
+    # one island per box SIDE (2 coplanar quads merge: 0° < the 66° smart
+    # project angle limit). This is the _uv_face_groups regression pin: the
+    # old loop-matching bug compared one corner per face across a shared
+    # edge — consistent winding puts those corners at opposite ends, they
+    # can never match, and every face became its own island (12 here,
+    # 2118 on the mattress — margin-dominated packing, ~1/3 texel density).
+    assert uv["islands_total"] == 6, "expected one island per box side"
     assert uv["in_bounds"] is True
     assert uv["overlapping_island_pairs"] == 0
     assert uv["texel_density_texels_per_m"]["ratio"] < 1.05

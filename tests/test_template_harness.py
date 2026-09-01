@@ -35,7 +35,8 @@ JOB = PROJECT_ROOT / "input" / "jobs" / "MAYA00053153.yaml"
 # the placeholder job card: 12 x 12 x 65 IN stand-ins
 NOM = {"x": 0.3048, "y": 0.3048, "z": 1.651}
 EZ = NOM["z"]
-P_MAX = 0.035 * EZ  # tape protrusion (largest of the template's tapes)
+SCALE = min(NOM.values())  # tape fractions are of the cross-section scale
+P_MAX = 0.016 * SCALE  # tape protrusion (largest of the template's tapes)
 A_BODY = NOM["x"] / 2 - P_MAX  # inset band wall half-width
 
 
@@ -156,7 +157,37 @@ def test_tape_outer_faces_land_exactly_on_nominal(objects):
         assert t["x"][0] == pytest.approx(-NOM["x"] / 2, abs=2e-4), tape
         assert t["y"][0] == pytest.approx(-NOM["y"] / 2, abs=2e-4), tape
         assert t["y"][1] == pytest.approx(NOM["y"] / 2, abs=2e-4), tape
-        assert t["z"][1] - t["z"][0] == pytest.approx(0.045 * EZ, abs=2e-4)
+        assert t["z"][1] - t["z"][0] == pytest.approx(0.045 * SCALE, abs=2e-4)
+
+
+def test_tape_section_is_thin_and_flush_seated(runner, quad_scene):
+    """§5.2 DEFECT 1 regression pin: binding tape HUGS the wall — the
+    section is [protrusion x width] with its inner face ON the band wall
+    and exactly one protrusion of stand-off. Measured on tape_1's +X-flat
+    section corners (path point 0 sits at y = 0, x > 0; its 4 corners are
+    the only verts on that flat). The old [2*protrusion x thickness]
+    half-buried section of H rendered as 58 mm collars."""
+    code = r"""
+import bpy
+from mathutils import Vector
+tape = bpy.data.objects["tape_1"]
+xs, zs = [], []
+for v in tape.data.vertices:
+    w = tape.matrix_world @ v.co
+    if abs(w.y) < 1e-6 and w.x > 0:  # the +X flat only (y=0 also hits -X)
+        xs.append(w.x)
+        zs.append(w.z)
+RESULT = {"xs": sorted(xs), "z0": min(zs), "z1": max(zs), "n": len(zs)}
+"""
+    res = runner.execute_op("run_script", {"code": code, "input": str(quad_scene)})
+    assert res["success"], res.get("error")
+    sec = res["result"]
+    assert sec["n"] == 4  # one rectangular section at the +X flat
+    assert min(sec["xs"]) == pytest.approx(A_BODY, abs=1e-5)   # flush on wall
+    assert max(sec["xs"]) == pytest.approx(A_BODY + P_MAX, abs=1e-5)  # one proud
+    assert sec["z1"] - sec["z0"] == pytest.approx(0.045 * SCALE, abs=1e-5)  # thin
+    # centred on the crown/air-mesh boundary
+    assert (sec["z0"] + sec["z1"]) / 2 == pytest.approx(0.72 * EZ, abs=1e-5)
 
 
 def test_overall_bounds_exactly_nominal(objects):
