@@ -239,6 +239,31 @@ class ContrastProbeSpec(BaseModel):
         return self
 
 
+class RetopologySpec(BaseModel):
+    """Optional retopology stage for file-backed parts (Phase 8.5 R2,
+    docs/MESH_SOURCES.md §7-8): applied by the harness in the LIVE scene
+    after the import weld, before rescale — a GLB round trip would
+    triangulate the quads. Exactly one tool per part: QuadriFlow silently
+    no-ops on voxel-remeshed geometry (measured defect, byte-identical at
+    every target), so chaining tools is refused here rather than detected
+    downstream."""
+    tool: Literal["quadriflow", "voxel"]
+    # quadriflow: target quad count (honored within ~10%, measured)
+    target_faces: int | None = Field(default=None, ge=100, le=200000)
+    # voxel: remesh voxel size in SPEC UNITS (converted to metres by the
+    # resolver, like dimensions). Usable floor ~5 mm on ~0.4 m objects —
+    # 4 mm collapsed dims by 28/17/61 mm (measured, §5.3).
+    voxel_size: float | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _tool_params(self) -> "RetopologySpec":
+        if self.tool == "quadriflow" and self.target_faces is None:
+            raise ValueError("retopology tool 'quadriflow' requires target_faces")
+        if self.tool == "voxel" and self.voxel_size is None:
+            raise ValueError("retopology tool 'voxel' requires voxel_size (metres)")
+        return self
+
+
 class PartSpec(BaseModel):
     name: str
     shape: ShapeType = ShapeType.ROUNDED_BOX
@@ -284,6 +309,11 @@ class PartSpec(BaseModel):
     # per metre of the shared atlas. Total atlas use is unchanged — the
     # packer renormalises across all parts.
     texel_priority: float = Field(default=1.0, ge=0.25, le=16.0)
+    # optional retopology applied in-harness after the import weld
+    # (docs/MESH_SOURCES.md): quadriflow (quads, closes small holes) or
+    # voxel (density control). File-backed methods only — parametric parts
+    # are born quad-clean.
+    retopology: RetopologySpec | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -316,6 +346,17 @@ class PartSpec(BaseModel):
             raise ValueError(
                 f"Part '{self.name}' carries image_crop but is {m.value} — "
                 "image_crop selects the reference image for image_to_3d parts only."
+            )
+        if self.retopology is not None and m not in (
+            GenerationMethod.IMAGE_TO_3D,
+            GenerationMethod.IMPORTED,
+            GenerationMethod.SCANNED,
+        ):
+            raise ValueError(
+                f"Part '{self.name}' carries retopology but is {m.value} — "
+                "retopology applies to file-backed geometry (image_to_3d/"
+                "imported/scanned) after the import weld; parametric parts "
+                "are born quad-clean."
             )
         if self.code is not None and m != GenerationMethod.CUSTOM_SCRIPT:
             raise ValueError(

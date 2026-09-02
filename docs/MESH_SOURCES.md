@@ -150,6 +150,32 @@ re-weld. No error is raised. Consequences: voxel and QuadriFlow are
 remesh steps must verify the face count actually changed (fail-closed),
 because Blender will not report this failure.
 
+**R2 refinement (probes 9–12, all re-measured on this machine):** the
+silent no-op is the *general* behavior of QuadriFlow on **live** voxel
+output — reproduced on a second input (holed sphere @ voxel 0.05:
+1,836 verts / 1,834 quads unchanged at target 2000) as well as the
+original scan (@ 0.008: 14,134 / 14,132 unchanged). One case fails LOUD
+instead: an **empty** voxel output (the holed sphere @ 0.008 remeshes to
+0 faces — see §5.3) raises `RuntimeError: QuadriFlow: Remeshing failed`.
+Through the production path (voxel output → GLB → re-import → weld →
+QuadriFlow) the no-op is **input-dependent, not repaired by the weld**:
+the scan's output still no-ops after round trip + weld (56,528 imported
+verts → weld → 14,134 verts / 28,264 tris, target 2000 leaves it
+unchanged), while the sphere's output is repaired by the same chain
+(3,638 tris → 1,946 quads). The trigger is **not output density** — a
+generated ico-sphere voxel-remeshed to 18,110 quads runs fine through
+the identical chain (1,957 quads) — and is not reconstructible from
+generated geometry, so it cannot be pinned by a fresh-fixture test. The
+deterministic fixed point that pins the guard instead: a voxel-20 box
+saved as **.blend** (quads survive; a GLB would triangulate 12 tris and
+hide the fixed point), re-imported, voxel-remeshed at the same size →
+exactly 8 verts / 6 faces unchanged → the harness guard fires. The guard
+is **required, not decorative**: the cross-file chain (part A exports
+voxel output; part B imports that GLB with a quadriflow block) is legal
+in one spec each and demonstrably reaches the silent no-op (the scan
+round-trip above is exactly that chain). Voxel and QuadriFlow remain
+alternatives at the schema level (one tool per part, chaining refused).
+
 ### 5.3 Voxel remesh — Remesh modifier, mode `VOXEL` (OpenVDB)
 
 | voxel_size (m) | quads out | dims drift (mm) | time |
@@ -166,6 +192,13 @@ collapses** to a 400-quad blob with dims up to −61 mm — deterministic
 (two identical trials; `adaptivity` 0.0, `use_remove_disconnected` True),
 unexplained. Until understood, the usable band on ~0.4 m objects is
 voxel_size ≥ 0.005. UV islands after smart project: 202 (at 0.008).
+
+**Empty output is reachable and silent (measured, R2 probes):** the
+holed sphere (0.60 × 0.20 × 0.40 m, 319 tris) at voxel 0.008 remeshes to
+**0 verts / 0 faces** — no error — while the same mesh at 0.05 keeps
+1,834 quads and the denser scan at 0.008 yields 14,132. A raw SPLIT
+(unwelded) import also remeshes to 0 faces. The harness therefore
+fail-closes on `faces == 0` after voxel remesh.
 
 The Remesh modifier in 4.5 exposes modes BLOCKS / SMOOTH / SHARP / VOXEL
 only — there is no quad mode in the modifier; QuadriFlow is op-only.
@@ -228,30 +261,63 @@ directly measurable in the harness, fail-closed):
 7. **Stage verified**: if a remesh step is a no-op (face count unchanged),
    raise — Blender's silent no-ops (§5.2) must never pass unnoticed.
 
+**Status after R2**: item 7 is **BUILT** in the harness
+(`_apply_retopology` in `harness_script.py` fails the op when faces AND
+verts are unchanged, or when faces == 0; the runner converts that to
+`BlenderExecutionError`) and pinned by
+`tests/test_retopology.py::test_noop_guard_fails_closed` on a
+deterministic fixed point. Items 1–6 are not re-implemented in the
+retopo stage: they ride the existing T3 chain downstream of it —
+quad/n-gon verification, the per-island UV atlas, and the client gates
+(polycount, dimensions) all run on the finished scene and are pinned by
+`tests/test_retopology.py::test_prepare_threads_retology_quads_into_t3`
+(measured there: 816 quads, 0 tris, 0 n-gons, 7 islands, texel ratio
+1.0000001) and `tests/test_mesh_source.py` (weld + atlas evidence).
+
 ## 8. Integration design (behind the mesh-source contract)
+
+**Status: BUILT (R2)** — schema `src/spec/schema.py` (`RetopologySpec`),
+resolver unit conversion `src/spec/resolver.py`, harness
+`_apply_retopology` in `src/blender/harness_script.py`, analyst +
+corrector prompts, tests in `tests/test_retopology.py` and
+`tests/test_mesh_source_contract.py`. Deviations from the design below
+are flagged inline.
 
 - **PartSpec gains an optional `retopology` block**, e.g.
   `retopology: {tool: "quadriflow", target_faces: 8000}` or
   `{tool: "voxel", voxel_size: 0.006}`. Absent block = import as-is (the
   8.3 contract unchanged). The block is legal on any file-backed method
   (`imported`, `scanned`, `image_to_3d`) — that is how Phase 8.5 organics
-  will ride it.
-- **The harness applies it in the live scene**, right after
-  `import_any`, before join/rescale/place: weld (always, for every
-  file-backed part — it costs 0.02–0.25 s and is the root-cause fix) →
-  the requested tool → verify §7 → continue the existing path. Never via
-  a GLB intermediate (§5.5).
-- **Fail-closed checks** after each stage: topology actually changed,
-  face count within budget, boundary edges accounted for.
+  will ride it. **Built stronger than designed**: exactly ONE tool per
+  part (chaining refused at schema level — voxel → QuadriFlow is the §5.2
+  no-op), `target_faces` clamped 100–200,000, and the block is REFUSED on
+  parametric parts both in the schema and in the harness (parametric
+  parts are born quad-clean). **`voxel_size` is in the SPEC'S UNITS**,
+  like dimensions — a mm-spec part writes `voxel_size: 6` for 6 mm; the
+  resolver converts via `unit.to_meters` (design sketch above showed raw
+  meters; the built block follows the dimension convention).
+- **The harness applies it in the live scene**: the built order in
+  `op_build_from_spec`'s file-backed branch is join → weld (R1, always,
+  every file-backed part) → retopology → rescale → place. Never via a
+  GLB intermediate (§5.5). Retopology before rescale so voxel surface
+  drift is absorbed by the `target_size` fit.
+- **Fail-closed checks** after the stage (built): faces == 0 → error;
+  faces AND verts unchanged → "silent no-op" error naming the measured
+  counts; retopology on a non-file-backed part → refusal. Face budget
+  and boundary accounting ride the existing T3 gates downstream.
 - **Corrector rules** (mirror the 8.3 wording): never drop `mesh_path`,
   `mesh_scale`, or the `retopology` block; dimension fixes go through
-  `target_size`, never through re-topology parameters.
-- **Recipe persistence**: like `run_dir/neural/`, persist the applied
-  recipe + pre/post topology stats under `run_dir/retopo/<part>/` so
-  qa_report can carry the evidence.
+  `target_size`, never through re-topology parameters. Built into both
+  prompts.
+- **Recipe persistence** — *deviation*: not a separate
+  `run_dir/retopo/<part>/` tree. The applied recipe and pre/post
+  topology stats ride the op result (`"retopology"` key beside R1's
+  `"weld"` key), the same evidence philosophy: the GLB export re-splits
+  vertices, so the in-scene report is the only observable. The existing
+  run-dir/event machinery persists op results.
 - **Watertight gate**: add a boundary-edge check to the package gates (or
   promote the verifier's watertight warning) once retopology exists to
-  satisfy it — until then it would only block.
+  satisfy it — still OPEN, owner decision §10.2.
 
 ## 9. Phased plan
 
@@ -261,10 +327,17 @@ directly measurable in the harness, fail-closed):
   texel ratio 1.0000001, bounds on target within 4e-8 m; the do-no-harm
   control (UV-free smooth sphere) reports 162 → 162, a no-op. Suite 442
   (3 new tests in `tests/test_mesh_source.py`).
-- **R2 — the `retopology` block** (quadriflow primary; voxel for
-  hole-closing/density control with voxel_size ≥ 0.005). Delivers
-  polycount control + quads + watertight. Guarded by the §7 contract and
-  the no-op detection.
+- **R2 — the `retopology` block: DONE** (schema + resolver + harness +
+  prompts; §8 records the built shape and deviations). Measured: the
+  holed scanned sphere (162 verts / 319 tris / boundary 3) with
+  `{tool: "quadriflow", target_faces: 800}` → **816 quads, hole closed,
+  0 boundary edges**, bounds exact on the 0.60 × 0.20 × 0.40 m target;
+  `{tool: "voxel", voxel_size: 0.05}` → 1,834 quads, boundary 0. Through
+  the full T3 chain (prepare → atlas → bake → FBX): 816 quads, 0 tris,
+  0 n-gons, 7 UV islands, texel ratio 1.0000001. The no-op guard fires
+  deterministically on the voxel-fixed-point fixture ("silent no-op
+  (6 faces, 8 verts unchanged)"). Suite **451** (442 + 4 contract tests
+  in `tests/test_mesh_source_contract.py` + 5 in `tests/test_retopology.py`).
 - **R3 — external/neural retopo backends** (only if CPU QuadriFlow output
   proves insufficient for 8.5 organics): evaluate against the same §7
   contract. Nothing measured yet; candidates and the TRELLIS/Hunyuan
@@ -285,9 +358,14 @@ master plan.
 3. **Voxel 0.004 collapse** (§5.3): investigate upstream (Blender/OpenVDB)
    or simply document the floor; no production need identified below
    0.005 m on ~0.4 m objects.
-4. **QuadriFlow-on-voxel silent no-op** (§5.2): report upstream if
-   reproducible outside this repo; in-repo it is contained by the §7.7
-   no-op guard.
+4. **QuadriFlow-on-voxel silent no-op** (§5.2): contained in-repo by the
+   BUILT §7.7 guard; report upstream if reproducible outside this repo.
+   The trigger is not reconstructible from generated geometry (probe 12),
+   so the realistic no-op is pinned only by probe evidence in
+   `output/meshsrc/` (gitignored). **Owner call**: commit the ~1.5 MB
+   voxel-output fixture (`r2_voxscan.glb`) under `tests/fixtures/` to pin
+   the real trigger in a test — the repo so far commits no binary meshes,
+   so this sets precedent.
 
 ## Appendix: measurement confessions (§H)
 
@@ -306,3 +384,11 @@ master plan.
 - HP tri-equivalents varied across runs (122,856 / 181,080 / 171,264 /
   405,200) because the bake-subdivision of the LP depends on topology;
   not load-bearing for any conclusion above.
+- **R2 session, two wrong claims caught by re-measurement before they
+  reached this document**: (1) "the R1 weld repairs the QuadriFlow
+  no-op" — measured on the small sphere only; the scan's voxel output
+  still silently no-ops after GLB round trip + weld (probe 10). The weld
+  is not a reliable repair; the guard is. (2) "the live voxel →
+  QuadriFlow chain fails loudly" — that was the *empty-output* case
+  (sphere @ 0.008 → 0 faces); on non-empty live voxel output the no-op
+  stays silent (probe 11). §5.2's refinement records both.

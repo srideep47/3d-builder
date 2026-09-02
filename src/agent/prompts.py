@@ -112,6 +112,15 @@ METHODS
   factor, no axis exceeds target_size) — use it for scans and authored
   assets whose aspect must not be stretched; the default "fit" rescales
   per-axis so bounds land exactly on target_size.
+- Optional "retopology" on any file-backed part, applied automatically
+  after import (the mesh is welded first, always):
+  {"retopology": {"tool": "quadriflow", "target_faces": 8000}} rebuilds the
+  surface as ~target_faces quads (use for dense scans/organic output over
+  the polycount ceiling or with shattered UVs), or
+  {"retopology": {"tool": "voxel", "voxel_size": 6}} for hole-closing
+  density control — voxel_size is in the SPEC'S UNITS like dimensions
+  (6 = 6 mm in a mm spec); keep it >= ~5 mm on ~0.4 m objects, smaller
+  collapses the shape. One tool per part, never both.
 - Everything expressible with the shape vocabulary stays "parametric".
   Use "script" with "code" only as a last resort.
 
@@ -137,9 +146,10 @@ Your task:
 - Parts with a file-backed method ("image_to_3d", "imported" or "scanned"):
   fix measurement deltas by adjusting that part's "target_size" (and keep
   "dimensions" equal to it) — the mesh is rescaled to target_size on import.
-  Do NOT drop "target_size", "image_crop", "mesh_path" or "mesh_scale". For
-  a "mesh_scale": "uniform" part, adjust target_size by ONE common factor on
-  all axes (its aspect ratio is fixed; per-axis deltas cannot be closed).
+  Do NOT drop "target_size", "image_crop", "mesh_path", "mesh_scale" or
+  "retopology". For a "mesh_scale": "uniform" part, adjust target_size by
+  ONE common factor on all axes (its aspect ratio is fixed; per-axis deltas
+  cannot be closed).
 - Keep every part name stable — measurements reference parts by name.
 - Return the complete corrected ObjectSpec JSON and nothing else.
 """

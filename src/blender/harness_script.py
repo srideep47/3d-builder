@@ -160,6 +160,88 @@ def _weld_imported_mesh(obj, threshold=1e-6):
     return stats
 
 
+def _topology_stats(obj):
+    """Direct mesh facts (verts/faces/quads/tris/boundary edges) — the §H
+    unit of evidence for the weld and retopology reports."""
+    import bmesh
+
+    me = obj.data
+    quads = sum(1 for p in me.polygons if len(p.vertices) == 4)
+    tris = sum(1 for p in me.polygons if len(p.vertices) == 3)
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    boundary = sum(1 for e in bm.edges if e.is_boundary)
+    bm.free()
+    return {
+        "verts": len(me.vertices),
+        "faces": len(me.polygons),
+        "quads": quads,
+        "tris": tris,
+        "boundary_edges": boundary,
+    }
+
+
+def _apply_retopology(obj, cfg):
+    """R2 retopology block (docs/MESH_SOURCES.md §7-8): runs in the LIVE
+    scene after the import weld — a GLB round trip would triangulate the
+    quads. Fail-closed no-op guard: QuadriFlow can silently return its
+    input unchanged (measured on voxel-remeshed geometry — byte-identical
+    at every target 2k-12k), so an unchanged mesh is an ERROR naming the
+    tool, never a silent pass. Voxel keeps adaptivity 0.0 and the measured
+    usable floor voxel_size >= 0.005 on ~0.4 m objects (0.004 collapsed
+    dims by 28/17/61 mm)."""
+    import bpy
+
+    tool = str(cfg.get("tool", "")).lower()
+    stats_before = _topology_stats(obj)
+    select_only([obj])
+    if tool == "quadriflow":
+        target = int(cfg.get("target_faces") or 0)
+        if target <= 0:
+            return {"success": False,
+                    "error": "retopology 'quadriflow' requires a positive target_faces"}
+        bpy.ops.object.quadriflow_remesh(target_faces=target)
+    elif tool == "voxel":
+        voxel_size = float(cfg.get("voxel_size") or 0.0)
+        if voxel_size <= 0:
+            return {"success": False,
+                    "error": "retopology 'voxel' requires a positive voxel_size (metres)"}
+        mod = obj.modifiers.new(name="ThreedRetopoVoxel", type="REMESH")
+        mod.mode = "VOXEL"
+        mod.voxel_size = voxel_size
+        mod.adaptivity = 0.0
+        select_only([obj])
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+    else:
+        return {"success": False, "error": f"Unknown retopology tool: {tool!r}"}
+    stats_after = _topology_stats(obj)
+    if stats_after["faces"] == 0:
+        return {
+            "success": False,
+            "error": (
+                f"retopology '{tool}' emptied the mesh "
+                f"({stats_before['faces']} -> 0 faces) — refusing to continue"
+            ),
+        }
+    if (stats_after["faces"] == stats_before["faces"]
+            and stats_after["verts"] == stats_before["verts"]):
+        return {
+            "success": False,
+            "error": (
+                f"retopology '{tool}' is a silent no-op "
+                f"({stats_before['faces']} faces, {stats_before['verts']} verts "
+                f"unchanged) — the tool refused the input; never assume it ran"
+            ),
+        }
+    return {
+        "success": True,
+        "tool": tool,
+        "params": {k: cfg[k] for k in ("target_faces", "voxel_size") if cfg.get(k) is not None},
+        "before": stats_before,
+        "after": stats_after,
+    }
+
+
 def export_any(path, selected_only=False, apply_modifiers=True):
     import bpy
 
@@ -1132,6 +1214,7 @@ def op_build_from_spec(params):
     built = {}
     obj_list = []
     weld_stats = {}
+    retopo_stats = {}
 
     # Pass 1: build geometry, detail modifiers, positioning, assembly modifiers.
     for part in parts:
@@ -1153,6 +1236,20 @@ def op_build_from_spec(params):
             else:
                 warnings.append(f"Script part '{name}' created no object named '{name}'")
             continue
+
+        if part.get("retopology") and method not in ("image_to_3d", "imported", "scanned") \
+                and str(part.get("shape", "")).lower() != "organic":
+            # The schema refuses this spec outright; a raw build-params
+            # caller bypassing Pydantic must not get a silent drop instead.
+            return {
+                "success": False,
+                "error": (
+                    f"Part '{name}' carries retopology but is {method} — "
+                    "retopology applies to file-backed parts "
+                    "(image_to_3d/imported/scanned) after the import weld"
+                ),
+                "warnings": warnings,
+            }
 
         if method in ("image_to_3d", "imported", "scanned") or str(part.get("shape", "")).lower() == "organic":
             # Mesh-source contract (Phase 8 item 3): ALL file-backed sources
@@ -1188,6 +1285,21 @@ def op_build_from_spec(params):
             # never pass through here — born-in-Blender geometry is welded
             # by construction.
             weld_stats[name] = _weld_imported_mesh(obj)
+            # R2: the optional retopology block runs on the WELDED mesh in
+            # the live scene (a GLB round trip would triangulate the quads),
+            # before rescale so target_size still lands exact. Fail-closed:
+            # a silent no-op or empty output fails the whole op.
+            retopo_cfg = part.get("retopology")
+            if retopo_cfg:
+                report = _apply_retopology(obj, retopo_cfg)
+                if not report.get("success", False):
+                    return {
+                        "success": False,
+                        "error": f"Part '{name}': {report.get('error')}",
+                        "warnings": warnings,
+                        "weld": weld_stats,
+                    }
+                retopo_stats[name] = report
             target = part.get("target_size") or part.get("dimensions")
             if target:
                 _scale_object_to_bounds(
@@ -1326,6 +1438,7 @@ def op_build_from_spec(params):
         "part_names": [o.name for o in obj_list],
         "warnings": warnings,
         "weld": weld_stats,
+        "retopology": retopo_stats,
         "overall_bounds": final_bounds,
         "output_path": str(output_path) if output_path else None,
     }
@@ -2822,6 +2935,7 @@ def op_prepare_delivery_scene(params):
         "part_names": result.get("part_names", []),
         "warnings": result.get("warnings", []),
         "weld": result.get("weld", {}),
+        "retopology": result.get("retopology", {}),
         "triangulated_as_last_resort": triangulated,
         "topology": {"triangles": tris, "quads": quads, "ngons": ngons,
                      "triangle_equivalent": tri_eq, "faces_total": faces, "vertices": verts},

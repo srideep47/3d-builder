@@ -16,21 +16,31 @@
 - All lengths are stored in **meters** in internal representations.
 - Origin is centered at bottom-center `(0, 0, 0)` so models sit on the ground plane.
 - Geometry builds must verify against dimension tolerances before final export.
-- **Weld-on-import is BUILT (R1); retopology is scoped** —
+- **Weld-on-import (R1) and the `retopology` spec block (R2) are BUILT** —
   `_weld_imported_mesh()` in the harness runs on EVERY file-backed import
   (after join, before rescale; `op_prepare_delivery_scene` calls
   `op_build_from_spec` in-process, so the T3 path is covered by the same
   site) and reports per-part `weld` stats in the op result — the export
-  re-splits, so the report is the only observable evidence. Root cause and
-  tool survey live in `docs/MESH_SOURCES.md`: glTF per-attribute vertex
-  splitting (per-corner normals AND per-corner UVs — a smooth-shaded mesh
-  with UV seams still splits) is what shatters the UV atlas, NOT triangles;
-  QuadriFlow works on welded meshes; voxel remesh collapses at voxel_size
-  0.004; QuadriFlow silently no-ops on voxel output — never chain them; the
-  GLB round trip triangulates quads, so retopology must run in the live
-  harness scene. Phased plan: R1 DONE → R2 `retopology` spec block → R3
-  external backends. Phase 8.5 neural image-to-3D depends on R1. Evidence
-  fixtures: `input/jobs/RETOPO0001/0002.yaml`.
+  re-splits, so the report is the only observable evidence. On top of the
+  weld, a file-backed part may carry `retopology:
+  {tool: "quadriflow", target_faces: N}` or `{tool: "voxel",
+  voxel_size: L}` — ONE tool per part (chaining refused at schema level),
+  legal only on file-backed methods, `voxel_size` in the SPEC'S UNITS
+  (resolver converts like dimensions), applied in the live scene before
+  rescale; per-part `retopology` stats ride the op result. The stage is
+  FAIL-CLOSED: unchanged faces+verts → "silent no-op" error, 0 faces →
+  error (Blender reports neither — QuadriFlow silently no-ops on voxel
+  output, and that no-op SURVIVES a GLB round trip + weld on some inputs,
+  so the weld is not a repair; empty voxel output also happens silently).
+  Root cause and tool survey live in `docs/MESH_SOURCES.md`: glTF
+  per-attribute vertex splitting (per-corner normals AND per-corner UVs —
+  a smooth-shaded mesh with UV seams still splits) is what shatters the
+  UV atlas, NOT triangles; voxel remesh collapses at voxel_size 0.004;
+  the GLB round trip triangulates quads, so retopology must run in the
+  live harness scene. Phased plan: R1 DONE → R2 DONE → R3
+  external backends. Phase 8.5 neural image-to-3D rides R1+R2 (dense
+  neural output enters as a file-backed part). Evidence fixtures:
+  `input/jobs/RETOPO0001/0002.yaml`.
 - **Two Python environments, never mixed**: main `.venv` (light deps) and
   `services/img3d_service/.venv` (torch cu124 + model deps; Forge only).
   Start the service with `scripts/start-img3d.ps1 [tripo_sr]` before builds

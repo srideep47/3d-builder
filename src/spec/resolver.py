@@ -101,6 +101,18 @@ def _resolve_part(part: PartSpec, unit: Unit) -> dict[str, Any]:
         p_dict["target_size"] = _to_meters(part.target_size, unit)
     if part.mesh_scale != "fit":
         p_dict["mesh_scale"] = part.mesh_scale
+    if part.retopology is not None:
+        # R2 (docs/MESH_SOURCES.md §8): rides through for the harness, which
+        # owns the tool call and the fail-closed no-op guard. voxel_size is a
+        # length in SPEC UNITS — converted here like every other length;
+        # target_faces is a count.
+        r = part.retopology
+        rd: dict[str, Any] = {"tool": r.tool}
+        if r.target_faces is not None:
+            rd["target_faces"] = int(r.target_faces)
+        if r.voxel_size is not None:
+            rd["voxel_size"] = unit.to_meters(r.voxel_size)
+        p_dict["retopology"] = rd
     if part.code:
         p_dict["code"] = part.code
 
