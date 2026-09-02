@@ -37,7 +37,7 @@ from typing import Any, Callable
 
 from PIL import Image
 
-from .contract import OPEN_QUESTIONS, TIER_TRI_CEILINGS
+from .contract import OPEN_QUESTIONS
 from .fbx_inspect import read_fbx_info
 from .gates import MeshFacts, run_all_gates
 from .job import JobCard
@@ -54,9 +54,18 @@ _PLACEHOLDER_TEXTURES: dict[str, tuple[int, int, int]] = {
 
 # The axis convention we ask the exporter for. The FBX-standard Y-up is what
 # third-party consumers expect; qa_report records what was ACTUALLY written
-# (independently parsed) next to this request.
+# (independently parsed) next to this request. A job card may override the
+# pair (Phase 4: fbx_axis_up/fbx_axis_forward — set together, never half).
 FBX_AXIS_UP = "Y"
 FBX_AXIS_FORWARD = "-Z"
+
+
+def _fbx_axes(job: JobCard) -> tuple[str, str]:
+    """(axis_up, axis_forward) requested from the exporter: card override >
+    the FBX-standard Y-up default (open question 'fbx-axis-convention')."""
+    if job.fbx_axis_up is not None:
+        return job.fbx_axis_up, job.fbx_axis_forward or FBX_AXIS_FORWARD
+    return FBX_AXIS_UP, FBX_AXIS_FORWARD
 
 
 def _sha256(path: Path) -> str:
@@ -143,6 +152,23 @@ def _assemble_and_audit(
     )
 
     info_res = runner.execute_op("info", {})
+    # Phase 4: per-file required flag against the card's effective deliverable
+    # set, and the override note when the owner's prompt changed the contract.
+    required_names = {job.job_code + s for s in job.effective_required_suffixes()}
+    for entry in files:
+        entry["required"] = entry["name"] in required_names
+    contract_note = None
+    if job.required_formats is not None:
+        contract_note = {
+            "required_suffixes": job.effective_required_suffixes(),
+            "note": (
+                "The owner's prompt overrode the required deliverable set. The "
+                "gates enforce exactly this list; the finishing chain still "
+                "emits the standard superset (a partial chain degrades the "
+                "FBX — its materials come from the bake), so files marked "
+                "required: false are extras, not contract violations."
+            ),
+        }
     report = {
         "schema": "threed-qa-report/1",
         "job_code": job.job_code,
@@ -153,7 +179,7 @@ def _assemble_and_audit(
         "job_card": job.model_dump(mode="json"),
         "gates": [r.to_dict() for r in results],
         "axis_convention": {
-            "requested": {"axis_up": FBX_AXIS_UP, "axis_forward": FBX_AXIS_FORWARD},
+            "requested": dict(zip(("axis_up", "axis_forward"), _fbx_axes(job))),
             "written": fbx_info.axes.to_dict(),
             "fbx_version": fbx_info.version,
             "creator": fbx_info.creator,
@@ -177,6 +203,8 @@ def _assemble_and_audit(
     }
     if placeholders is not None:
         report["placeholders"] = placeholders
+    if contract_note is not None:
+        report["contract_note"] = contract_note
     if extra_sections:
         report.update(extra_sections)
 
@@ -239,8 +267,8 @@ def package_delivery(
     fbx_res = runner.execute_op("export_fbx", {
         "input": str(source_glb),
         "path": str(fbx_path),
-        "axis_up": FBX_AXIS_UP,
-        "axis_forward": FBX_AXIS_FORWARD,
+        "axis_up": _fbx_axes(job)[0],
+        "axis_forward": _fbx_axes(job)[1],
     })
     _record(fbx_path, note="binary FBX exported from the source GLB "
                            "(triangulated: glTF stores triangles only)")
@@ -299,7 +327,7 @@ def finish_delivery(
     runner=None,
     log: Callable[[str], None] | None = None,
     work_dir: Path | str | None = None,
-    resolution: int = 1024,
+    resolution: int | None = 1024,
     review_renders: bool = True,
     bake_timeout_sec: float = 300.0,
     bake_device: str = "auto",
@@ -309,6 +337,10 @@ def finish_delivery(
     prepare (quad-verify + UV atlas) → bake the real 5-map set from a
     high-poly detail shell → decimate the LP to the tier budget → export the
     deliverable FBX + USDZ → assemble the package + qa_report.json.
+
+    ``resolution``: bake/atlas resolution in px. None (the CLI default) lets
+    the job card's `texture_resolution` drive it (owner prompt, Phase 4);
+    1024 when neither is set. 4K bakes need a larger bake_timeout_sec.
 
     ``bake_timeout_sec``: the subprocess timeout for the bake step. The
     300 s default is fine at 1K, but bake time scales ~with texel count —
@@ -345,6 +377,11 @@ def finish_delivery(
         runner = BlenderRunner()
 
     from ..spec.resolver import resolve_spec_to_build_params
+
+    # Phase 4: resolution precedence — explicit argument > the card's
+    # texture_resolution (owner prompt) > 1024. Callers that want the card to
+    # drive the bake pass resolution=None (the CLI's --res default).
+    resolution = resolution if resolution is not None else job.effective_texture_resolution()
 
     # Absolute from here down: the harness runs Blender in a subprocess whose
     # image-path resolution is blend-relative — a relative out_root makes
@@ -407,7 +444,10 @@ def finish_delivery(
         f"{sorted(k for k, v in bake.get('maps', {}).items() if isinstance(v, dict) and 'stats' in v)}")
 
     # ── 3. LP: decimate the delivery scene to the tier budget ───────────────
-    budget = TIER_TRI_CEILINGS.get(job.complexity)
+    # Phase 4: the card's explicit ceiling overrides the tier table (and
+    # unblocks 'complex'); the spec tri_budget remains the last-resort
+    # fallback when no ceiling is known at all.
+    budget = job.effective_polycount_ceiling()
     if budget is None:
         budget = int(getattr(spec, "tri_budget", 60_000))
     dec = _timed("decimate_lp", lambda: _require(runner.execute_op("decimate_to_budget", {
@@ -514,8 +554,8 @@ def finish_delivery(
     _timed("export_fbx", lambda: _require(runner.execute_op("export_fbx", {
         "input": str(scene_blend),
         "path": str(fbx_path),
-        "axis_up": FBX_AXIS_UP,
-        "axis_forward": FBX_AXIS_FORWARD,
+        "axis_up": _fbx_axes(job)[0],
+        "axis_forward": _fbx_axes(job)[1],
     }), "export_fbx"))
     _record(fbx_path, note="exported from the LIVE QUAD-CLEAN SCENE (owner "
                            "decision): quads preserved, n-gon gate meaningful, "

@@ -360,7 +360,7 @@ def package(
     out_root: str = typer.Option("output/packages", "--out-root", help="Root directory for packages"),
     spec: str = typer.Option(None, "--spec", help="ObjectSpec JSON instead of a source GLB: run the full T3 finish chain (build → UV atlas → bake → decimate → live-quad FBX)"),
     template: str = typer.Option(None, "--template", help="Product-class template YAML instead of a spec: compiled with the job card's dimensions (T4)"),
-    resolution: int = typer.Option(1024, "--res", help="Texture resolution for --spec/--template bakes"),
+    resolution: Optional[int] = typer.Option(None, "--res", help="Texture resolution for --spec/--template bakes (default: the job card's texture_resolution, else 1024)"),
     bake_timeout: float = typer.Option(300.0, "--bake-timeout", help="Bake subprocess timeout in seconds (4K bakes need ~16x the 1K time; 3600 is comfortable)"),
     bake_device: str = typer.Option("auto", "--bake-device", help="Cycles compute device for bakes: auto (OptiX>CUDA>HIP>ONEAPI>METAL, CPU fallback), a specific type (optix/cuda/...), or cpu"),
 ):

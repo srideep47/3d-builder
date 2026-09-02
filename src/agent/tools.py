@@ -180,7 +180,9 @@ AGENT_TOOLS_SCHEMA: list[dict[str, Any]] = [
                     },
                     "resolution": {
                         "type": "integer",
-                        "description": "Bake texture resolution (default 1024; 4K bakes need bake_timeout_sec ~3600).",
+                        "description": "Bake texture resolution. Omit to use the job card's "
+                                       "texture_resolution (owner prompt), else 1024. 4K bakes "
+                                       "need bake_timeout_sec ~3600.",
                     },
                     "bake_timeout_sec": {
                         "type": "number",
@@ -593,7 +595,9 @@ class AgentToolExecutor:
                     spec_obj,
                     out_root=Path(args.get("out_root", "output/packages")),
                     runner=self.runner,
-                    resolution=int(args.get("resolution", 1024)),
+                    # None when absent → the job card's texture_resolution
+                    # (owner prompt) → 1024 (finish_delivery resolves)
+                    resolution=int(args["resolution"]) if args.get("resolution") is not None else None,
                     review_renders=bool(args.get("review_renders", True)),
                     bake_timeout_sec=float(args.get("bake_timeout_sec", 300.0)),
                     bake_device=str(args.get("bake_device", "auto")),

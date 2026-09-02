@@ -1430,3 +1430,140 @@ boundary 24, islands 12, dimensions gate green).
 **Suite: 284 passed in 138 s** (263 baseline + 21 new; baseline grew,
 nothing re-baselined). MAYA00053153 dims untouched (rule 9). Committed, no
 push.
+
+## Session log — 2026-09-02 (round 7: Phase 4 — intake, prompt → JobCard, owner textures)
+
+### What the owner's prompt can now drive (all dynamic, nothing hardcoded)
+
+`src/client/job.py` extended — NO parallel structure. New optional JobCard
+fields, all `None` = contract default, all consumed through
+`effective_*()` helpers so an override and the enforced number cannot
+drift:
+
+| field | effect | default (contract) |
+|---|---|---|
+| `polycount_ceiling` | overrides the tier table; UNBLOCKS `complex` (unknown ceiling → otherwise fail closed) | simple 50k (provisional) / medium 200k (observed) |
+| `polycount_semantics` | which count the gate compares: `triangles` / `faces` / `triangle_equivalent` | triangle_equivalent (conservative) |
+| `file_size_caps` | per-suffix `SizeCap(value, basis)` — MB (decimal, 10⁶) vs MiB (2²⁰) kept verbatim; the byte counts differ by 4.9% | observed decimal-MB caps (FBX 10 MB, LP 15 MB, HP 50 MB) |
+| `required_formats` | defines "complete package" for the naming/file-size gates | full 9-file contract set |
+| `texture_resolution` | bake/atlas resolution when the caller passes `resolution=None` (now the CLI default) | 1024 px |
+| `fbx_axis_up`/`fbx_axis_forward` | FBX export axes (must be a non-parallel pair) | Y-up, -Z-forward |
+| `intake_evidence` | constraint → quoted prompt fragment; rides into qa_report.json | — |
+
+Settled decision (recorded here, pinned in tests): `required_formats`
+drives the GATES and qa_report annotation (`required: true/false` per
+emitted file + `contract_note`), NOT conditional emission — the finishing
+chain always emits the standard superset because a partial chain degrades
+the FBX (its materials come from the bake).
+
+### Intake: prompt → JobCard, deterministic and loud
+
+`intake_from_prompt()` (regex, no LLM) + `dump_job_yaml()` (round-trips
+`load_job`, verified). Extracts ONLY explicitly stated constraints;
+every silence or ambiguity is an `IntakeError` — rule 9 extended past
+dimensions to every constraint:
+
+- dims: `L x W x H <unit>` (unit REQUIRED; bare dims → error naming the
+  triple; absent → placeholder path needs `placeholder_dims` +
+  `placeholder_unit` together, refusal behavior unchanged);
+- polycount: ceiling word + poly noun required (kills prose
+  false-positives like "faces 3 challenges"); disagreeing duplicates
+  error; non-integer ceilings error ("intake does not round a
+  constraint");
+- file-size caps: must NAME the deliverable; an orphan "max 20 MB"
+  errors ("intake never guesses the target"); MB/MiB basis verbatim;
+- resolution: `2048px`, or `2K` only with a texture word (a bare "8k" is
+  more likely "8k tris"); conflicting statements error;
+- formats: labeled clause only ("Formats: FBX, GLB"); unknown token
+  fails loudly naming the known tokens;
+- axis map: all three of L/W/H or none; FBX axes: up+forward pair or
+  nothing (half-specified convention is a guess);
+- complexity/orientation: explicit caller argument > prompt statement >
+  error. Never guessed.
+
+### Owner-supplied textures: the drop-directory index
+
+`src/textures/owner_index.py` — scans `input/textures/owner/<surface>/`,
+one sub-directory per surface with the SAME canonical map names the
+harness `_find` already consumes (albedo/roughness/height + .jpg/disp.png
+aliases), because a selected surface's path goes STRAIGHT into
+`PBRMaterial.texture_dir` (triplanar BOX projection — no copying, no
+renaming). Writes deterministic `index.json` with measured facts per map
+(resolution_px, sha256, edge_wrap_delta_mean), skipped dirs with
+reasons, and the selection contract in the index itself: **if a required
+surface has no supplied file, compose from CC0 scans; NEVER generate one
+with a diffusion model** (does not tile seamlessly, cannot produce a
+true normal map).
+
+`edge_wrap_delta_mean` = mean absolute per-channel diff (0–255) between
+opposite edges: 0 = edge VALUES continue across the tile boundary.
+Documented caveat (pinned as behavior in tests): a 1px checker is
+geometrically tileable yet reads ~255 — the number measures value
+continuity, not tiling correctness; judgment stays with the brain.
+
+### Bugs the new tests caught (production fixes this round)
+
+1. `_POLY_NOUN` lacked `faces?` — its own docstring promised "no more
+   than 8000 faces" but the regex only knew tri/poly nouns; faces-
+   semantics statements were silently ignored (worse than erroring: the
+   ceiling would silently default). Fixed; `polycount_semantics="faces"`
+   now extracts.
+2. The tabletop orientation pattern `\btable[- ]top\b` missed the
+   one-word spelling "Tabletop" → a tabletop prompt errored with "no
+   orientation". Fixed to `\btable[- ]?top\b`.
+3. Pillow deprecation: `Image.getdata` is removed in Pillow 14 —
+   `_edge_wrap_delta_mean` rewritten on `tobytes()` (identical
+   arithmetic, zero warnings).
+
+### Gates + packaging threading (measured, pinned)
+
+- `check_naming`/`check_polycount`/`check_file_sizes` read effective
+  values only; existing message pins preserved verbatim ("50,000"
+  ceiling text, "10.00MB > 10MB" offender format).
+- faces semantics is a REAL constraint, pinned: 150k faces / 290k
+  tri-eq passes a 200k `faces` ceiling that triangle_equivalent fails.
+- MB vs MiB pinned: a 12,000,000-byte FBX passes "12 MiB"
+  (12,582,912 B) and fails "12 MB" — the basis is carried, never
+  assumed.
+- `complex` + no ceiling fails closed ("the job card sets no
+  polycount_ceiling override — ask the client, do not guess"); the
+  override unblocks it.
+- `finish_delivery` threads the card end-to-end (stubbed-chain test
+  with a fake independent FBX parse): decimate budget = card ceiling
+  (beats both tier table and spec tri_budget), bake resolution =
+  card's 2048 when the CLI passes None, FBX exported with the card's
+  Z-up/Y-forward pair, `axis_convention.requested` + per-file
+  `required` flags + `contract_note` in qa_report.json, all six gates
+  green against matching stub facts.
+- CLI `--res` default None → the card's `texture_resolution`, else
+  1024; the agent `finish` tool threads None the same way (it no
+  longer forces 1024 over the card).
+
+### Tests
+
+`tests/test_client_intake.py` (37): SizeCap basis math; every effective
+helper (incl. complex-tier unblock, semantics default, cap fallbacks);
+card validation errors (unknown format/cap key, empty formats, half and
+parallel FBX pairs); intake happy paths (full prompt extracting all
+eight constraint kinds + evidence; metric dims; noun-first polycount;
+faces semantics + k suffix; px resolution + num-first caps; explicit
+args beating prompt statements); every refusal path (bare dims, no
+dims, conflicting dims/polycount/resolution, orphan cap, unknown format
+token, partial axis map, FBX up-only, missing complexity/orientation,
+placeholder without unit); YAML round-trip with card equality; gate
+overrides (complex fail-closed/ceiling override/faces
+semantics/naming subset/MiB-vs-MB); finish threading via the stubbed
+chain + explicit-resolution-beats-card.
+
+`tests/test_owner_textures.py` (11): edge-wrap metric (flat 0.0, seam
+>100, checker caveat ≥200, 1px → None); index surfaces sorted with
+measured facts (resolution, sha256 vs hashlib on disk, wrap, min
+resolution, other_files); .jpg and disp.png aliases; skipped dirs
+(normal-only drop, hidden) + root files; selection contract carried in
+the index; index.json written + deterministic across runs + ignores
+itself; write=False; missing root fails loud.
+
+**Suite: 332 passed in 130 s** (284 baseline + 48 new; baseline grew,
+nothing re-baselined). MAYA00053153 dims untouched (rule 9). Committed
+under the owner's identity, no push.
+

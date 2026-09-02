@@ -10,8 +10,13 @@ Design contract:
   we never learn about a failure from their validator.
 - Product-agnostic (rule 11): these functions know file names, numbers and
   axes. Any product noun appearing here means the abstraction leaked.
-- The complete-file list lives in contract.py and is shared with
+- The complete-file list lives in contract.py (default) with the job card's
+  `required_formats` as the per-job override, and is shared with
   check_file_sizes (owner amendment 1) — the gates cannot drift apart.
+- Phase 4: every constraint reads the card's EFFECTIVE value
+  (JobCard.effective_* — explicit owner override > contract default), never
+  a module constant, so a per-job override cannot drift from what is
+  enforced.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .contract import MB, REQUIRED_DELIVERABLES, TIER_TRI_CEILINGS, required_filenames
+from .contract import MB
 from .job import JobCard
 from .units import from_metres
 
@@ -106,7 +111,9 @@ def _unverifiable(gate: str, reason: str) -> GateResult:
 
 
 def check_naming(package_dir: Path, job: JobCard) -> GateResult:
-    """Every required deliverable from contract.py is present, exact name.
+    """Every required deliverable is present, exact name. The required set is
+    the card's effective list (contract default unless the owner's prompt
+    overrode it — Phase 4).
     Presence is checked against the actual directory listing (which reports
     real on-disk casing) — Windows filesystems are case-insensitive, so a
     path stat would accept `<job>_ao.png` as `<job>_AO.png`.
@@ -115,9 +122,11 @@ def check_naming(package_dir: Path, job: JobCard) -> GateResult:
         actual = {p.name for p in package_dir.iterdir() if p.is_file()}
     except OSError:
         actual = set()
-    missing = [name for name in required_filenames(job.job_code) if name not in actual]
+    suffixes = job.effective_required_suffixes()
+    missing = [name for name in (job.job_code + s for s in suffixes)
+               if name not in actual]
     expected = f"{job.job_code}.fbx and {job.job_code}_* deliverables " \
-               f"({len(REQUIRED_DELIVERABLES)} files)"
+               f"({len(suffixes)} files)"
     if missing:
         return GateResult("Naming", False, expected,
                           f"{len(missing)} missing", f"Missing: {', '.join(missing)}")
@@ -145,26 +154,36 @@ def check_ngons(job: JobCard, facts: MeshFacts | None) -> GateResult:
 
 
 def check_polycount(job: JobCard, facts: MeshFacts | None) -> GateResult:
-    """Tier-ceiling triangle budget. Ceiling values and their provenance live
-    in contract.TIER_TRI_CEILINGS (simple = 50k PROVISIONAL, medium = 200k
-    observed, complex = unknown → fail closed)."""
-    ceiling = TIER_TRI_CEILINGS[job.complexity]
+    """Polycount ceiling. The EFFECTIVE ceiling comes from the card
+    (JobCard.effective_polycount_ceiling: explicit owner override >
+    contract.TIER_TRI_CEILINGS — simple = 50k PROVISIONAL, medium = 200k
+    observed, complex = unknown → fail closed until overridden). Semantics
+    likewise (triangles | faces | triangle_equivalent; the contract default
+    is the conservative triangle_equivalent — open question
+    'polycount-semantics')."""
+    ceiling = job.effective_polycount_ceiling()
     if ceiling is None:
         return GateResult(
             "Polycount", False, f"known ceiling for tier '{job.complexity}'",
             "no known ceiling",
             f"No polycount ceiling is known for complexity tier '{job.complexity}' "
-            "(simple is provisional 50k, medium is observed 200k) — ask the client, "
+            "(simple is provisional 50k, medium is observed 200k) and the job "
+            "card sets no polycount_ceiling override — ask the client, "
             "do not guess (rule 9)",
         )
     if facts is None:
         return _unverifiable("Polycount", "no mesh facts (Blender unavailable or FBX missing)")
-    tris = facts.triangle_equivalent
-    if tris <= ceiling:
-        return GateResult("Polycount", True, f"Max: {ceiling:,}", f"Polycount: {tris:,}",
-                          f"Polycount: {tris:,} against Max: {ceiling:,}")
-    return GateResult("Polycount", False, f"Max: {ceiling:,}", f"Polycount: {tris:,}",
-                      f"Polycount: {tris:,} exceeds Max: {ceiling:,} (tier '{job.complexity}')")
+    semantics = job.effective_polycount_semantics()
+    value = {"triangle_equivalent": facts.triangle_equivalent,
+             "triangles": facts.tri_count,
+             "faces": facts.faces_total}[semantics]
+    if value <= ceiling:
+        return GateResult("Polycount", True, f"Max: {ceiling:,}", f"Polycount: {value:,}",
+                          f"Polycount: {value:,} against Max: {ceiling:,} "
+                          f"(counted as {semantics})")
+    return GateResult("Polycount", False, f"Max: {ceiling:,}", f"Polycount: {value:,}",
+                      f"Polycount: {value:,} (counted as {semantics}) exceeds "
+                      f"Max: {ceiling:,} (tier '{job.complexity}')")
 
 
 # ── Dimensions ───────────────────────────────────────────────────────────────
@@ -230,22 +249,26 @@ def check_orientation(job: JobCard, facts: MeshFacts | None) -> GateResult:
 
 
 def check_file_sizes(package_dir: Path, job: JobCard) -> GateResult:
-    """Every capped deliverable from contract.py is within its observed cap.
-    Shares the file list with check_naming (owner amendment 1)."""
+    """Every capped deliverable is within its EFFECTIVE cap: the card's
+    override (with its own MB/MiB basis — the byte count differs by ~4.9%)
+    > the contract's observed decimal-MB caps. Shares the file list with
+    check_naming (owner amendment 1)."""
     offenders = []
     checked = 0
-    for deliverable in REQUIRED_DELIVERABLES:
-        if deliverable.max_bytes is None:
+    caps_parts = []
+    for suffix in job.effective_required_suffixes():
+        cap = job.effective_size_cap(suffix)
+        if cap is None:
             continue  # no known cap (usdz, textures) — presence is Naming's job
-        path = package_dir / (job.job_code + deliverable.suffix)
+        caps_parts.append(f"{suffix} ≤ {cap.describe()}")
+        path = package_dir / (job.job_code + suffix)
         if not path.is_file():
             continue  # missing files are Naming's failure; don't double-report
         checked += 1
         size = path.stat().st_size
-        if size > deliverable.max_bytes:
-            offenders.append(f"{path.name}: {size / MB:.2f}MB > {deliverable.max_bytes / MB:.0f}MB")
-    caps = ", ".join(f"{d.suffix} ≤ {d.max_bytes // MB}MB" for d in REQUIRED_DELIVERABLES
-                     if d.max_bytes is not None)
+        if size > cap.max_bytes:
+            offenders.append(f"{path.name}: {size / MB:.2f}MB > {cap.describe()}")
+    caps = ", ".join(caps_parts)
     if offenders:
         return GateResult("File sizes", False, caps, f"{len(offenders)} over cap",
                           "; ".join(offenders))
