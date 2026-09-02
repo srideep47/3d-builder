@@ -2214,3 +2214,111 @@ validation, positive-triple target_size), +2 in `test_img3d.py`
 **Suite: 439 passed in 159.71 s** (439 = 422 + 17; baseline grew, nothing
 re-baselined). S1 honored (no live vision calls). Committed under the
 owner's identity, no push.
+
+## Session log — 2026-09-02 (round 14: Phase 8 item 4 — RETOPOLOGY scoped, measured, proven)
+
+**Deliverable**: `docs/MESH_SOURCES.md` — the retopology scoping doc the
+master order asked for, anchored end-to-end on direct measurements. No
+retopology implementation was committed (that is R1/R2 below); no
+organics were enabled; the scope boundary held. Evidence fixtures
+committed as job cards `input/jobs/RETOPO0001.yaml` (5,119-tri scan,
+424.389 × 421.198 × 445.512 mm at full measured precision) and
+`RETOPO0002.yaml` (81,919-tri scan, 428.304 × 424.246 × 447.386 mm).
+
+### The audit that corrected the plan's assumption
+
+The order's premise: feed a dense triangulated organic mesh in and "it
+fails all of them [the gates]". Measured: it doesn't. The 5,119-tri scan
+with one hole passes ALL SIX client gates through the full T3 chain
+(dimensions Δ+0.000 mm; triangles aren't n-gons; the 8.3 base placement
+grounds it). The gates measure the contract, not mesh quality. What
+actually fails, with numbers: UV atlas shattering (5,118 islands ≈ one
+per face, texel density spread 36.5–204.0 texels/m = 5.59× ratio,
+vs 124 islands / 1.00 on the mattress), polycount at real scan scale
+(81,919 > 50,000), finish-chain collapse at scale
+(prepare_delivery_scene TIMEOUT at 300.0 s), no watertight check anywhere
+in the package path (the hole ships; the internal verifier logs
+non-watertight as a warning, `passed: True`), and no quad editability.
+
+### Root cause found and fixed-in-evidence: glTF vertex splitting
+
+The fixture GLB stores 15,355 verts for 5,119 triangles (per-attribute
+split); Blender's import preserves it, so every edge is a boundary edge.
+That split — not "triangles" — is what shatters the atlas (smart_project
+cannot walk across faces), what makes QuadriFlow refuse the raw import
+("Remeshing failed"), and what the importer's `merge_vertices=True` does
+NOT repair (measured: 15,355 verts unchanged; it only fuses identical
+attributes). The repair is a by-distance weld, `remove_doubles` at
+1e-6 m: 15,355 → 2,562 verts / 15,355 → 3 boundary edges in 0.02 s
+(81,919-tri scan: 245,653 → 40,962 verts in 0.25 s).
+
+### Tool survey (Blender 4.5.13, CPU paths, this machine)
+
+- **QuadriFlow** (op only; the Remesh modifier has no quad mode —
+  BLOCKS/SMOOTH/SHARP/VOXEL): welded 5,119 tris → 1,796 quads, hole
+  closed, 0.57 s; welded 81,919 tris → 7,812 quads in 2.66 s; target
+  honored within ~10%.
+- **Voxel remesh**: all quads, holes closed, 0.03–0.08 s; density ladder
+  0.012→6,152 / 0.008→14,132 / 0.006→25,278 / 0.005→36,578 quads;
+  surface shrinks ~½ voxel (−4.0/−3.7/−2.2 mm at 0.008).
+- **Decimate** triangulates quads (14,132 quads ×0.5 → 6,430 tris +
+  3,851 quads): a reducer, not a retopo tool.
+- **Measured defect #1**: QuadriFlow SILENTLY NO-OPS on voxel-remeshed
+  geometry — byte-identical mesh, 0.01 s, no error, at every target
+  (2k–12k), after shade_smooth / duplicate / normals-clear / GLB round
+  trip. Voxel and QuadriFlow are alternatives, never a chain; any
+  harness chaining of remesh steps must verify the face count changed.
+- **Measured defect #2**: voxel_size 0.004 collapses the fixture to 400
+  quads with dims −28/−17/−61 mm (deterministic across trials,
+  adaptivity 0.0, unexplained). Usable floor on ~0.4 m objects: 0.005.
+- **The GLB round trip destroys quads**: 1,796 quads → 3,592 tris
+  (exporter triangulates; verts stay welded if smooth-shaded and
+  UV-free). Retopology must therefore run in the live harness scene,
+  never via a pre-processed GLB hop.
+
+### End-to-end proof (full `src.cli package` T3 runs)
+
+| run | gates | LP tri-eq | islands | texel ratio | chain |
+|---|---|---|---|---|---|
+| 5,119-tri scan, split import (status quo) | ALL PASS | 5,119 | 5,118 | 5.59 | 45.7 s |
+| same, welded | ALL PASS | 5,119 | 212 | 1.00 | 19.9 s |
+| same, weld + QuadriFlow 2000 | ALL PASS | 3,592 | 221 | 1.00 | 19.0 s |
+| 81,919-tri scan, split import | — | — | — | — | TIMEOUT 300 s |
+| same, weld + QuadriFlow 8000 | ALL PASS | 15,624 | 367 | 1.00 | 44.0 s |
+
+Welding alone fixes the texture story at fixture scale; retopology is
+what rescues real scan scale (timeout → delivery) and buys polycount
+control + closed manifolds + (in-scene) quads.
+
+### Scoping outcomes (in the doc)
+
+Output contract (7 measurable, fail-closed criteria incl. the no-op
+guard), integration design (optional `retopology` block on file-backed
+parts, applied by the harness in-scene after import, before
+rescale/place; corrector must never drop it; recipe persisted under
+`run_dir/retopo/`), phased plan R1 weld-on-import → R2 the block →
+R3 external/neural backends, and the 8.5 dependency: neural image-to-3D
+emits dense tri soup, so R1 is a hard prerequisite before TRELLIS 2 vs
+Hunyuan3D 2.1 (owner's choice, one at a time).
+
+### Confessions (§H)
+
+- My first two survey probes had a broken UV-island counter: bmesh
+  `edge.link_loops` yields one loop per adjacent face (the corner where
+  the edge starts), so the "both endpoints match" union never fired and
+  the counter returned the FACE COUNT for every mesh. The control case
+  (born-in-Blender sphere: "512 islands" on 512 faces) exposed it. The
+  corrected counter was validated against two known cases (sphere → 6;
+  split scan → 5,118, matching the production atlas exactly) before any
+  number was trusted. All numbers above are from the corrected counter
+  or from the pipeline's own qa_report.
+- One probe exported intermediates after a scene reset, so a UV
+  measurement ran on the wrong mesh; discarded and re-measured live.
+- The `merge_vertices=True` repair hypothesis was wrong — measured, and
+  the doc says so.
+
+### Tests
+
+No code changed in this round — it is a scoping deliverable. **Suite:
+439 passed in 163.60 s** (baseline unchanged). S1 honored (no live
+vision calls). Committed under the owner's identity, no push.

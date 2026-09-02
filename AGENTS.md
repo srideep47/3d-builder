@@ -16,6 +16,16 @@
 - All lengths are stored in **meters** in internal representations.
 - Origin is centered at bottom-center `(0, 0, 0)` so models sit on the ground plane.
 - Geometry builds must verify against dimension tolerances before final export.
+- **Retopology is scoped, not built** — `docs/MESH_SOURCES.md` holds the
+  measured audit (why dense triangulated meshes shatter the UV atlas:
+  glTF per-attribute vertex splitting, NOT triangles), the tool survey
+  (weld `remove_doubles` 1e-6 m is the root-cause fix; QuadriFlow works
+  on welded meshes; voxel remesh collapses at voxel_size 0.004; QuadriFlow
+  silently no-ops on voxel output — never chain them; the GLB round trip
+  triangulates quads, so retopology must run in the live harness scene),
+  the 7-point output contract, and the phased plan (R1 weld-on-import →
+  R2 `retopology` spec block → R3 external backends). Phase 8.5 neural
+  image-to-3D depends on R1. Evidence fixtures: `input/jobs/RETOPO0001/0002.yaml`.
 - **Two Python environments, never mixed**: main `.venv` (light deps) and
   `services/img3d_service/.venv` (torch cu124 + model deps; Forge only).
   Start the service with `scripts/start-img3d.ps1 [tripo_sr]` before builds

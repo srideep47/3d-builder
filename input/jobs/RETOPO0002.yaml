@@ -1,0 +1,17 @@
+# RETOPO0002 — scan-scale retopology evidence fixture (Phase 8 item 4).
+# NOT a product job: dimensions are the MEASURED bbox of the generated
+# fixture output/meshsrc/dense_scan_big.glb (81,919 triangle faces — over
+# the 50k client ceiling, one occlusion hole), authored at full measured
+# precision for pipeline-exercise only. Rule 9 unaffected.
+job_code: RETOPO0002
+product_class: scan_probe
+dims:
+  length: 428.304
+  width: 424.246
+  height: 447.386
+  unit: MM
+dims_placeholder: false
+complexity: simple
+orientation: floor
+part_scope: "scan probe (fixture)"
+reference_dir: input/references/MAYA00053153
