@@ -2622,3 +2622,90 @@ adopt-not-respawn (+ shutdown leaves adopted server alive, generate
 still works), spawn command flags, cold-generate-requires-load.
 **Suite: 464 passed in 322.45 s** (baseline 451 + 13). S1 honored.
 Committed under the owner's identity, no push.
+
+### Round 17 addendum — the deferred live GPU verification (window opened)
+
+The owner handed over the GPU ("the gpu is all yours do what ever you
+want"); the R3 confession "no live GPU generation was run" is now
+discharged. Everything below is direct measurement on this machine.
+
+**Live legs (bake-off, 2 images × 3 targets each, `input/bakeoff/`):**
+
+| backend | done | avg s/gen | avg tris | watertight | avg bodies | scale err | VRAM peak |
+|---|---|---|---|---|---|---|---|
+| trellis (q8, res 512) | 6/6 | 37.71 | 49,999 | 0.0 | 198.67 | 0.0 m | 3,489 MiB |
+| tripo_sr | 6/6 | 1.32 | 50,000 | 0.0 | 2.0 | 0.0 m | 10,211 MiB |
+
+Both legs at the exact 50k budget (the decimation fix, below), scale
+error 0.0 m on every run. Raw undecimated TripoSR control (max_tris
+100M, target [0.30, 0.20, 0.15] m): 110,638 tris, 3 bodies,
+**watertight**, 0.00304 m³ — the model's own output is closed; the
+non-watertightness measured on BOTH decimated legs is our QEM step's
+doing. Evidence: `output/bakeoff_20260903_013109.json` (trellis),
+`output/bakeoff_20260903_015828.json` (tripo_sr),
+`output/trellis_smoke/tripo_raw_control.json`.
+
+**Three defects found by the live run, all fixed fail-closed:**
+
+1. **The bake-off `--backend` flag was a label, not a selector.** The
+   service runs ONE backend per process (selected at startup); the
+   first "tripo_sr" leg was 6 more TRELLIS runs wearing the wrong name
+   (caught via `/health`: model "trellis", jobs_total 12). Fixed:
+   `bakeoff_img3d.py` reads the service's selected backend and REFUSES
+   a mismatched `--backend` (exit 2, restart hint) and verifies
+   `model` on every `/result` poll. Verified live in both directions.
+   The mislabeled JSON + GLBs were deleted; pre-R3 bake-offs only
+   scored mock, so no historical data was poisoned.
+2. **Both providers swallowed the decimation failure.** trimesh 5.x
+   `simplify_quadric_decimation` takes `percent` (0–1) first — a face
+   count there raises ValueError, which a silent guard swallowed while
+   shipping 142,688 avg tris against the 50,000 budget (the pre-fix
+   trellis leg). Fixed: shared `decimate_to_budget()` in
+   `providers/base.py` (face_count kwarg, loud warning when the
+   simplifier is unavailable), wired into both providers and pinned by
+   the trellis tests.
+3. **TripoSR generate() had never run — two latent breaks.** The
+   vendored `TSR.extract_mesh` REQUIRES `has_vertex_color` (TypeError)
+   and returns a LIST of meshes (upstream run.py indexes [0]; our call
+   did `mesh.export(...)` → "'list' object has no attribute 'export'").
+   Both hidden until now by defect 1. Fixed with
+   `has_vertex_color=False` + `meshes[0]`; pinned in the new
+   `tests/test_img3d_tripo.py` (fake TSR, 3 tests) so the contract
+   survives without torch.
+
+**Voxel consolidation measured (the R2 question answered):** voxel
+remesh has UNION semantics — nested closed shells collapse to the
+OUTERMOST surface. Raw TRELLIS output (4 shells): 1 body, 7,556 quads
+at voxel 0.005 / 2,994 at 0.008, boundary 0, volume 0.000253 →
+0.00357 m³. Decimated output (133 bodies, 9,711 open edges the weld
+does not heal): 133 → 1 body, 9,711 → 0 open edges. QuadriFlow does
+NOT consolidate (per-component remesh; 4 shells stay 4). Deterministic
+twin (reversed inner ico-sphere inside an outer one) pins both
+semantics in `tests/test_retopology.py`; the `before`-fingerprint
+assertion caught my own wrong fixture edit (subdivisions 2 vs 3)
+during development — the pin did its job. Finding recorded in
+`docs/MESH_SOURCES.md` §5.3.
+
+**OpenVDB pinch hazard (measured, documented, not a blocker):** voxel
+output can carry coincident-but-distinct vertices (synthetic twin: 6
+verts / 9 pinch edges, 0 open edges, live Euler χ = 2) that read
+non-manifold after GLB round trip + position weld — the EXACT-boolean
+zero-length-edge class. Tests pin bodies + open edges, never
+`is_watertight`; live neural outputs measured clean.
+
+**Confessions (§H):** the mislabeled leg is the round's headline
+defect — it had silently verified nothing about TripoSR while looking
+like a completed comparison; the two provider breaks it hid were found
+only when the GPU work forced a real generation. Near-miss: my first
+VRAM-peak extraction sorted the log by the utilization column instead
+of MiB (would have reported 10,211 as ~99 MiB nonsense) — caught by
+reading the line before quoting it. The raw control needed two
+attempts (first exposed defect 3's list bug; the service restart
+in-between is why two service lifetimes appear in the logs). Round 18
+follow-up registered, not coded: analyst-prompt guidance for voxel
+retopology on delivery-bound neural parts + per-body decimation
+(§13.3).
+
+**Tests:** +3 (`tests/test_img3d_tripo.py`) +2 blender-marked
+(`tests/test_retopology.py` consolidation pair). Full suite below in
+the commit. Committed under the owner's identity, no push.

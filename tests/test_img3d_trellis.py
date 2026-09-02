@@ -230,23 +230,70 @@ def test_generate_passthrough_keeps_server_bytes(tmp_path, remote_env):
 
 def test_generate_decimation_guard(tmp_path, remote_env):
     """max_tris below the mesh: decimate when fast-simplification is present,
-    otherwise skip loudly-tolerated (the budget is enforced downstream) —
-    never crash, never report a mesh we didn't deliver."""
+    otherwise warn and ship the full mesh honestly (the budget is enforced
+    downstream) — never crash, never report a mesh we didn't deliver."""
+    img = _make_image(tmp_path)
+    backend = TrellisBackend()
+    try:
+        import fast_simplification  # noqa: F401
+
+        out = backend.generate(
+            GenerateParams(image_path=img, output_dir=tmp_path, max_tris=10)
+        )
+        assert out.tri_count <= 10
+    except ImportError:
+        import trimesh
+
+        with pytest.warns(UserWarning, match="decimation skipped"):
+            out = backend.generate(
+                GenerateParams(image_path=img, output_dir=tmp_path, max_tris=10)
+            )
+        reloaded = trimesh.load(out.glb_path, force="mesh", process=True)
+        assert out.tri_count == len(reloaded.faces)  # full mesh, honestly counted
+
+
+def test_generate_decimation_uses_face_count_kwarg(tmp_path, remote_env, monkeypatch):
+    """trimesh 5.x: the first positional parameter of simplify_quadric_decimation
+    is `percent` (a 0-1 fraction) — a face count passed positionally raises
+    ValueError and the old guard swallowed it, shipping ~3x the budget (caught
+    live in the bake-off: 142,688 avg tris against 50,000). Pin the kwarg."""
+    import trimesh
+
+    recorded = {}
+
+    def fake_simplify(self, *args, **kwargs):
+        recorded["args"] = args
+        recorded["kwargs"] = kwargs
+        return self  # this test pins the call shape, not the decimation math
+
+    monkeypatch.setattr(trimesh.Trimesh, "simplify_quadric_decimation", fake_simplify)
     img = _make_image(tmp_path)
     backend = TrellisBackend()
     out = backend.generate(
         GenerateParams(image_path=img, output_dir=tmp_path, max_tris=10)
     )
-    assert out.tri_count > 0
-    try:
-        import fast_simplification  # noqa: F401
+    assert recorded["args"] == ()
+    assert recorded["kwargs"] == {"face_count": 10}
+    assert out.tri_count > 10  # stub mesh returned unchanged by the fake
 
-        assert out.tri_count <= 10
-    except ImportError:
-        import trimesh
 
-        reloaded = trimesh.load(out.glb_path, force="mesh", process=True)
-        assert out.tri_count == len(reloaded.faces)  # full mesh, honestly counted
+def test_generate_decimation_warns_when_simplifier_raises(tmp_path, remote_env, monkeypatch):
+    """A raising simplifier must warn (never silently ship over budget) and
+    still deliver the mesh — the budget is enforced downstream."""
+    import trimesh
+
+    def boom(self, *args, **kwargs):
+        raise ValueError("``target_reduction`` must be between 0 and 1")
+
+    monkeypatch.setattr(trimesh.Trimesh, "simplify_quadric_decimation", boom)
+    img = _make_image(tmp_path)
+    backend = TrellisBackend()
+    with pytest.warns(UserWarning, match="decimation skipped"):
+        out = backend.generate(
+            GenerateParams(image_path=img, output_dir=tmp_path, max_tris=10)
+        )
+    assert out.tri_count > 10
+    assert out.glb_path.exists()
 
 
 def test_generate_propagates_server_error(tmp_path, remote_env):

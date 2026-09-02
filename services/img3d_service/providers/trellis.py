@@ -53,7 +53,7 @@ from pathlib import Path
 
 import httpx
 
-from .base import GenerateOutput, GenerateParams, NeuralBackend
+from .base import GenerateOutput, GenerateParams, NeuralBackend, decimate_to_budget
 
 # ilintar/trellis2-gguf ships exactly these ten files per tier; the server
 # cannot generate without the full set, so availability probes for it.
@@ -267,11 +267,7 @@ class TrellisBackend(NeuralBackend):
             # API consumers that only wanted a mesh keep the full material)
             out_path.write_bytes(r.content)
         else:
-            try:
-                if len(mesh.faces) > params.max_tris:
-                    mesh = mesh.simplify_quadric_decimation(params.max_tris)
-            except Exception:
-                pass  # simplifier optional (fast-simplification); budget enforced downstream
+            mesh = decimate_to_budget(mesh, params.max_tris, "trellis")
             if target:
                 extents = mesh.extents
                 mesh.apply_scale([target[i] / max(extents[i], 1e-9) for i in range(3)])

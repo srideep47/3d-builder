@@ -7,6 +7,7 @@ the mock backend must run in the light main environment too.
 
 from __future__ import annotations
 
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,30 @@ class GenerateOutput:
     glb_path: Path
     tri_count: int
     duration_sec: float
+
+
+def decimate_to_budget(mesh, max_tris: int, backend: str):
+    """Decimate a trimesh to the triangle budget, or warn loudly when the
+    simplifier is unavailable — never silently ship over budget.
+
+    trimesh 5.x: the first positional parameter of
+    simplify_quadric_decimation is `percent` (a 0-1 reduction fraction); a
+    face count there raises ValueError, which a silent guard swallows while
+    shipping ~3x the budget (caught live in the trellis bake-off leg:
+    142,688 avg tris against the 50,000 budget). fast_simplification is
+    optional in light environments and the delivery pipeline enforces the
+    budget downstream, so the fallback is a warning, not an error.
+    """
+    if len(mesh.faces) <= max_tris:
+        return mesh
+    try:
+        return mesh.simplify_quadric_decimation(face_count=max_tris)
+    except Exception as e:
+        warnings.warn(
+            f"{backend} decimation skipped ({type(e).__name__}: {e}); "
+            f"shipping {len(mesh.faces)} faces against the {max_tris} budget"
+        )
+        return mesh
 
 
 class NeuralBackend(ABC):

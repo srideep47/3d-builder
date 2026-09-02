@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from .base import GenerateOutput, GenerateParams, NeuralBackend
+from .base import GenerateOutput, GenerateParams, NeuralBackend, decimate_to_budget
 
 HF_MODEL_ID = "stabilityai/TripoSR"
 _VENDOR_CANDIDATES = [
@@ -136,20 +136,26 @@ class TripoSRBackend(NeuralBackend):
 
         resolution = int(params.extra.get("resolution", 256))
         code = self.model(image, self.device)
-        mesh = self.model.extract_mesh(code, resolution=resolution)
-        if mesh is None:
+        # has_vertex_color is REQUIRED by the vendored TSR (upstream run.py
+        # passes `not bake_texture`); we discard vertex colors — PBR comes
+        # from our own texture pipeline — so no color query on the triplane.
+        # extract_mesh returns ONE trimesh per scene code in the batch —
+        # a bare `.export()` on the return value dies with "'list' object
+        # has no attribute 'export'" (caught live in the bake-off leg); we
+        # always generate a single image, so index the only element.
+        meshes = self.model.extract_mesh(
+            code, has_vertex_color=False, resolution=resolution
+        )
+        if not meshes:
             raise RuntimeError("TripoSR returned no mesh for this image")
+        mesh = meshes[0]
 
         tmp_glb = params.output_dir / f"{params.image_path.stem}_tripo_raw.glb"
         mesh.export(tmp_glb)
         result = trimesh.load(tmp_glb, force="mesh", process=True)
         tmp_glb.unlink(missing_ok=True)
 
-        try:
-            if len(result.faces) > params.max_tris:
-                result = result.simplify_quadric_decimation(params.max_tris)
-        except Exception:
-            pass  # simplifier optional (fast-simplification); budget enforced downstream
+        result = decimate_to_budget(result, params.max_tris, "tripo_sr")
 
         target = params.target_size_m
         if target:

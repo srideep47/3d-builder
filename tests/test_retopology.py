@@ -199,3 +199,129 @@ def test_prepare_threads_retology_quads_into_t3(runner, holed_scan_glb):
     assert uv["overlapping_island_pairs"] == 0
     assert uv["in_bounds"] is True
     assert uv["texel_density_texels_per_m"]["ratio"] < 1.05
+
+
+# ── Voxel consolidation semantics (Phase 8.5 R3, neural evidence) ────────────
+
+
+@pytest.fixture(scope="module")
+def nested_shells_glb(runner, tmp_path_factory):
+    """The deterministic twin of multi-shell neural output (measured on
+    TRELLIS generations — 4 nested shells, 133 bodies after decimation;
+    evidence output/trellis_smoke/voxel_collapse.json): an outer ico-sphere
+    (r=0.5, outward normals) around a REVERSED inner ico-sphere (r=0.3,
+    inward normals), joined into ONE object. Imports fully split (1,920
+    verts), welds back to 324 verts / 640 tris / 0 boundary edges — two
+    closed surfaces, one inside the other."""
+    tmp = tmp_path_factory.mktemp("retopo_shells")
+    out = tmp / "nested_shells.glb"
+    code = f"""
+import bpy, bmesh
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=3, radius=0.5, location=(0, 0, 0.5))
+bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=3, radius=0.3, location=(0, 0, 0.5))
+inner = bpy.context.active_object
+bm = bmesh.new()
+bm.from_mesh(inner.data)
+bmesh.ops.reverse_faces(bm, faces=bm.faces)
+bm.to_mesh(inner.data)
+bm.free()
+objs = [o for o in bpy.data.objects if o.type == "MESH"]
+bpy.context.view_layer.objects.active = objs[0]
+for o in objs:
+    o.select_set(True)
+bpy.ops.object.join()
+bpy.ops.export_scene.gltf(filepath=r"{out}", export_format="GLB")
+"""
+    res = runner.execute_op("run_script", {"code": code})
+    assert res["success"], res.get("error")
+    return out
+
+
+def _welded_topology(glb_path):
+    """Position-weld the exported GLB at 1e-7 m — the export re-splits
+    vertices per attribute — and read bodies/watertight/volume/open edges
+    on the welded copy (the same analyzer as the neural evidence)."""
+    import numpy as np
+    import trimesh
+
+    mesh = trimesh.load(str(glb_path), force="mesh", process=True)
+    verts = np.asarray(mesh.vertices)
+    uniq, inverse = np.unique(np.round(verts, 7), axis=0, return_inverse=True)
+    faces = inverse[np.asarray(mesh.faces)]
+    topo = trimesh.Trimesh(vertices=uniq, faces=faces, process=False)
+    edges = np.sort(
+        np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]),
+        axis=1,
+    )
+    _, counts = np.unique(edges, axis=0, return_counts=True)
+    return {
+        "bodies": int(topo.body_count),
+        "watertight": bool(topo.is_watertight),
+        "volume_m3": float(topo.volume),
+        "open_edges": int((counts == 1).sum()),
+    }
+
+
+def test_voxel_remesh_consolidates_nested_shells(runner, nested_shells_glb, tmp_path):
+    """OpenVDB voxel remesh UNIONs whatever lies inside the outermost
+    surface — the consolidation measured on neural output (evidence
+    output/trellis_smoke/voxel_collapse.json: a raw TRELLIS generation's
+    4 shells → 1 body, volume 0.000253 → 0.00357 m³; a decimated generation
+    133 bodies → 1, 9,711 open edges → 0). Here the reversed inner shell
+    VANISHES into the solid: one body, all quads, the outer-envelope volume.
+
+    Do NOT assert is_watertight on the export: OpenVDB can leave
+    coincident-but-distinct vertices (measured on this very fixture: 6
+    verts / 9 pinch edges, 0 open edges) that read non-manifold after the
+    GLB round trip + position weld — the EXACT-boolean zero-length-edge
+    class. Bodies + open edges are the honest pins."""
+    out = tmp_path / "consolidated.glb"
+    result = runner.execute_op("build_from_spec", {
+        "spec": _scan_spec(nested_shells_glb, {"tool": "voxel", "voxel_size": 0.05}),
+        "output_path": str(out),
+    })
+    assert result["success"], result.get("error")
+    report = result["retopology"]["body"]
+    assert report["success"] is True
+    assert report["params"] == {"voxel_size": 0.05}
+    assert report["before"] == {"verts": 324, "faces": 640, "quads": 0,
+                                "tris": 640, "boundary_edges": 0}
+    after = report["after"]
+    assert after["quads"] == after["faces"] and after["tris"] == 0
+    assert 1200 <= after["faces"] <= 2500  # measured 1,834
+    assert after["boundary_edges"] == 0
+    dims = result["overall_bounds"]["dimensions"]
+    assert dims == pytest.approx([0.60, 0.20, 0.40], abs=1e-4)
+    topo = _welded_topology(out)
+    assert topo["bodies"] == 1  # two shells → one solid
+    assert topo["open_edges"] == 0
+    assert topo["volume_m3"] == pytest.approx(0.0242, abs=0.0015)
+
+
+def test_quadriflow_keeps_nested_shells_separate(runner, nested_shells_glb, tmp_path):
+    """The negative control: QuadriFlow remeshes per connected component —
+    no consolidation. Both shells survive as closed surfaces and the volume
+    stays HOLLOW (outer envelope minus the inner void) — choosing between
+    the tools is choosing semantics, not a quality knob."""
+    out = tmp_path / "hollow.glb"
+    result = runner.execute_op("build_from_spec", {
+        "spec": _scan_spec(nested_shells_glb, {"tool": "quadriflow", "target_faces": 800}),
+        "output_path": str(out),
+    })
+    assert result["success"], result.get("error")
+    report = result["retopology"]["body"]
+    assert report["success"] is True
+    assert report["params"] == {"target_faces": 800}
+    assert report["before"] == {"verts": 324, "faces": 640, "quads": 0,
+                                "tris": 640, "boundary_edges": 0}
+    after = report["after"]
+    assert after["quads"] == after["faces"] and after["tris"] == 0
+    assert 600 <= after["faces"] <= 1000  # measured 855
+    assert after["boundary_edges"] == 0
+    dims = result["overall_bounds"]["dimensions"]
+    assert dims == pytest.approx([0.60, 0.20, 0.40], abs=1e-4)
+    topo = _welded_topology(out)
+    assert topo["bodies"] == 2  # both shells survive
+    assert topo["watertight"] is True
+    assert topo["volume_m3"] == pytest.approx(0.0195, abs=0.001)  # hollow

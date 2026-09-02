@@ -200,6 +200,32 @@ holed sphere (0.60 × 0.20 × 0.40 m, 319 tris) at voxel 0.008 remeshes to
 (unwelded) import also remeshes to 0 faces. The harness therefore
 fail-closes on `faces == 0` after voxel remesh.
 
+**Voxel remesh UNIONs nested shells — consolidation semantics (measured
+on live neural output, R3):** a raw TRELLIS generation (4 nested closed
+shells, summed signed volume ~14× below the outer envelope's) remeshed
+at voxel 0.005 becomes ONE watertight body — 7,556 quads, 0 boundary
+edges, volume 0.000253 → 0.00357 m³ (the outer envelope as a solid;
+2,994 quads at 0.008). A QEM-decimated generation (133 bodies, 9,711
+open edges the R1 weld does NOT heal) consolidates the same way:
+133 → 1 body, 9,711 → 0 open edges at voxel 0.005. QuadriFlow does NOT
+consolidate — it remeshes per connected component and the shells
+survive (4 bodies stay 4). Deterministic twin pinned in
+`tests/test_retopology.py` (a REVERSED inner ico-sphere inside an outer
+one: voxel → 1 body at the outer-envelope volume 0.0242 m³, quadriflow
+→ 2 watertight bodies, hollow 0.0195 m³) — choosing between the tools
+is choosing semantics (solid vs hollow), not a quality knob. Evidence:
+`output/trellis_smoke/voxel_collapse.json`, `synthetic_shells.json`.
+
+**OpenVDB coincident-vertex pinches (measured; same class as the EXACT
+solver's zero-length edges):** voxel output can carry
+coincident-but-distinct vertices — on the synthetic twin, 6 verts / 9
+pinch edges (>2 faces), 0 open edges, live-scene Euler χ = 2 (closed
+genus-0). After the GLB round trip + position weld they read
+non-manifold (`is_watertight` False) with no tear. The consolidation
+tests therefore pin bodies + open edges, never `is_watertight`; the
+live neural outputs measured clean (watertight True), so this is a
+hazard class to know about, not a blocker.
+
 The Remesh modifier in 4.5 exposes modes BLOCKS / SMOOTH / SHARP / VOXEL
 only — there is no quad mode in the modifier; QuadriFlow is op-only.
 

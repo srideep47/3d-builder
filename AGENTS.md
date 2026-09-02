@@ -37,7 +37,14 @@
   a smooth-shaded mesh with UV seams still splits) is what shatters the
   UV atlas, NOT triangles; voxel remesh collapses at voxel_size 0.004;
   the GLB round trip triangulates quads, so retopology must run in the
-  live harness scene. Phased plan: R1 DONE → R2 DONE → R3
+  live harness scene. Measured on the live R3 bake-off legs: voxel
+  retopology CONSOLIDATES nested shells (union semantics — neural
+  multi-shell output collapses to the outermost surface, one closed
+  body, and heals QEM-decimation open edges; quadriflow does NOT
+  consolidate), while whole-mesh QEM decimation to 50k FRAGMENTS
+  multi-shell neural output and leaves open edges the weld does not
+  heal — so a delivery-bound neural part should carry a voxel
+  retopology block. Phased plan: R1 DONE → R2 DONE → R3
   external backends. Phase 8.5 neural image-to-3D rides R1+R2 (dense
   neural output enters as a file-backed part). Evidence fixtures:
   `input/jobs/RETOPO0001/0002.yaml`.
