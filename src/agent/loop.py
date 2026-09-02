@@ -184,10 +184,50 @@ class AgentLoop:
         """Deterministic routing fix: 'organic' shapes cannot be built
         parametrically — if the analyst/corrector left method as 'parametric'
         on one, route it to image_to_3d (the harness would otherwise fail with
-        'Unknown shape organic')."""
+        'Unknown shape organic'). A part that already declares a file-backed
+        source (imported/scanned) KEEPS it: an organic mesh that exists as a
+        file is legitimately imported — clobbering it would retarget the part
+        at a neural generation it never asked for (mesh-source contract)."""
         for p in spec.parts:
-            if p.shape == ShapeType.ORGANIC and p.method != GenerationMethod.IMAGE_TO_3D:
+            if p.shape == ShapeType.ORGANIC and p.method in (
+                GenerationMethod.PARAMETRIC,
+                GenerationMethod.CUSTOM_SCRIPT,
+            ):
                 p.method = GenerationMethod.IMAGE_TO_3D
+
+    def _validate_imported_parts(self, spec: ObjectSpec, emit=None) -> None:
+        """Mesh-source contract, loop side: imported/scanned parts carry
+        authored mesh files — nothing generates them, so a missing file is
+        unsatisfiable (unlike neural parts, where the service materializes
+        the mesh). Resolve each path to ABSOLUTE (the harness subprocess must
+        not depend on the caller's CWD) and fire a loud event when the file
+        is absent; the build then skips the part (harness warning) and the
+        gates fail honestly downstream."""
+        imported_parts = [
+            p for p in spec.parts
+            if p.method in (GenerationMethod.IMPORTED, GenerationMethod.SCANNED)
+        ]
+        for part in imported_parts:
+            if not part.mesh_path:
+                continue  # schema already refuses this; nothing to resolve
+            p = Path(part.mesh_path)
+            if p.exists():
+                resolved = str(p.resolve())
+                if resolved != part.mesh_path:
+                    part.mesh_path = resolved
+                continue
+            if emit is not None:
+                try:
+                    emit(
+                        "mesh_source_error",
+                        part=part.name,
+                        method=part.method.value,
+                        mesh_path=str(p),
+                        error="mesh file not found — the spec references a file "
+                              "that does not exist on this machine",
+                    )
+                except Exception:
+                    pass
 
     def _resolve_part_image(self, spec: ObjectSpec, part, image_paths: list[Path]) -> Path | None:
         """Best reference image for an image_to_3d part: its declared crop,
@@ -605,8 +645,10 @@ class AgentLoop:
 
         # Neural parts: generate meshes via the local img3d service before the
         # build loop (parametric parts need nothing here — zero overhead).
+        # Imported/scanned parts: resolve + loud-check their authored files.
         self._normalize_spec_methods(current_spec)
         self._prepare_neural_parts(current_spec, run_dir, image_paths, emit, cancelled)
+        self._validate_imported_parts(current_spec, emit)
 
         # Step 2: iterative build-measure-verify loop.
         iteration = 0
@@ -640,9 +682,11 @@ class AgentLoop:
                     emit("correction_done", fixed=True)
 
             # The corrector rewrites the whole spec; restore neural mesh_path
-            # from this run's cache before building.
+            # from this run's cache before building, and re-resolve imported
+            # part paths (the rewrite may re-emit them).
             self._normalize_spec_methods(current_spec)
             self._reattach_neural_meshes(current_spec, run_dir)
+            self._validate_imported_parts(current_spec, emit)
 
             try:
                 # Spec-to-params resolution is part of the build: a spec that

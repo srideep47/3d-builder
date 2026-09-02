@@ -1114,20 +1114,28 @@ def op_build_from_spec(params):
                 warnings.append(f"Script part '{name}' created no object named '{name}'")
             continue
 
-        if method == "image_to_3d" or str(part.get("shape", "")).lower() == "organic":
-            # 'organic' shapes are only ever neural — route them through the
-            # same import path so a spec without a generated mesh degrades to
-            # a warning instead of an 'Unknown shape' build error.
+        if method in ("image_to_3d", "imported", "scanned") or str(part.get("shape", "")).lower() == "organic":
+            # Mesh-source contract (Phase 8 item 3): ALL file-backed sources
+            # (neural image_to_3d, imported assets, scans) pass through this
+            # ONE mechanical path — import → join → rescale → place. Only the
+            # provenance differs. 'organic' shapes route here too so a spec
+            # without a generated mesh degrades to a warning instead of an
+            # 'Unknown shape' build error.
             mesh_path = part.get("mesh_path")
-            if not mesh_path or not os.path.exists(str(mesh_path)):
+            if not mesh_path:
                 warnings.append(
-                    f"Part '{name}' is image_to_3d but has no generated mesh_path yet — skipped"
+                    f"Part '{name}' is {method} but has no mesh_path — skipped"
+                )
+                continue
+            if not os.path.exists(str(mesh_path)):
+                warnings.append(
+                    f"Part '{name}' ({method}) mesh file not found: {mesh_path} — skipped"
                 )
                 continue
             imported = import_any(str(mesh_path))
             meshes = [o for o in imported if o.type == "MESH"]
             if not meshes:
-                warnings.append(f"image_to_3d part '{name}' imported no meshes")
+                warnings.append(f"{method} part '{name}' imported no meshes")
                 continue
             if len(meshes) > 1:
                 obj = _join_objects(meshes, name)
@@ -1136,7 +1144,10 @@ def op_build_from_spec(params):
                 obj.name = name
             target = part.get("target_size") or part.get("dimensions")
             if target:
-                _scale_object_to_bounds(obj, [float(v) for v in target])
+                _scale_object_to_bounds(
+                    obj, [float(v) for v in target],
+                    mode=str(part.get("mesh_scale", "fit")),
+                )
             _place_part(obj, part)
             built[name] = obj
             obj_list.append(obj)
@@ -1273,24 +1284,42 @@ def op_build_from_spec(params):
     }
 
 
-def _scale_object_to_bounds(obj, target_axes):
-    """Scale a single object so its world bbox matches the target per-axis sizes."""
+def _scale_object_to_bounds(obj, target_axes, mode="fit"):
+    """Scale a single object so its world bbox matches the target sizes.
+
+    mode "fit" (default): per-axis — the bbox lands exactly on target_axes
+    (dimension gates exact; a mismatched aspect ratio is stretched).
+    mode "uniform": one factor, the MIN of the per-axis ratios — aspect is
+    preserved and no axis exceeds its target (imported assets / scans,
+    where per-axis stretch is damage). Axes with no target or a degenerate
+    current size are left unscaled in both modes."""
     bb = world_bbox([obj])
     if bb is None:
         return
     (mn, mx) = bb
+    factors = []
     for i in range(3):
         current = mx[i] - mn[i]
         t = target_axes[i] if i < len(target_axes) else None
         target = float(t) if t is not None else current
         if current > 1e-9 and target > 0:
-            factor = target / current
-            if i == 0:
-                obj.scale.x *= factor
-            elif i == 1:
-                obj.scale.y *= factor
-            else:
-                obj.scale.z *= factor
+            factors.append(target / current)
+        else:
+            factors.append(None)
+    if mode == "uniform":
+        valid = [f for f in factors if f is not None]
+        if valid:
+            f = min(valid)
+            factors = [f] * 3
+    for i, factor in enumerate(factors):
+        if factor is None:
+            continue
+        if i == 0:
+            obj.scale.x *= factor
+        elif i == 1:
+            obj.scale.y *= factor
+        else:
+            obj.scale.z *= factor
     _apply_transforms(obj, location=False, rotation=False, scale=True)
 
 

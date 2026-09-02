@@ -99,6 +99,8 @@ def _resolve_part(part: PartSpec, unit: Unit) -> dict[str, Any]:
         p_dict["mesh_path"] = part.mesh_path
     if part.target_size:
         p_dict["target_size"] = _to_meters(part.target_size, unit)
+    if part.mesh_scale != "fit":
+        p_dict["mesh_scale"] = part.mesh_scale
     if part.code:
         p_dict["code"] = part.code
 

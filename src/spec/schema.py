@@ -53,9 +53,36 @@ class ShapeType(str, Enum):
 
 
 class GenerationMethod(str, Enum):
+    """Where a part's geometry comes from — the mesh-source contract
+    (Phase 8 item 3). Every part declares exactly ONE source:
+
+    - ``parametric``    — synthesized from the shape vocabulary by the harness.
+    - ``custom_script`` — synthesized by the part's ``code`` in the harness.
+    - ``image_to_3d``   — GENERATED at build time by the neural service from
+      a reference image; the loop materializes ``mesh_path`` (run cache).
+    - ``imported``      — an existing mesh FILE supplied with the spec (an
+      owner asset, a purchased model). Never regenerated; the file is the
+      geometry. ``mesh_path`` + ``target_size`` are authored, not derived.
+    - ``scanned``       — reality capture (3D-scan / photogrammetry file).
+      Same mechanics as ``imported``; different provenance: raw capture is
+      expected dense and noisy and MUST be retopologized before delivery
+      (Phase 8 item 4) — the method value is the hook that flags it.
+
+    All file-backed sources (image_to_3d, imported, scanned) pass through
+    ONE mechanical path in the harness: import → join → rescale to
+    ``target_size`` → place. Provenance differs; the contract does not.
+    """
+
     PARAMETRIC = "parametric"
     IMAGE_TO_3D = "image_to_3d"
     CUSTOM_SCRIPT = "custom_script"
+    IMPORTED = "imported"
+    SCANNED = "scanned"
+
+    @property
+    def is_file_backed(self) -> bool:
+        """True when the part's geometry arrives as a mesh file."""
+        return self in (GenerationMethod.IMAGE_TO_3D, GenerationMethod.IMPORTED, GenerationMethod.SCANNED)
 
 
 class PBRMaterial(BaseModel):
@@ -231,10 +258,20 @@ class PartSpec(BaseModel):
     modifiers: Modifiers | None = None
     smooth_shade: bool = False
     segments: int | None = None
-    # image_to_3d parts: crop of the reference image, generated mesh, final size
+    # file-backed parts (image_to_3d / imported / scanned): crop of the
+    # reference image (image_to_3d only), the mesh file, and its final size.
+    # target_size is the rescale target in spec units — never inferred from
+    # the file (rule 9: owner-stated dimensions only).
     image_crop: str | None = None
     mesh_path: str | None = None
     target_size: list[float] | None = None
+    # how the raw file bbox is mapped onto target_size: "fit" (default)
+    # rescales per-axis so the bbox lands EXACTLY on target_size (dimension
+    # gates exact, but a mismatched aspect ratio is stretched); "uniform"
+    # applies one factor — min of the per-axis ratios — so aspect is
+    # preserved and no axis exceeds target_size (authored assets and scans,
+    # where per-axis stretch is damage).
+    mesh_scale: Literal["fit", "uniform"] = "fit"
     # script method: agent-authored bpy code
     code: str | None = None
     # optional high-poly detail instructions for the bake pass (DetailSpec)
@@ -248,6 +285,51 @@ class PartSpec(BaseModel):
     # packer renormalises across all parts.
     texel_priority: float = Field(default=1.0, ge=0.25, le=16.0)
     meta: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _one_mesh_source(self):
+        """Mesh-source contract (Phase 8 item 3), enforced fail-closed: a
+        part declares exactly one geometry source and carries only the
+        fields that source is entitled to. A part with two sources (e.g.
+        parametric + mesh_path) or a file-backed part without its file
+        would otherwise build silently wrong or skip silently."""
+        m = self.method
+        if m in (GenerationMethod.PARAMETRIC, GenerationMethod.CUSTOM_SCRIPT):
+            if self.mesh_path is not None:
+                raise ValueError(
+                    f"Part '{self.name}' is {m.value} but carries mesh_path — "
+                    "a part has exactly one geometry source; drop mesh_path or "
+                    "set method to a file-backed value (image_to_3d/imported/scanned)."
+                )
+        if m in (GenerationMethod.IMPORTED, GenerationMethod.SCANNED):
+            if not self.mesh_path:
+                raise ValueError(
+                    f"Part '{self.name}' is {m.value} — mesh_path is required "
+                    "(the file IS the geometry; nothing generates it)."
+                )
+            if not self.target_size:
+                raise ValueError(
+                    f"Part '{self.name}' is {m.value} — target_size is required "
+                    "(owner-stated size in spec units; file units are never trusted)."
+                )
+        if self.image_crop is not None and m != GenerationMethod.IMAGE_TO_3D:
+            raise ValueError(
+                f"Part '{self.name}' carries image_crop but is {m.value} — "
+                "image_crop selects the reference image for image_to_3d parts only."
+            )
+        if self.code is not None and m != GenerationMethod.CUSTOM_SCRIPT:
+            raise ValueError(
+                f"Part '{self.name}' carries code but is {m.value} — "
+                "code is executed only for custom_script parts."
+            )
+        if self.target_size is not None and (
+            len(self.target_size) != 3 or any(v <= 0 for v in self.target_size)
+        ):
+            raise ValueError(
+                f"Part '{self.name}' target_size must be 3 positive values, "
+                f"got {self.target_size}."
+            )
+        return self
 
 
 class MeasurementSpec(BaseModel):

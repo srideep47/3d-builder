@@ -92,8 +92,24 @@
 - **The shape enum, the analyst prompt, and the harness `_build_shape`
   dispatch must stay in sync.** Shapes: box, rounded_box, cylinder,
   tapered_cylinder, sphere, cone, torus, tapered_extrude, revolve_lathe,
-  extrude, sweep, organic. (`organic` is neural-only: the loop auto-routes it
-  to `image_to_3d`; the harness skips it with a warning when no mesh exists.)
+  extrude, sweep, organic. (`organic` cannot be built parametrically: the
+  loop auto-routes parametric/script organics to `image_to_3d`; the harness
+  skips an organic part with no mesh with a warning.)
+- **The mesh-source contract** (Phase 8 item 3): a part declares exactly ONE
+  geometry source (`method`), and its fields are entailed by that source —
+  enforced fail-closed by a `PartSpec` cross-field validator. File-backed
+  methods (`image_to_3d`, `imported`, `scanned`) all pass through ONE
+  harness path (import → join → rescale to `target_size` → place);
+  `imported`/`scanned` REQUIRE `mesh_path` + `target_size` (owner-stated —
+  file units are never trusted) and differ only in provenance: a scan is
+  raw capture that must be retopologized before delivery (the 8.4 hook).
+  `mesh_scale: fit` (default) lands bounds exactly on `target_size`;
+  `uniform` preserves aspect (one factor, no axis overshoots). The loop
+  absolutizes authored mesh paths (the harness subprocess must not depend
+  on the caller's CWD) and fires `mesh_source_error` when a file is
+  absent. An `organic` part that already declares a file-backed source
+  KEEPS it — the normalize pass must not retarget an authored mesh at
+  neural generation.
 - **Neural parts** (`method: image_to_3d`): the loop generates meshes via the
   img3d service before build, caches them by part name under
   `run_dir/neural/`, and re-attaches from cache after corrector rewrites.
@@ -193,7 +209,7 @@
   the rendered fixture).
 
 ## Verification
-- `python -m pytest tests -q` — 422 tests; `blender`-marked tests auto-skip
+- `python -m pytest tests -q` — 439 tests; `blender`-marked tests auto-skip
   when no Blender is found.
 - AI builds against a client card: `python -m src.cli build -p <prompt> -m
   <measurements> -i <photo> -n <name> --job input/jobs/<CODE>.yaml` (the

@@ -2101,3 +2101,116 @@ Blender rig pin + 5 template threading; the round-4 rig pin was updated
 in place, not added). Baseline grew, nothing re-baselined. S1 honored
 (no live vision calls — the probe is numeric, no VLM involved). Committed
 under the owner's identity, no push.
+
+## Session log — 2026-09-02 (round 13: Phase 8 item 3 — mesh-source interface)
+
+Master order Phase 8 item 3: "**Mesh-source interface.** One contract
+behind which parametric, template, neural image-to-3D, imported assets and
+scans all satisfy. Cheap now, expensive after the DSL calcifies."
+
+### The contract
+
+Every part declares exactly ONE geometry source (`method`), and the fields
+a part may carry are entailed by that source — enforced fail-closed by a
+`PartSpec` cross-field validator:
+
+| Source | `method` | `mesh_path` | `target_size` | Who materializes the file |
+|---|---|---|---|---|
+| Parametric / template / script | `parametric`, `custom_script` | forbidden | — | nobody (shape vocabulary / code builds it) |
+| Neural image-to-3D | `image_to_3d` | generated at build time | optional (dimensions fallback) | the loop, via the img3d service, cached in `run_dir/neural/` |
+| Imported asset | `imported` | REQUIRED (authored) | REQUIRED | nobody — the file IS the geometry |
+| Scan | `scanned` | REQUIRED (authored) | REQUIRED | nobody — same mechanics, different provenance |
+
+Mechanically, all file-backed sources pass through ONE harness path that
+already existed for neural parts — import → join → rescale to `target_size`
+→ place — now keyed on the file-backed method SET instead of the neural
+enum value. Only provenance differs, and provenance is exactly what Phase
+8 item 4 (retopology) needs: a `scanned` part is raw reality capture that
+MUST be retopologized before delivery; an `imported` asset may already be
+delivery-grade. Two enum values, one code path.
+
+Design decisions, each pinned by a test:
+- **`target_size` is required for imported/scanned** (rule-9 spirit): file
+  units are never trusted; the owner states the size or the spec is
+  refused. Without this, an asset would silently rescale onto the
+  `[1,1,1]`-metre `dimensions` default.
+- **`mesh_scale`**: `"fit"` (default, existing behavior) rescales per-axis
+  so bounds land EXACTLY on target_size — dimension gates exact; `"uniform"`
+  applies one factor (min of the per-axis ratios) — aspect preserved, no
+  axis exceeds target. Authored assets and scans where per-axis stretch is
+  damage get `uniform`; the corrector is told to adjust such parts by one
+  common factor (their aspect is fixed).
+- **The loop resolves authored mesh paths to ABSOLUTE** before build — the
+  harness subprocess must not depend on the caller's CWD — and fires a
+  loud `mesh_source_error` event when the file is absent (unlike neural
+  parts, a missing authored file is unsatisfiable; the build skips the
+  part and the gates fail honestly downstream).
+- **A part with two sources is refused** (parametric + `mesh_path`), as
+  are another source's fields (`image_crop` off `image_to_3d`, `code` off
+  `custom_script`). Templates compile to `PartSpec` directly, so template
+  parts get the whole vocabulary for free (rule 11 intact: the finishing
+  layer still knows no product nouns).
+
+### Defects found and fixed
+
+- **The organic-rewrite would have clobbered authored sources.**
+  `_normalize_spec_methods` rewrote ANY `organic` part whose method wasn't
+  `image_to_3d` to `image_to_3d` — under the new contract that retargets an
+  `imported`/`scanned` organic part at a neural generation it never asked
+  for (and points it at a reference image it may not have). Fixed: only
+  `parametric`/`custom_script` organics are rerouted. Found by writing the
+  contract down, before any test ran.
+- **My first placement test was wrong, not the code**: I asserted absolute
+  x/y position through `build_from_spec`, but `center_origin_bottom`
+  (assembly ground normalization, a deliberate pipeline invariant)
+  re-centers the whole model at origin after placement. Rewritten as a
+  RELATIVE test: an anchor box z 0..0.4 with the imported part (`base`
+  mode, z=0.4) sitting exactly on top — which is the placement contract
+  that actually survives a build.
+
+### Measured (Blender 4.5 harness, real exported GLB as the "owner asset" —
+a 0.30 × 0.10 × 0.20 m box, deliberately non-uniform so fit and uniform
+are distinguishable by measurement, not by code path)
+
+- `fit` (default): imported part bounds read **[0.60, 0.20, 0.40] m**
+  (target ×2 per axis) ± 1e-4 m; zero build warnings.
+- `uniform` at target [0.60, 0.60, 0.60]: per-axis ratios [2.0, 6.0, 3.0]
+  → factor 2.0; bounds read **[0.60, 0.20, 0.40] m** — the most
+  constrained axis lands exactly on target, none exceeds it, and the
+  source's 3:1:2 aspect survives (0.20/0.60 and 0.40/0.60 match
+  0.10/0.30 and 0.20/0.30 within 1e-3).
+- Placement: imported part `base`-mode min z **0.4 m** on the anchor's
+  max z **0.4 m**, top at **0.8 m** (± 1e-4 m).
+- Missing file: build SUCCEEDS with `parts_created: 0` and a warning
+  naming the path ("mesh file not found … does_not_exist.glb") — the loop
+  fires `mesh_source_error` with part, method and path.
+- End-to-end through the real CLI loop
+  (`build --spec` with an `imported` part, `organic` shape, authored
+  `mesh_path`): status completed in **1 iteration** (no correction round),
+  dimension gate PASSED — overall 0.60/0.20/0.40 m at **delta 0.0 mm on
+  all three axes** — mesh gate PASSED (watertight, 12 tri), and the
+  run-dir `spec.json` carries the loop-absolutized `mesh_path`.
+
+### Scope boundary honored
+
+The contract lets dirty meshes ENTER the pipeline; it does not make them
+PASS the finish gates. An imported GLB is triangulated by glTF and will
+fail quad-verify — that is the documented state ("organics stay out until
+retopology exists"), and retopology is item 4's deliverable, not this
+one. No retopology was written; no organics were enabled; nothing in the
+finishing layer learned a product noun.
+
+### Tests
+
+New: `tests/test_mesh_source.py` (6 Blender-marked: fit exact, uniform
+aspect, relative placement, scanned same-path, organic+authored-mesh
+imports, missing-file skip-loudly), `tests/test_mesh_source_contract.py`
+(4 pure: resolver threading + default-omission, JSON round trip, prompt
+sync for analyst AND corrector), +5 in `test_schema.py` (required fields,
+two-sources refusal, entitled-fields-only, `is_file_backed`/`mesh_scale`
+validation, positive-triple target_size), +2 in `test_img3d.py`
+(normalize no-clobber, resolve-and-fire). 17 new in total.
+
+**Suite: 439 passed in 159.71 s** (439 = 422 + 17; baseline grew, nothing
+re-baselined). S1 honored (no live vision calls). Committed under the
+owner's identity, no push.

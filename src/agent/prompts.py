@@ -95,15 +95,25 @@ CONSTRAINTS
   sit exactly on Z = 0.
 
 METHODS
-- Default "parametric". The shape "organic" REQUIRES "method": "image_to_3d" —
-  it cannot be built parametrically. Use "image_to_3d" ONLY for organic parts
-  that cannot be expressed with the shape vocabulary (freeform cushions,
-  plants, sculptures) AND a reference image exists. For such a part set:
-  "image_crop": "<reference image path from the user message>", "target_size":
-  [x, y, z] (its exact dimensions — the generated mesh is rescaled to this on
-  import), and "dimensions" equal to target_size. Everything expressible with
-  the shape vocabulary stays "parametric". Use "script" with "code" only as a
-  last resort.
+- Default "parametric". The shape "organic" REQUIRES a file-backed method
+  ("image_to_3d", "imported" or "scanned") — it cannot be built parametrically.
+- "image_to_3d": ONLY for organic parts that cannot be expressed with the
+  shape vocabulary (freeform cushions, plants, sculptures) AND a reference
+  image exists. For such a part set: "image_crop": "<reference image path
+  from the user message>", "target_size": [x, y, z] (its exact dimensions —
+  the generated mesh is rescaled to this on import), and "dimensions" equal
+  to target_size.
+- "imported" / "scanned": the user message supplies an EXISTING mesh file
+  (an asset, a purchased model; "scanned" = 3D-scan or photogrammetry
+  capture). Required on such a part: "mesh_path": "<file path from the user
+  message>", "target_size": [x, y, z] (the owner-stated exact size — file
+  units are never trusted), "dimensions" equal to target_size. Optional
+  "mesh_scale": "uniform" preserves the mesh's proportions (one scale
+  factor, no axis exceeds target_size) — use it for scans and authored
+  assets whose aspect must not be stretched; the default "fit" rescales
+  per-axis so bounds land exactly on target_size.
+- Everything expressible with the shape vocabulary stays "parametric".
+  Use "script" with "code" only as a last resort.
 
 OUTPUT: ONLY a valid JSON object conforming to ObjectSpec v2. No prose, no code fences.
 """
@@ -124,9 +134,12 @@ Your task:
   is 40mm short, lengthen the supporting part by exactly 0.04m.
 - Remember position semantics: center for box/cylinder/sphere-family shapes,
   bottom-center for tapered_extrude/revolve_lathe/extrude/sweep.
-- Parts with "method": "image_to_3d": fix measurement deltas by adjusting that
-  part's "target_size" (and keep "dimensions" equal to it) — the generated mesh
-  is rescaled to target_size on import. Do NOT drop "target_size" or "image_crop".
+- Parts with a file-backed method ("image_to_3d", "imported" or "scanned"):
+  fix measurement deltas by adjusting that part's "target_size" (and keep
+  "dimensions" equal to it) — the mesh is rescaled to target_size on import.
+  Do NOT drop "target_size", "image_crop", "mesh_path" or "mesh_scale". For
+  a "mesh_scale": "uniform" part, adjust target_size by ONE common factor on
+  all axes (its aspect ratio is fixed; per-axis deltas cannot be closed).
 - Keep every part name stable — measurements reference parts by name.
 - Return the complete corrected ObjectSpec JSON and nothing else.
 """

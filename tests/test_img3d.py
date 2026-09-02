@@ -370,3 +370,69 @@ def test_hybrid_build_parametric_plus_neural(tmp_path):
     blob = [d for d in res.verification.dimension_gate.details if d["name"] == "blob_width"][0]
     assert blob["passed"]
     assert blob["actual_m"] is not None and abs(blob["actual_m"] - 0.16) < 0.002
+
+
+def test_normalize_spec_methods_keeps_file_backed_sources(tmp_path):
+    """Mesh-source contract: an 'organic' part that already declares a
+    file-backed source (imported/scanned) KEEPS it — the loop must not
+    retarget an authored mesh file at a neural generation it never asked
+    for. Only parametric/script organics are rerouted to image_to_3d."""
+    spec = _neural_spec(tmp_path)
+    spec.parts[0].method = GenerationMethod.IMPORTED
+    spec.parts[0].mesh_path = str(tmp_path / "asset.glb")
+    spec.parts[0].target_size = [0.3, 0.3, 0.2]
+    loop = _bare_loop(FakeImg3DProvider())
+    loop._normalize_spec_methods(spec)
+    assert spec.parts[0].method == GenerationMethod.IMPORTED
+
+    spec.parts[0].method = GenerationMethod.SCANNED
+    loop._normalize_spec_methods(spec)
+    assert spec.parts[0].method == GenerationMethod.SCANNED
+
+    # the pre-contract behavior stays: parametric organic → image_to_3d
+    spec.parts[0].method = GenerationMethod.PARAMETRIC
+    loop._normalize_spec_methods(spec)
+    assert spec.parts[0].method == GenerationMethod.IMAGE_TO_3D
+
+
+def test_validate_imported_parts_resolves_paths_and_fires_on_missing(tmp_path):
+    """Imported/scanned mesh files are authored, never generated: the loop
+    resolves each existing path to ABSOLUTE (the harness subprocess must not
+    depend on the caller's CWD) and fires mesh_source_error when the file
+    is absent — loud evidence, with the build skipping the part and the
+    gates failing honestly downstream."""
+    good = tmp_path / "good.glb"
+    good.write_bytes(b"glTF")  # existence is all the loop checks here
+    spec = ObjectSpec(
+        name="imported test",
+        parts=[
+            PartSpec(
+                name="asset",
+                method=GenerationMethod.IMPORTED,
+                shape=ShapeType.ORGANIC,
+                mesh_path=str(good),
+                target_size=[0.3, 0.3, 0.2],
+                dimensions=[0.3, 0.3, 0.2],
+            ),
+            PartSpec(
+                name="ghost_scan",
+                method=GenerationMethod.SCANNED,
+                shape=ShapeType.ORGANIC,
+                mesh_path=str(tmp_path / "missing.stl"),
+                target_size=[0.2, 0.2, 0.2],
+                dimensions=[0.2, 0.2, 0.2],
+            ),
+        ],
+    )
+    loop = _bare_loop(None)
+    events: list[dict] = []
+    loop._validate_imported_parts(spec, _collect(events))
+
+    assert Path(spec.parts[0].mesh_path).is_absolute()
+    assert spec.parts[0].mesh_path == str(good.resolve())
+    assert [e["event"] for e in events] == ["mesh_source_error"]
+    err = events[0]
+    assert err["part"] == "ghost_scan"
+    assert err["method"] == "scanned"
+    assert "missing.stl" in err["mesh_path"]
+    assert "not found" in err["error"]
