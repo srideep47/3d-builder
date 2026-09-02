@@ -2322,3 +2322,73 @@ Hunyuan3D 2.1 (owner's choice, one at a time).
 No code changed in this round — it is a scoping deliverable. **Suite:
 439 passed in 163.60 s** (baseline unchanged). S1 honored (no live
 vision calls). Committed under the owner's identity, no push.
+
+## Round 15 — Phase 8.5 R1: weld-on-import BUILT (the retopology prerequisite)
+
+The master order's item 5 (neural image-to-3D behind retopology) starts
+with the R1 prerequisite from docs/MESH_SOURCES.md §9. Implemented this
+round; R2 (the `retopology` spec block) and the neural backend follow.
+
+### What was built
+
+`_weld_imported_mesh()` in `src/blender/harness_script.py`: edit-mode
+`remove_doubles(threshold=1e-6)` applied to EVERY file-backed import
+(`image_to_3d` / `imported` / `scanned` / authored `organic`) inside
+`op_build_from_spec` — after the multi-object join (join fuses datablocks
+but keeps per-object coincident verts separate), before rescale. Key
+architectural fact found while placing the call: `op_prepare_delivery_scene`
+calls `op_build_from_spec` IN-PROCESS and saves a .blend intermediate, so
+the single call site covers the entire T3 spec-driven finish path; the T2
+raw-file flow runs gates only (no atlas), so no second site exists. The
+op result carries per-part `weld` stats — verts and boundary-edge counts
+before/after — because the export re-splits and post-hoc measurement from
+a second process is impossible: the report IS the evidence.
+
+### Measured results (all on this machine, direct counts)
+
+- Holed scan fixture (icosphere subdiv 3, 1 face removed, flat-shaded,
+  exported GLB): source 162 verts / 319 faces; import split to **957
+  verts (= 3 per face), 957 boundary edges**; after weld **162 verts
+  (exact restoration), 3 boundary edges** — the hole rim SURVIVES the
+  weld (matches RETOPO0001's measured 3). Bounds still land on target
+  [0.60, 0.20, 0.40] m within 4e-8 m.
+- Full T3 `prepare_delivery_scene` on the same fixture: **6 UV islands**
+  (was one per face pre-R1 — the doc's 5,119-face scan measured 5,118),
+  texel ratio **1.0000001**, 0 overlapping island pairs, all UVs in 0-1,
+  0 n-gons.
+- Do-no-harm control (UV-free smooth sphere): **162 → 162 verts,
+  0 → 0 boundary edges** — the weld is a no-op on healthy topology.
+
+### Root-cause refinement (measured, new this round)
+
+The glTF vertex split has TWO attribute sources, not one: a smooth-shaded
+icosphere that kept its primitive UV layer still exports **162 → 205
+verts with 88 boundary edges** — per-corner UVs split corners across UV
+seams even when normals are shared. (My first control fixture asserted
+smooth shading alone would round-trip clean — it failed, I measured why,
+and the doc's §4 now records both sources.) UV seams SURVIVE the weld as
+UV discontinuities because UVs are per-loop attributes, not per-vertex —
+which is why the welded fixture still unwraps to 6 islands, not 1.
+
+### Confessions (§H)
+
+- Two failed attempts to delete a face in the fixture script (selection
+  on a throwaway bmesh copy that never wrote back; then `polygons[i]`
+  .select writes that don't reach the live edit-mesh). The probe kept
+  reporting a CLOSED sphere (320 faces, boundary 0) and I initially read
+  the second run's identical numbers as a stale-file problem before
+  checking the source count. Fixed with pure-bmesh `bm.faces.remove()` +
+  `bm.to_mesh()` — no ops, no selection, deterministic.
+- The smooth-control prediction was wrong (expected 162, measured 205)
+  because I forgot the primitive's UV layer; measured, root-caused, and
+  the control now strips UVs (the honest "already-welded" input).
+
+### Tests
+
+3 new blender-marked tests in `tests/test_mesh_source.py`:
+`test_weld_on_import_restores_shared_topology`,
+`test_weld_is_noop_on_already_welded_input`,
+`test_scan_finish_chain_atlas_not_shattered` (e2e through
+prepare_delivery_scene). **Suite: 442 passed in 169.03 s** (baseline 439
++ 3). S1 honored (no live vision calls). Committed under the owner's
+identity, no push.

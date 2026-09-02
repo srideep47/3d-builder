@@ -16,16 +16,21 @@
 - All lengths are stored in **meters** in internal representations.
 - Origin is centered at bottom-center `(0, 0, 0)` so models sit on the ground plane.
 - Geometry builds must verify against dimension tolerances before final export.
-- **Retopology is scoped, not built** — `docs/MESH_SOURCES.md` holds the
-  measured audit (why dense triangulated meshes shatter the UV atlas:
-  glTF per-attribute vertex splitting, NOT triangles), the tool survey
-  (weld `remove_doubles` 1e-6 m is the root-cause fix; QuadriFlow works
-  on welded meshes; voxel remesh collapses at voxel_size 0.004; QuadriFlow
-  silently no-ops on voxel output — never chain them; the GLB round trip
-  triangulates quads, so retopology must run in the live harness scene),
-  the 7-point output contract, and the phased plan (R1 weld-on-import →
-  R2 `retopology` spec block → R3 external backends). Phase 8.5 neural
-  image-to-3D depends on R1. Evidence fixtures: `input/jobs/RETOPO0001/0002.yaml`.
+- **Weld-on-import is BUILT (R1); retopology is scoped** —
+  `_weld_imported_mesh()` in the harness runs on EVERY file-backed import
+  (after join, before rescale; `op_prepare_delivery_scene` calls
+  `op_build_from_spec` in-process, so the T3 path is covered by the same
+  site) and reports per-part `weld` stats in the op result — the export
+  re-splits, so the report is the only observable evidence. Root cause and
+  tool survey live in `docs/MESH_SOURCES.md`: glTF per-attribute vertex
+  splitting (per-corner normals AND per-corner UVs — a smooth-shaded mesh
+  with UV seams still splits) is what shatters the UV atlas, NOT triangles;
+  QuadriFlow works on welded meshes; voxel remesh collapses at voxel_size
+  0.004; QuadriFlow silently no-ops on voxel output — never chain them; the
+  GLB round trip triangulates quads, so retopology must run in the live
+  harness scene. Phased plan: R1 DONE → R2 `retopology` spec block → R3
+  external backends. Phase 8.5 neural image-to-3D depends on R1. Evidence
+  fixtures: `input/jobs/RETOPO0001/0002.yaml`.
 - **Two Python environments, never mixed**: main `.venv` (light deps) and
   `services/img3d_service/.venv` (torch cu124 + model deps; Forge only).
   Start the service with `scripts/start-img3d.ps1 [tripo_sr]` before builds

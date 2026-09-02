@@ -121,6 +121,45 @@ def import_any(path):
     return [o for o in bpy.data.objects if o not in before]
 
 
+def _weld_imported_mesh(obj, threshold=1e-6):
+    """R1 weld-on-import (docs/MESH_SOURCES.md §4, §5.1): glTF/FBX store one
+    vertex per face-corner wherever normals or UVs differ, so a flat-shaded
+    scan imports as disconnected triangles — every edge a boundary edge.
+    That split is the measured root cause of per-face UV islands (5,118 on
+    a 5,119-triangle scan; the atlas packer cannot walk across faces) and of
+    QuadriFlow refusing the mesh. A by-distance weld at 1 um restores shared
+    topology without measurably moving bounds; UV seams survive because UVs
+    are per-loop attributes, not per-vertex. Returns before/after vertex and
+    boundary-edge counts — the export re-splits, so this report is the only
+    observable evidence the weld ran."""
+    import bmesh
+    import bpy
+
+    stats = {
+        "verts_before": len(obj.data.vertices),
+        "verts_after": len(obj.data.vertices),
+        "boundary_edges_before": 0,
+        "boundary_edges_after": 0,
+    }
+    if not obj.data.polygons:
+        return stats
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    stats["boundary_edges_before"] = sum(1 for e in bm.edges if e.is_boundary)
+    bm.free()
+    select_only([obj])
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.remove_doubles(threshold=threshold)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    stats["verts_after"] = len(obj.data.vertices)
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    stats["boundary_edges_after"] = sum(1 for e in bm.edges if e.is_boundary)
+    bm.free()
+    return stats
+
+
 def export_any(path, selected_only=False, apply_modifiers=True):
     import bpy
 
@@ -1092,6 +1131,7 @@ def op_build_from_spec(params):
     warnings = []
     built = {}
     obj_list = []
+    weld_stats = {}
 
     # Pass 1: build geometry, detail modifiers, positioning, assembly modifiers.
     for part in parts:
@@ -1142,6 +1182,12 @@ def op_build_from_spec(params):
             else:
                 obj = meshes[0]
                 obj.name = name
+            # R1: weld AFTER join (join fuses datablocks but keeps per-object
+            # coincident verts separate) and BEFORE rescale, so smart_project
+            # and any later retopology see shared topology. Parametric parts
+            # never pass through here — born-in-Blender geometry is welded
+            # by construction.
+            weld_stats[name] = _weld_imported_mesh(obj)
             target = part.get("target_size") or part.get("dimensions")
             if target:
                 _scale_object_to_bounds(
@@ -1279,6 +1325,7 @@ def op_build_from_spec(params):
         "parts_created": len(obj_list),
         "part_names": [o.name for o in obj_list],
         "warnings": warnings,
+        "weld": weld_stats,
         "overall_bounds": final_bounds,
         "output_path": str(output_path) if output_path else None,
     }
@@ -2774,6 +2821,7 @@ def op_prepare_delivery_scene(params):
         "success": True,
         "part_names": result.get("part_names", []),
         "warnings": result.get("warnings", []),
+        "weld": result.get("weld", {}),
         "triangulated_as_last_resort": triangulated,
         "topology": {"triangles": tris, "quads": quads, "ngons": ngons,
                      "triangle_equivalent": tri_eq, "faces_total": faces, "vertices": verts},

@@ -198,3 +198,139 @@ def test_missing_mesh_file_skips_loudly_not_fatal(runner, tmp_path):
     assert result["parts_created"] == 0
     assert any("mesh file not found" in w for w in result["warnings"]), result["warnings"]
     assert any("does_not_exist.glb" in w for w in result["warnings"])
+
+
+# ── R1: weld-on-import (Phase 8.5 prerequisite, docs/MESH_SOURCES.md §4/§5.1) ─
+#
+# glTF/FBX store one vertex per face-corner wherever normals or UVs differ,
+# so a flat-shaded scan imports as disconnected triangles — every edge a
+# boundary edge. Measured on the RETOPO0001 fixture: 15,355 verts for 5,119
+# faces, which shattered the T3 atlas into 5,118 one-face islands (texel
+# ratio 5.59) and made QuadriFlow refuse the mesh. The weld (remove_doubles
+# at 1 um) runs inside the harness on EVERY file-backed import; parametric
+# parts are born in Blender and never pass through it.
+
+@pytest.fixture(scope="module")
+def split_scan_glb(runner, tmp_path_factory):
+    """A scan stand-in that reproduces the glTF vertex split: a flat-shaded
+    icosphere (per-face normals) with one face deleted — the hole proves the
+    weld PRESERVES boundary topology instead of closing it. Returns
+    (path, source_verts, source_faces) so tests assert exact restoration."""
+    tmp = tmp_path_factory.mktemp("split_scan")
+    out = tmp / "split_scan.glb"
+    code = f"""
+import bpy, bmesh
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=3, radius=0.5)
+obj = bpy.context.active_object
+bm = bmesh.new()
+bm.from_mesh(obj.data)
+bm.faces.ensure_lookup_table()
+bm.faces.remove(bm.faces[0])
+bm.to_mesh(obj.data)
+bm.free()
+me = obj.data
+RESULT = {{"source_verts": len(me.vertices), "source_faces": len(me.polygons)}}
+bpy.ops.export_scene.gltf(filepath=r"{out}", export_format="GLB")
+"""
+    res = runner.execute_op("run_script", {"code": code})
+    assert res["success"], res.get("error")
+    src = res["result"]
+    assert src["source_faces"] == 319  # 320 minus the deleted hole
+    return out, src["source_verts"], src["source_faces"]
+
+
+@pytest.fixture(scope="module")
+def smooth_scan_glb(runner, tmp_path_factory):
+    """The control: an already-welded mesh must pass through the weld
+    UNCHANGED — the do-no-harm property. Smooth shading alone is NOT enough:
+    the icosphere primitive's own UV layer splits corners across UV seams
+    (measured: 162 verts export as 205 with 88 boundary edges even when
+    smooth-shaded), so the control strips UVs — then the exporter merges
+    corners exactly (162 -> 162, 0 boundary edges on re-import)."""
+    tmp = tmp_path_factory.mktemp("smooth_scan")
+    out = tmp / "smooth_scan.glb"
+    code = f"""
+import bpy
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=3, radius=0.5)
+obj = bpy.context.active_object
+for p in obj.data.polygons:
+    p.use_smooth = True
+while obj.data.uv_layers:
+    obj.data.uv_layers.remove(obj.data.uv_layers[0])
+me = obj.data
+RESULT = {{"source_verts": len(me.vertices), "source_faces": len(me.polygons)}}
+bpy.ops.export_scene.gltf(filepath=r"{out}", export_format="GLB")
+"""
+    res = runner.execute_op("run_script", {"code": code})
+    assert res["success"], res.get("error")
+    return out, res["result"]["source_verts"], res["result"]["source_faces"]
+
+
+def test_weld_on_import_restores_shared_topology(runner, split_scan_glb, tmp_path):
+    """The build reports the weld's before/after facts (the export re-splits,
+    so this report is the only observable evidence): the split import reads
+    exactly 3 verts per face with every edge a boundary edge; the weld
+    restores the source vertex count EXACTLY, keeps the hole rim (3 boundary
+    edges — matches the RETOPO0001 scan), and does not move the bounds."""
+    out, source_verts, source_faces = split_scan_glb
+    result, _ = _build_file_backed(runner, tmp_path, out, method="scanned",
+                                   target=[0.60, 0.20, 0.40])
+    assert result["success"], result.get("error")
+    assert result["warnings"] == []
+    weld = result["weld"]["brought_in"]
+    assert weld["verts_before"] == 3 * source_faces  # per-corner split
+    assert weld["boundary_edges_before"] == weld["verts_before"]  # fully split
+    assert weld["verts_after"] == source_verts  # exact restoration
+    assert weld["boundary_edges_after"] == 3  # the hole rim survives
+    dims = result["overall_bounds"]["dimensions"]
+    assert dims == pytest.approx([0.60, 0.20, 0.40], abs=1e-4)
+
+
+def test_weld_is_noop_on_already_welded_input(runner, smooth_scan_glb, tmp_path):
+    """Clean input must be untouched: a smooth-shaded (corner-merged) export
+    reports equal before/after counts — the weld repairs the split, it never
+    'optimizes' healthy topology."""
+    out, source_verts, _ = smooth_scan_glb
+    result, _ = _build_file_backed(runner, tmp_path, out, method="imported",
+                                   target=[0.60, 0.20, 0.40])
+    assert result["success"], result.get("error")
+    weld = result["weld"]["brought_in"]
+    assert weld["verts_before"] == source_verts
+    assert weld["verts_after"] == source_verts
+    assert weld["boundary_edges_before"] == weld["boundary_edges_after"] == 0
+
+
+def test_scan_finish_chain_atlas_not_shattered(runner, split_scan_glb):
+    """E2E headline (docs/MESH_SOURCES.md §6): before R1 the split import
+    shattered the T3 atlas into one island per face (measured 5,118 islands
+    on the 5,119-face RETOPO0001 scan, texel ratio 5.59; the 82k-face scan
+    timed out prepare at 300 s). With weld-on-import the same file-backed
+    part runs the FULL T3 prepare — n-gon gate, shared atlas, diagnostics —
+    and lands a handful of islands at uniform density."""
+    from src.spec.resolver import resolve_spec_to_build_params
+    from src.spec.schema import ObjectSpec
+
+    out, source_verts, _ = split_scan_glb
+    spec = ObjectSpec.model_validate({
+        "name": "scan_finish",
+        "parts": [{
+            "name": "body", "method": "scanned", "mesh_path": str(out),
+            "target_size": [0.60, 0.20, 0.40],
+            "dimensions": [0.60, 0.20, 0.40],
+        }],
+    })
+    result = runner.execute_op(
+        "prepare_delivery_scene", {"build": resolve_spec_to_build_params(spec)})
+    assert result["success"], result.get("error")
+    # prepare calls op_build_from_spec in-process: the same weld evidence
+    # rides through the T3 path
+    assert result["weld"]["body"]["verts_after"] == source_verts
+    uv = result["uv"]
+    assert uv["islands_total"] == 6  # measured; was one per face (319) split
+    assert uv["overlapping_island_pairs"] == 0
+    assert uv["in_bounds"] is True
+    assert uv["texel_density_texels_per_m"]["ratio"] < 1.05
+    topo = result["topology"]
+    assert topo["ngons"] == 0  # triangle mesh: no n-gons, quads legitimately 0

@@ -91,6 +91,13 @@ preserves the split, so every edge is a boundary edge
   (15,355 verts unchanged; it only fuses verts with identical normals/UVs,
   and flat per-corner normals differ).
 
+The split has **two** attribute sources, not one (measured on a
+smooth-shaded icosphere that kept its primitive UV layer): smooth shading
+removes the per-corner normal differences, but the sphere's own UV seams
+still split corners — **162 verts exported as 205, with 88 boundary edges**.
+Strip the UV layer too and the round trip is exact (162 → 162, 0 boundary).
+So a mesh can arrive split even when it was never flat-shaded.
+
 **The repair is a by-distance weld** — edit-mode
 `bpy.ops.mesh.remove_doubles(threshold=1e-6)` on the imported object:
 
@@ -110,8 +117,17 @@ split-imported scan → 5,118 (matches the T3 atlas number exactly).
 
 ### 5.1 Weld — `remove_doubles(threshold=1e-6)`
 
-Mandatory first stage for every file-backed source. Measurements in §4.
-Effect on the atlas: 5,118 → **212 islands** (welded, not retopologized).
+**BUILT (R1)**: `_weld_imported_mesh()` in `src/blender/harness_script.py`
+runs on EVERY file-backed import inside `op_build_from_spec` — after the
+multi-object join (join fuses datablocks but not coincident verts), before
+rescale. Because `op_prepare_delivery_scene` calls `op_build_from_spec`
+in-process, the single call site covers the whole T3 spec path. The op
+result carries per-part `weld` stats (verts/boundary edges before/after) —
+the export re-splits, so that report is the only observable evidence.
+Measurements in §4. Effect on the atlas: 5,118 → **212 islands** (welded,
+not retopologized). Pinned by `tests/test_mesh_source.py` (fixture: 957 →
+162 verts, boundary 957 → 3 — the hole rim survives; clean control: 162 →
+162, a no-op).
 
 ### 5.2 QuadriFlow — `bpy.ops.object.quadriflow_remesh`
 
@@ -239,11 +255,12 @@ directly measurable in the harness, fail-closed):
 
 ## 9. Phased plan
 
-- **R1 — weld-on-import** (harness, file-backed paths only). Cheapest,
-  highest value: fixes the atlas for every imported/scanned/neural mesh.
-  Expected (measured): islands 5,118 → 212, texel ratio 5.59 → 1.00,
-  chain 45.7 s → ~20 s at fixture scale; the 300 s timeout risk at scan
-  scale collapses with it.
+- **R1 — weld-on-import: DONE** (built into `op_build_from_spec`'s
+  file-backed branch, §5.1). Measured on the pinned fixture: 957 → 162
+  verts, boundary edges 957 → 3 (hole rim preserved), T3 islands 6 at
+  texel ratio 1.0000001, bounds on target within 4e-8 m; the do-no-harm
+  control (UV-free smooth sphere) reports 162 → 162, a no-op. Suite 442
+  (3 new tests in `tests/test_mesh_source.py`).
 - **R2 — the `retopology` block** (quadriflow primary; voxel for
   hole-closing/density control with voxel_size ≥ 0.005). Delivers
   polycount control + quads + watertight. Guarded by the §7 contract and
