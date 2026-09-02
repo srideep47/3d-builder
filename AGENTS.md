@@ -148,9 +148,19 @@
   quad-clean FBX (vacuous pass). Author prompts as "polycount ceiling N"
   (noun `polycount` → semantics None → the conservative
   triangle-equivalent contract default).
+- **Per-surface texel priority** (Phase 8 item 1): `PartSpec.texel_priority`
+  (default 1.0; `DecalSpec` defaults 4.0 for brand labels) multiplies a
+  part's texel density in the shared atlas — the packer targets
+  rho·prio²·world_area with rho renormalised, so total atlas use NEVER
+  changes; priorities redistribute the budget. The resolver omits the field
+  at 1.0 (historic build params byte-identical). In UV diagnostics the RAW
+  ratio honestly reports the authored spread; `ratio_priority_weighted` is
+  the uniformity metric that must stay ~1.0 — never read a raw ratio as
+  starvation when the spread was authored. Pinned in
+  `tests/test_texel_priority.py`.
 
 ## Verification
-- `python -m pytest tests -q` — 389 tests; `blender`-marked tests auto-skip
+- `python -m pytest tests -q` — 401 tests; `blender`-marked tests auto-skip
   when no Blender is found.
 - AI builds against a client card: `python -m src.cli build -p <prompt> -m
   <measurements> -i <photo> -n <name> --job input/jobs/<CODE>.yaml` (the

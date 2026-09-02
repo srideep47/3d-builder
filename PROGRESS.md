@@ -1923,3 +1923,73 @@ re-baselined). S1 honored (no live vision calls). Rule 9 honored (no
 dims inferred; MAYA00053153 untouched). AGENTS.md invariants added: the
 card-axis gate contract and the polycount-phrasing semantics.
 Committed under the owner's identity, no push.
+
+## Session log — 2026-09-02 (round 11: Phase 8 item 1 — per-surface texel priority)
+
+Master order Phase 8 item 1: "The atlas gives every surface the same
+density... That is the bug: velvet needs almost no detail, printed text
+needs many times more. Fixes the illegible label and generalises to every
+branded asset."
+
+### Design
+
+`PartSpec.texel_priority` (default 1.0, bounds 0.25–16.0) multiplies a
+part's texel density in the shared delivery atlas. Density scales with
+√uv-area, so the packer squares the multiplier: an island's target uv_area
+= rho · prio² · world_area, with rho renormalised over Σ(world_area ·
+prio²) — **total atlas use is unchanged; priorities redistribute the
+budget**. `DecalSpec.texel_priority` defaults to 4.0 (a brand label is the
+canonical high-detail surface) and rides the compiled `decal_patch` part.
+The analyst prompt documents the field (label/text parts 3–8, plain fabric
+1.0 or 0.5); the resolver omits the field at 1.0 so historic specs produce
+byte-identical build params.
+
+Diagnostics split in two: the RAW density ratio honestly reports the
+authored spread, and `ratio_priority_weighted` (each island's density
+divided by its part's priority) is the uniformity metric that must stay
+~1.0 — the Phase 8 item 2 principle ("a ratio alone must never gate
+this") applied here. The CLI finish panel surfaces the weighted figure
+whenever spread is authored; `uv_diagnostics` reaches the loop's measured
+facts whole.
+
+### Measured (mattress template, 1024² reporting resolution)
+
+| Surface | Priority | texels/m | Atlas share | World share |
+|---|---|---|---|---|
+| decal_patch | 4.0 | 1,295.4 | 31.21% | 2.76% |
+| velvet | 1.0 | 323.8 | 14.54% | 20.55% |
+| crown | 1.0 | 323.8 | 12.69% | 17.93% |
+| base | 1.0 | 323.8 | 7.71% | 10.89% |
+
+Raw ratio 4.000034, priority-weighted ratio 1.000019, pack_scale 0.75,
+132 islands, in bounds, 0 overlapping texels. **The label now gets 727
+texels across its 561 mm patch height — up from ~136 before the fix
+(5.3×), at 1024².** Plain surfaces got 1.33× DENSER, not sparser: the
+renormalisation shrank the bulky tape islands ~1.2× in area and the shelf
+packer fit one ladder rung higher (0.5625 → 0.75; the ladder is ×0.75 per
+retry). Rule 9 held throughout (numbers above are pipeline-exercise only;
+MAYA00053153 stays `dims_placeholder: true`, no package emitted).
+
+### Defects found and fixed
+
+- **The priorities extraction read the wrong key** — `build_params["parts"]`
+  instead of `build_params["spec"]["parts"]` — which would have made every
+  priority silently 1.0 at runtime. Caught while writing the pinning test
+  (by reading how `op_build_from_spec` consumes the params), fixed before
+  any test ran green against it.
+- Two stale mattress pins updated (not weakened): the raw texel-ratio pin
+  `< 1.05` became `≈ 4.0` raw + `< 1.05` weighted, and pack_scale
+  `0.5625` → `0.75` with the cause recorded in the test comment.
+
+### Tests
+
+New `tests/test_texel_priority.py` (12): schema bounds + resolver
+passthrough/omission, analyst-prompt sync, template decal default, and
+four Blender-marked atlas tests through `prepare_delivery_scene` — a 4×
+priority part measures 4.00× the plain part's texels/m, atlas stays valid
+(in bounds, 0 overlaps), raw ratio reports the spread while weighted stays
+< 1.05, and no-priority specs keep weighted == raw exactly.
+
+**Suite: 401 passed in 121.86 s** (401 = 389 + 12 texel-priority;
+baseline grew, nothing re-baselined). S1 honored (no live vision calls).
+Committed under the owner's identity, no push.

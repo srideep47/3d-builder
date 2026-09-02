@@ -89,6 +89,8 @@ def _resolve_part(part: PartSpec, unit: Unit) -> dict[str, Any]:
         ]
     if part.segments:
         p_dict["segments"] = int(part.segments)
+    if part.texel_priority != 1.0:
+        p_dict["texel_priority"] = float(part.texel_priority)
     if part.method.value != "parametric":
         p_dict["method"] = part.method.value
     if part.image_crop:

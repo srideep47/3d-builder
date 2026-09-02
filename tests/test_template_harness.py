@@ -234,10 +234,21 @@ def test_uv_contiguous_faces_merge_into_few_islands(prepared_scene):
     assert 120 <= uv["islands_total"] <= 170
     assert uv["overlapping_island_pairs"] == 0
     assert uv["in_bounds"] is True
-    assert uv["texel_density_texels_per_m"]["ratio"] < 1.05
+    # Phase 8 item 1: the decal patch authors 4x texel priority (the
+    # illegible-label fix), so the RAW ratio now honestly reports the
+    # authored spread (~4.0) — uniformity lives in the priority-weighted
+    # ratio, which must stay within the old 5% bound
+    assert uv["texel_density_texels_per_m"]["ratio"] == pytest.approx(4.0, rel=0.05)
+    assert uv["texel_density_texels_per_m"]["ratio_priority_weighted"] < 1.05
     # round-3: the round-cord tapes carry ~3x the strip surface into the
-    # atlas, so the pack scale dropped from 0.75 (flat strips)
-    assert prepared_scene["uv_atlas"]["pack_scale"] == pytest.approx(0.5625, abs=0.01)
+    # atlas, so the pack scale dropped from 0.75 (flat strips). Phase 8
+    # item 1 moved it back UP one ladder rung: the decal's 4x priority
+    # renormalises rho, shrinking every non-decal island's target ~1.2x in
+    # area — the bulky tape islands then fit on the shelf packer's first
+    # rung (scale ladder is x0.75 per retry: 1.0 -> 0.75 -> 0.5625), so
+    # real atlas utilisation (and every plain surface's absolute texel
+    # density) went UP, not down
+    assert prepared_scene["uv_atlas"]["pack_scale"] == pytest.approx(0.75, abs=0.01)
 
 
 def test_overall_bounds_exactly_nominal(objects):

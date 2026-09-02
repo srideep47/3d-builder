@@ -483,6 +483,12 @@ def package(
     if finish:
         uv = finish.get("uv_diagnostics") or {}
         td = (uv.get("texel_density_texels_per_m") or {})
+        ratio_line = f"texel ratio: {td.get('ratio')}"
+        priorities = [e.get("texel_priority", 1.0)
+                      for e in (uv.get("texel_density_per_object") or {}).values()]
+        if any(abs(p - 1.0) > 1e-9 for p in priorities):
+            # spread was authored — the weighted ratio is the uniformity metric
+            ratio_line += f" (priority-weighted: {td.get('ratio_priority_weighted')})"
         console.print(Panel(
             f"fbx source: {finish['fbx_source']}\n"
             f"LP: {finish['lp_tri_equivalent']} tri-eq (budget {finish['lp_budget']}, "
@@ -490,7 +496,7 @@ def package(
             f"HP: {finish['hp_tri_equivalent']} tri-eq\n"
             f"UV islands: {uv.get('islands_total')} | in bounds: {uv.get('in_bounds')} | "
             f"overlaps: {uv.get('overlapping_island_pairs')} | "
-            f"texel ratio: {td.get('ratio')}\n"
+            f"{ratio_line}\n"
             f"review renders: {len(finish['review_renders'])} awaiting owner review "
             f"({finish['review_renders'][0] if finish['review_renders'] else '-'})",
             title="Finish Pipeline (T3)", border_style="green"))

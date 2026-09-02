@@ -74,6 +74,15 @@ MATERIALS (flat PBR values export correctly to GLB)
   "texture_dir" that was not listed, and NEVER use a diffusion-generated
   texture — only the listed scans or the presets.
 
+UV ATLAS TEXEL PRIORITY (per part, "texel_priority": float, default 1.0)
+- The delivery atlas shares one texel budget across every surface of the model.
+  A uniform split starves printed text while over-serving plain fabric. Set
+  "texel_priority": 3-8 on parts carrying printed text, labels, dials, or fine
+  markings; plain fabric, velvet, and smooth surfaces can stay at 1.0 (or drop
+  to 0.5 when text elsewhere needs the budget). Higher priority = more texels
+  per metre for that part; total atlas use is unchanged. Only set it when a
+  part genuinely carries finer detail than the rest.
+
 MEASUREMENTS (the accuracy contract — the build is verified against these)
 - List EVERY user-given dimension in "measurements":
   {"name": "...", "target_value": 0.75, "unit": "meters", "applies_to": "...", "tolerance_m": 0.001}

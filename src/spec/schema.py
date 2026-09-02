@@ -202,6 +202,12 @@ class PartSpec(BaseModel):
     detail: DetailSpec | None = None
     # pressed seam rings on extruded walls (metres; template converts fractions)
     seam_rings: list[SeamRingSpec] | None = None
+    # Atlas texel-density multiplier for this part's surfaces (Phase 8 item 1:
+    # a uniform atlas gives velvet detail it cannot show while printed text
+    # starves). 1.0 = the uniform share; a label at 4.0 gets 4x the texels
+    # per metre of the shared atlas. Total atlas use is unchanged — the
+    # packer renormalises across all parts.
+    texel_priority: float = Field(default=1.0, ge=0.25, le=16.0)
     meta: dict[str, Any] = Field(default_factory=dict)
 
 

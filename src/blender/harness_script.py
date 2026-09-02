@@ -2332,7 +2332,7 @@ def _shelf_pack(widths, heights, margin):
     return placements, scale  # best effort — the UV diagnostics catch overflow
 
 
-def _pack_uv_atlas(objects, margin=0.01, utilization=0.8):
+def _pack_uv_atlas(objects, margin=0.01, utilization=0.8, priorities=None):
     """Rescale every UV ISLAND for uniform texel density (uv_area ∝ world
     surface area per island), then shelf-pack all islands into the shared
     0-1 atlas.
@@ -2345,13 +2345,29 @@ def _pack_uv_atlas(objects, margin=0.01, utilization=0.8):
     islands are separated by UV seams by definition. The shelf packer's
     uniform overflow shrink preserves the uniformity (everything shrinks
     together). `_uv_diagnostics` re-verifies the result independently,
-    island by island, with an exact rasterized overlap test."""
+    island by island, with an exact rasterized overlap test.
+
+    `priorities` maps object name -> texel-density multiplier (Phase 8
+    item 1: printed text needs many times the density of velvet). An
+    island's target becomes rho * prio^2 * world_area (density scales with
+    sqrt(uv_area), so the multiplier squares), with rho renormalised so
+    the model still uses `utilization` of the atlas — priorities REDISTRIBUTE
+    the atlas budget, they never change total use. Missing names and None
+    behave as 1.0 (the historic uniform pack)."""
+    prio_of = {}
+    if priorities:
+        for k, v in priorities.items():
+            try:
+                prio_of[k] = max(float(v), 1e-3)
+            except (TypeError, ValueError):
+                continue
     entries = []
     for obj in objects:
         me = obj.data
         uv_layer = me.uv_layers.active
         if not uv_layer or not me.polygons:
             continue
+        prio = prio_of.get(obj.name, 1.0)
         world_area = _face_world_areas(obj)
         for face_ids in _uv_face_groups(me):
             minx = miny = 1e9
@@ -2369,18 +2385,20 @@ def _pack_uv_atlas(objects, margin=0.01, utilization=0.8):
                 continue
             entries.append({"obj": obj, "face_ids": face_ids,
                             "bbox": (minx, miny, maxx, maxy),
-                            "uv_area": uv_area, "world_area": w_area})
+                            "uv_area": uv_area, "world_area": w_area,
+                            "prio": prio})
     if not entries:
         return {"objects_packed": 0, "islands_packed": 0,
                 "note": "no UV data to pack"}
 
     avail = 1.0 - 2.0 * margin
-    total_world = sum(e["world_area"] for e in entries)
-    # target uv-area per m^2 so the whole model uses `utilization` of the atlas
-    rho = (avail * avail * utilization) / total_world
+    # target uv-area per m^2 so the whole model uses `utilization` of the
+    # atlas, weighted by each island's priority squared
+    weighted_world = sum(e["world_area"] * e["prio"] * e["prio"] for e in entries)
+    rho = (avail * avail * utilization) / weighted_world
     widths, heights = [], []
     for e in entries:
-        target = rho * e["world_area"]
+        target = rho * e["prio"] * e["prio"] * e["world_area"]
         e["f"] = math.sqrt(target / e["uv_area"])
         (b0x, b0y, b1x, b1y) = e["bbox"]
         widths.append(max((b1x - b0x) * e["f"], 1e-6))
@@ -2516,9 +2534,22 @@ def _island_overlap_exact(objects, islands, resolution):
     return pairs, overlapping_texels
 
 
-def _uv_diagnostics(objects, resolution=1024):
+def _uv_diagnostics(objects, resolution=1024, priorities=None):
     """Mechanical UV evidence (owner T3 brief): zero overlapping islands,
-    all UVs inside 0-1, texel-density variance within a stated bound."""
+    all UVs inside 0-1, texel-density variance within a stated bound.
+
+    `priorities` (object name -> multiplier, see _pack_uv_atlas) splits the
+    density story in two: the RAW ratio evidences the intended spread, and
+    `ratio_priority_weighted` (each island's density divided by its part's
+    priority) is the uniformity metric that must stay ~1.0 — a ratio alone
+    must never be read as starvation when the spread was authored."""
+    prio_of = {}
+    if priorities:
+        for k, v in priorities.items():
+            try:
+                prio_of[k] = max(float(v), 1e-3)
+            except (TypeError, ValueError):
+                continue
     islands = _uv_islands_report(objects, resolution=resolution)
     if not islands:
         return {"islands_total": 0, "verified": False,
@@ -2551,6 +2582,13 @@ def _uv_diagnostics(objects, resolution=1024):
 
     densities = [i["texels_per_m"] for i in islands if i["texels_per_m"] > 0]
     density_ratio = (max(densities) / min(densities)) if len(densities) >= 2 and min(densities) > 0 else 1.0
+    # Uniformity AFTER the authored priorities: each island's density over
+    # its part's multiplier. With all-1.0 priorities this equals the raw
+    # ratio (the historic metric); with a 4x label it stays ~1.0 while the
+    # raw ratio honestly reports the 4x spread.
+    weighted = [i["texels_per_m"] / prio_of.get(i["object"], 1.0)
+                for i in islands if i["texels_per_m"] > 0]
+    weighted_ratio = (max(weighted) / min(weighted)) if len(weighted) >= 2 and min(weighted) > 0 else 1.0
 
     # Per-object rollup (standing diagnostic): the whole-model density figure
     # can look healthy while the single largest visible surface starves, and
@@ -2564,6 +2602,7 @@ def _uv_diagnostics(objects, resolution=1024):
     for isl in islands:
         e = per_object.setdefault(isl["object"], {
             "islands": 0, "uv_area": 0.0, "world_area_m2": 0.0,
+            "texel_priority": prio_of.get(isl["object"], 1.0),
             "texels_per_m_island_min": None, "texels_per_m_island_max": 0.0})
         e["islands"] += 1
         e["uv_area"] += isl["uv_area"]
@@ -2594,6 +2633,7 @@ def _uv_diagnostics(objects, resolution=1024):
             "min": min(densities) if densities else 0.0,
             "max": max(densities) if densities else 0.0,
             "ratio": density_ratio,
+            "ratio_priority_weighted": weighted_ratio,
         },
         "texel_density_per_object": per_object,
         "islands": islands,
@@ -2644,8 +2684,20 @@ def op_prepare_delivery_scene(params):
             }
 
     resolution = int(params.get("resolution", 1024))  # density-reporting resolution
-    atlas = _pack_uv_atlas(obj_list, margin=float(params.get("uv_margin", 0.01)))
-    diag = _uv_diagnostics(obj_list, resolution=resolution)
+    # Phase 8 item 1: per-part texel priorities authored on the spec ride in
+    # through the build params (resolver passthrough) and redistribute the
+    # atlas budget — the packer renormalises, so total atlas use is unchanged.
+    priorities = {}
+    spec_parts = (build_params.get("spec") or {}).get("parts") or []
+    for p in spec_parts:
+        if isinstance(p, dict) and p.get("texel_priority") is not None:
+            try:
+                priorities[p["name"]] = float(p["texel_priority"])
+            except (TypeError, ValueError):
+                continue
+    atlas = _pack_uv_atlas(obj_list, margin=float(params.get("uv_margin", 0.01)),
+                           priorities=priorities)
+    diag = _uv_diagnostics(obj_list, resolution=resolution, priorities=priorities)
 
     out_blend = params.get("out_blend")
     if out_blend:

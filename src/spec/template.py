@@ -189,6 +189,11 @@ class DecalSpec(BaseModel):
     aspect: float = Field(gt=0.0, le=4.0)  # patch width / height (<1 portrait)
     height_fraction: float = Field(gt=0, le=1.0)  # of H
     texture: str  # DIR containing albedo.png (repo-relative), like surfaces
+    # Atlas texel-density multiplier for the patch (Phase 8 item 1): printed
+    # text needs many times the density of fabric. 4.0 = the patch gets 4x
+    # the texels per metre of the shared atlas (16x the uv-area share of its
+    # world area; the packer renormalises so total atlas use is unchanged).
+    texel_priority: float = Field(default=4.0, ge=0.25, le=16.0)
 
 
 class CarryHandleSpec(BaseModel):
@@ -759,6 +764,7 @@ def compile_spec(template: TemplateSpec, job: JobCard) -> tuple[ObjectSpec, list
             position=list(center),
             position_mode="center",
             material=mat,
+            texel_priority=d.texel_priority,
         ))
 
     measurements = [
