@@ -470,10 +470,18 @@ def test_review_rig_is_cross_key_without_axis_privilege(runner, quad_scene):
     the rig must not misrepresent the model. A single key shades only the
     relief lines perpendicular to its azimuth (measured on the round-3 rig:
     12x FFT power asymmetry between the quilt axes — a correct square grid
-    photographed as one-directional corduroy). The contract: TWO keys whose
-    HORIZONTAL travel directions are perpendicular, both raking (dz < -0.5,
-    not steep flattening light), and total energy under the round-3 rig's
-    7 W that clipped highlights to pure white."""
+    photographed as one-directional corduroy). The Phase 8.2 tune (the §H
+    lesson) moved both keys to 10° RAKING elevation: relief contrast
+    scales with cot(elevation), and the round-4 40° keys left the 14 mm
+    quilt under the absolute floor (0.81/0.96 grey levels while the FFT
+    axis ratio read a healthy 0.87 — a ratio reaches 1.0 when both terms
+    go to zero). Contract: TWO keys whose horizontal travel directions are
+    perpendicular (each rakes one quilt axis at full strength), SHALLOW
+    downward travel (raking, not the steep flattening round-4 geometry),
+    fill a whisper (measured ~0.5 grey levels of quilt amplitude lost per
+    0.1 fill energy), and total energy under the round-3 rig's 7 W that
+    clipped highlights to pure white. The absolute amplitude floor itself
+    is pinned in tests/test_render_rig.py against the rendered fixture."""
     code = r"""
 import bpy, sys
 from mathutils import Vector
@@ -492,13 +500,16 @@ RESULT = out
     lights = res["result"]
     assert set(lights) == {"KeyA", "KeyB", "FillLight", "RimLight"}
     a, b = lights["KeyA"]["dir"], lights["KeyB"]["dir"]
-    # raking: both travel downward at ~40 deg elevation
-    assert a[2] < -0.5 and b[2] < -0.5
+    # raking: both travel downward, SHALLOWLY (10° tuned; ~3-17° band)
+    assert a[2] < -0.05 and b[2] < -0.05
+    assert a[2] > -0.30 and b[2] > -0.30
     # perpendicular horizontal travel — neither quilt axis is privileged
     dot = a[0] * b[0] + a[1] * b[1]
     assert abs(dot) < 0.01, dot
     # each key rakes at full horizontal strength along its own axis
     assert abs(a[0]) > 0.7 and abs(a[1]) < 0.01  # KeyA travels along X
     assert abs(b[1]) > 0.7 and abs(b[0]) < 0.01  # KeyB travels along Y
+    # fill is a whisper — it flattens relief amplitude measurably
+    assert lights["FillLight"]["energy"] <= 0.2
     total = sum(l["energy"] for l in lights.values())
     assert total < 7.0  # round-3 rig total (clipped the border to pure white)

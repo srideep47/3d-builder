@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from enum import Enum
 from typing import Any, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Unit(str, Enum):
@@ -173,6 +173,45 @@ class ReviewCloseupSpec(BaseModel):
     frame: Literal["part", "model_height"] = "part"  # part bounds, or full model height at the part's x/y
 
 
+class ContrastProbeSpec(BaseModel):
+    """Absolute-contrast probe on one rendered view (Phase 8 item 2).
+
+    The §H defect: a fill-flattened quilt passed review because the FFT
+    axis RATIO looked healthy — a ratio reaches 1.0 when both terms go to
+    zero. A probe pins an absolute grey-level amplitude floor (owner's
+    suggestion: 6+, i.e. a 12-level peak-to-trough swing) at the product's
+    relief pitch. Product knowledge (which view, which region, what pitch)
+    lives in the template — rule 11; the finishing layer only threads it
+    through and records the numbers.
+    """
+    name: str                                              # report label
+    view: Literal["front", "side", "top", "iso"] = "top"   # which rendered view
+    # normalized image coords (x0, y0, x1, y1), y from the TOP
+    region: list[float]
+    # expected relief cycles ACROSS the region, [x, y]
+    cycles: list[float]
+    band: list[float] = Field(default_factory=lambda: [0.6, 1.4])
+    min_amplitude: float = 6.0                             # grey levels
+    axes: Literal["both", "x", "y"] = "both"               # which axes the floor gates
+
+    @model_validator(mode="after")
+    def _sane(self) -> "ContrastProbeSpec":
+        if len(self.region) != 4:
+            raise ValueError("region must be [x0, y0, x1, y1]")
+        x0, y0, x1, y1 = self.region
+        if not (0.0 <= x0 < x1 <= 1.0 and 0.0 <= y0 < y1 <= 1.0):
+            raise ValueError(
+                f"region {self.region} must satisfy 0<=x0<x1<=1 and 0<=y0<y1<=1 "
+                "(normalized image coordinates, y from the top)")
+        if len(self.cycles) != 2 or any(c <= 0 for c in self.cycles):
+            raise ValueError(f"cycles {self.cycles} must be two positive values [x, y]")
+        if len(self.band) != 2 or not (0.0 < self.band[0] < self.band[1]):
+            raise ValueError(f"band {self.band} must be 0 < lo < hi")
+        if self.min_amplitude < 0:
+            raise ValueError("min_amplitude must be >= 0")
+        return self
+
+
 class PartSpec(BaseModel):
     name: str
     shape: ShapeType = ShapeType.ROUNDED_BOX
@@ -241,3 +280,6 @@ class ObjectSpec(BaseModel):
     # review-render close-ups (round 4): threaded verbatim into the
     # render_views op; product knowledge lives in the template
     review_closeups: list[ReviewCloseupSpec] | None = None
+    # absolute-contrast probes (Phase 8 item 2): run against the rendered
+    # review views; amplitude floor in grey levels, never a ratio
+    contrast_probes: list[ContrastProbeSpec] | None = None

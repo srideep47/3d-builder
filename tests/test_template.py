@@ -350,6 +350,42 @@ def test_closeup_part_must_exist_in_template():
         TemplateSpec.model_validate(data)
 
 
+# ── contrast probes (Phase 8 item 2 — the §H absolute-floor fix) ─────────────
+
+
+def test_contrast_probes_flow_into_spec(mattress):
+    """The absolute-contrast probe (view, region, cycles, floor) is
+    template product knowledge threaded verbatim into the ObjectSpec —
+    the finishing layer only measures and records. Pinned alongside it:
+    the cycles are scale-invariant (0.575 x cells_across at the fixed view
+    framing), so ONE probe definition covers every job-card size."""
+    spec, _warnings = compile_spec(mattress, _job(2.032, 1.524, 0.254, code="Q4"))
+    assert spec.contrast_probes is not None
+    (p,) = spec.contrast_probes
+    assert (p.name, p.view, p.axes) == ("crown_quilt", "top", "both")
+    assert p.region == [0.25, 0.25, 0.75, 0.75]
+    assert p.cycles == [10.0, 10.0]  # 0.575 x 17 cells across ~= 9.8
+    assert p.band == [0.6, 1.4]
+    assert p.min_amplitude == 6.0    # grey levels — never a ratio
+
+
+@pytest.mark.parametrize("bad_region", [
+    [0.5, 0.5, 0.2, 0.8],   # x0 >= x1
+    [-0.1, 0.0, 0.5, 0.5],  # out of range
+    [0.0, 0.0, 1.0],        # wrong arity
+])
+def test_probe_region_must_be_sane(bad_region):
+    from src.spec.schema import ContrastProbeSpec
+    with pytest.raises(ValueError, match="region"):
+        ContrastProbeSpec(name="x", region=bad_region, cycles=[10, 10])
+
+
+def test_probe_cycles_must_be_positive_pair():
+    from src.spec.schema import ContrastProbeSpec
+    with pytest.raises(ValueError, match="cycles"):
+        ContrastProbeSpec(name="x", region=[0.0, 0.0, 1.0, 1.0], cycles=[10, 0])
+
+
 def test_decal_is_centred_on_the_velvet_mass(compiled, mattress):
     """Round 4: with the single velvet mass at z 0.21..0.48 of H, the label
     is re-centred on it (0.345 of H) — the patch overhangs the ribs like a

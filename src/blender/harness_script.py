@@ -1594,28 +1594,55 @@ def op_export_usdz(params):
     }
 
 
-def setup_studio_lighting():
-    """Cross-key review rig (round 4, owner's order): the review renders are
-    the QUALITY GATE, so the rig must not misrepresent the model.
+def setup_studio_lighting(rigs=None):
+    """Cross-key review rig (round 4; Phase 8 item 2 re-tuned on measured
+    absolute contrast): the review renders are the QUALITY GATE, so the rig
+    must not misrepresent the model.
 
-    - TWO axis-aligned raking keys, 90 deg apart in azimuth (each ~40 deg
-      elevation): a single key shades only the relief lines perpendicular
-      to its azimuth, so a correct square quilt grid photographs as
-      one-directional corduroy (measured on the round-3 rig: 12x FFT power
-      asymmetry between the quilt axes in the top render). One key travels
-      along -X (rakes X-gradient relief, lights the +X face the side view
-      sees), the other along +Y (rakes Y-gradient relief, lights the front
-      face) — every surface axis keeps exactly one full-strength raking
-      light, so neither is privileged.
-    - Total energy well under the round-3 rig's 7 W/m^2: bright fabric must
-      land with specular headroom, not clip to pure white ("white-on-white"
-      hid the 9.4% velvet from the reviewer).
-    - A steep diagonal fill lifts the front and side faces without
-      flattening relief; a rim from behind separates the silhouette.
+    - TWO axis-aligned raking keys, 90 deg apart in azimuth: a single key
+      shades only the relief lines perpendicular to its azimuth, so a
+      correct square quilt grid photographs as one-directional corduroy.
+      One key travels along -X (rakes X-gradient relief, lights the +X
+      face the side view sees), the other along +Y (rakes Y-gradient
+      relief, lights the front face) — every surface axis keeps exactly
+      one full-strength raking light, so neither is privileged.
+    - Phase 8 item 2 tune (fixture RIGTUNE0001, flat 2000x1200x300 mm
+      crown, pure-form substrate, src/render/metrics.py): the round-4
+      keys at 40 deg elevation left the 14 mm quilt relief under the
+      6-grey-level floor on the X axis (2.85 gl measured) — relief
+      contrast scales with cot(elevation) and the quilt is shallow.
+      Keys now rake at 10 deg elevation (cot 40 -> cot 10 is ~4.8x the
+      modulation/mean ratio) with energy 2.5: measured 9.49 gl (X) /
+      7.50 gl (Y) at the quilt pitch, both above the 6 floor, all four
+      views mean 146-171, zero clipping.
+    - Fill reduced 0.7 -> 0.1 per the owner's order ("reduce fill until
+      form returns"): fill is a steep near-vertical wash — it lifts puff
+      valleys toward peak luminance and the AgX shoulder compresses what
+      remains. Measured on the sweep: every 0.1 of fill cost ~0.5 gl of
+      quilt amplitude. A whisper remains for corner lift.
+    - Rim from behind separates the silhouette (front/side views); its
+      35 deg elevation grazes Y-relief too, which is why it stays at the
+      lower 0.6 energy.
+    - Total energy well under the round-3 rig's 7 W/m^2: bright fabric
+      must land with specular headroom, not clip to pure white
+      ("white-on-white" hid the 9.4% velvet from the reviewer).
+
+    SUBSTRATE RULE (Phase 8 lesson, hard-won): rig tuning must NOT use a
+    prepared-but-unbaked GLB. The prepared scene carries atlas-repacked
+    UVs while its materials still reference SOURCE textures — the normal
+    map then samples through garbage UVs and tilts the effective shading
+    normals arbitrarily (measured: crown pitch-black under both keys,
+    healthy +0.97 nz in the file). Tune on a pure-form substrate (flat
+    albedo, normal maps stripped) and VERIFY on the real baked LP —
+    src/client/package.py threads the probes over the baked LP renders.
 
     Sun direction convention (verified against the round-3 rig's light
     locations): direction = Rz(rz) @ Rx(rx) @ (0, 0, -1), so the horizontal
     travel azimuth is 90 + rz degrees and the elevation is 90 - rx degrees.
+
+    `rigs` (optional, caller-threaded — used by the rig sweep that tuned
+    these constants) overrides the committed rig: a list of
+    (name, type, energy, (rot_x, rot_y, rot_z)) tuples.
     """
     import bpy
 
@@ -1625,16 +1652,19 @@ def setup_studio_lighting():
 
     # (name, energy, (rot_x, rot_y, rot_z) in degrees) — suns are
     # direction-only; location is irrelevant.
-    rigs = [
-        # X-axis key: travels toward -X, elevation 40 (from the +X side).
-        ("KeyA", "SUN", 1.8, (50, 0, 90)),
-        # Y-axis key: travels toward +Y, elevation 40 (from the front).
-        ("KeyB", "SUN", 1.8, (50, 0, 0)),
-        # Steep soft fill from front-right-top (travel az 45, elev 65).
-        ("FillLight", "SUN", 0.7, (25, 0, -45)),
-        # Rim from behind, elevation 35 (travel toward -Y).
-        ("RimLight", "SUN", 1.2, (-55, 0, 0)),
-    ]
+    if rigs is None:
+        rigs = [
+            # X-axis key: travels toward -X, elevation 10 (from the +X side).
+            # Low elevation = raking: shallow quilt relief reads as form.
+            ("KeyA", "SUN", 2.5, (80, 0, 90)),
+            # Y-axis key: travels toward +Y, elevation 10 (from the front).
+            ("KeyB", "SUN", 2.5, (80, 0, 0)),
+            # Steep soft fill from front-right-top (travel az 45, elev 65):
+            # a whisper — fill flattens relief amplitude measurably.
+            ("FillLight", "SUN", 0.1, (25, 0, -45)),
+            # Rim from behind, elevation 35 (travel toward -Y).
+            ("RimLight", "SUN", 0.6, (-55, 0, 0)),
+        ]
     for name, ltype, energy, rot in rigs:
         light_data = bpy.data.lights.new(name=name, type=ltype)
         light_data.energy = energy
@@ -1735,7 +1765,13 @@ def op_render_views(params):
         return {"success": False, "error": "No meshes to render"}
 
     bounds = get_mesh_bounds(meshes)
-    setup_studio_lighting()
+    # caller-threaded rig override (rig sweeps / alternative studios); None
+    # keeps the committed tuned rig
+    lighting = params.get("lighting")
+    if lighting is not None:
+        lighting = [(r["name"], r.get("type", "SUN"), float(r["energy"]),
+                     tuple(r.get("rot", (0, 0, 0)))) for r in lighting]
+    setup_studio_lighting(rigs=lighting)
 
     import bpy
 

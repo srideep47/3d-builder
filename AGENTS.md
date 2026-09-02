@@ -158,9 +158,42 @@
   the uniformity metric that must stay ~1.0 — never read a raw ratio as
   starvation when the spread was authored. Pinned in
   `tests/test_texel_priority.py`.
+- **The review rig is a raking instrument** (Phase 8 item 2, §H): the
+  committed `setup_studio_lighting` defaults are KeyA/KeyB SUN 2.5 at
+  10° elevation on perpendicular axes, fill 0.1 (a whisper — each 0.1
+  fill costs ~0.5 grey levels of relief amplitude), rim 0.6/35°. Relief
+  contrast scales with cot(elevation); the round-4 40° keys left the
+  quilt under the floor while the FFT ratio looked healthy. Tuned under
+  EEVEE Next + AgX scene defaults — a Blender upgrade that changes them
+  trips the amplitude pin first (`tests/test_render_rig.py`).
+- **Never tune or pin the rig on a prepared-but-unbaked GLB** (SUBSTRATE
+  RULE): after `prepare_delivery_scene` the UVs are atlas-repacked while
+  materials still reference SOURCE textures — normal maps then sample
+  garbage and tilt the shading normals arbitrarily (crown rendered black
+  under healthy file normals). Tune on a pure-form substrate (flat
+  albedo, textures stripped); verify on the real baked LP. And
+  discriminate form from albedo with a zero-gradient overhead sun — knit
+  albedo aliased onto the quilt grid measures ~10.5 grey levels of
+  SPURIOUS modulation.
+- **Review contrast gates on absolute grey-level amplitude, weakest
+  gated axis** (Phase 8 item 2): `src/render/metrics.py:
+  measure_contrast_probe` (Hann rFFT2 at the template-authored pitch,
+  ±0.6–1.4× search band; conservative ~13% at 10 cycles across from the
+  detrend sinc — the floor is calibrated against THIS analyzer). A ratio
+  alone must never gate (§H: ratio 0.87 while the quilt sat at 0.81/0.96
+  grey levels), and neither may one axis stand in for another — the
+  floor keys on min(amp_x, amp_y) with `axes: both|x|y`. Probes live in
+  `templates/<class>.yaml` (`contrast_probes`, rule 11) — cycles are
+  scale-invariant (0.575 × cells_across at the square view framing),
+  floor 6.0 grey levels = a 12-level visible swing. Results land in
+  `finish.render_metrics` (qa_report, delivered AND blocked flows) and
+  the CLI panel; probe failure is loud evidence, NOT delivery refusal —
+  the six client gates own refusal. Pinned in `tests/test_render_metrics.py`
+  (ratio-never-gates semantics) + `tests/test_render_rig.py` (floor on
+  the rendered fixture).
 
 ## Verification
-- `python -m pytest tests -q` — 401 tests; `blender`-marked tests auto-skip
+- `python -m pytest tests -q` — 422 tests; `blender`-marked tests auto-skip
   when no Blender is found.
 - AI builds against a client card: `python -m src.cli build -p <prompt> -m
   <measurements> -i <photo> -n <name> --job input/jobs/<CODE>.yaml` (the
@@ -180,6 +213,13 @@
   independently parsed, hashes, placeholders);
   `python -m src.cli validate <package_dir> --job job.yaml` re-checks a
   package on disk (local mirror of the MetaZtech validator panel).
+- Review-render contrast evidence: every package/blocked qa_report carries
+  `finish.render_metrics` (per-view balance stats + the template's
+  absolute-contrast probes, grey levels with floors). Rig-physics fixture:
+  `input/jobs/RIGTUNE0001.yaml` (authored flat-mattress dims — a fixture,
+  not a product job) → `python -m src.cli package --template
+  templates/mattress.yaml --job input/jobs/RIGTUNE0001.yaml` measures the
+  real baked LP (x 9.587 / y 7.578 grey levels at the 6.0 floor).
 - Template surfaces: `python scripts/gen_template_textures.py --template
   templates/<class>.yaml` composes CC0 scan + procedural textures into
   `assets/textures/<class>/` (deterministic; provenance in each

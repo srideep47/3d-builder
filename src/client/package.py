@@ -320,6 +320,54 @@ _BAKE_MAP_FILES: dict[str, str] = {
 }
 
 
+def _collect_render_metrics(
+    views: dict, probes: list[dict], log: Callable[[str], None]
+) -> dict[str, Any] | None:
+    """Measure the rendered review views (Phase 8 item 2 — the §H fix).
+
+    view_stats (balance + clipping) on every rendered view, plus the
+    template's absolute-contrast probes (grey-level amplitude at the
+    authored relief pitch — never a ratio). Probes fail CLOSED (an
+    unmeasurable region reports valid=False + passed=False + reason, never
+    a silent pass), but a probe failure is loud recorded evidence for the
+    owner/reviewer, NOT a delivery refusal — the six client gates own
+    refusal. Returns None when there is nothing to measure.
+    """
+    if not views and not probes:
+        return None
+    from ..render.metrics import measure_contrast_probe, view_stats
+
+    view_results = {name: view_stats(path) for name, path in sorted(views.items())}
+    probe_results: list[dict[str, Any]] = []
+    for p in probes:
+        path = views.get(p["view"])
+        if path is None:
+            r: dict[str, Any] = {"valid": False, "passed": False,
+                                 "reason": f"view {p['view']!r} was not rendered"}
+        else:
+            r = measure_contrast_probe(
+                path, tuple(p["region"]), tuple(p["cycles"]),
+                band=tuple(p["band"]), min_amplitude=p["min_amplitude"],
+                axes=p["axes"])
+        probe_results.append({"name": p["name"], "view": p["view"], **r})
+        if not r.get("valid"):
+            log(f"contrast probe {p['name']} INVALID ({p['view']} view): "
+                f"{r.get('reason', '?')} — recorded, not a delivery refusal")
+        elif r.get("passed"):
+            log(f"contrast probe {p['name']} PASS ({p['view']} view): "
+                f"amplitude x {r['amplitude_x']} / y {r['amplitude_y']} grey "
+                f"levels >= floor {p['min_amplitude']} (axes={p['axes']}, "
+                f"detected cycles x {r['detected_cycles_x']} / "
+                f"y {r['detected_cycles_y']})")
+        else:
+            log(f"contrast probe {p['name']} FAIL ({p['view']} view): "
+                f"amplitude {r.get('amplitude')} grey levels < floor "
+                f"{p['min_amplitude']} (x {r.get('amplitude_x')}, "
+                f"y {r.get('amplitude_y')}) — flat relief, the rig or the "
+                f"geometry lost the quilt")
+    return {"views": view_results, "probes": probe_results}
+
+
 def finish_delivery(
     job: JobCard,
     spec,
@@ -458,13 +506,20 @@ def finish_delivery(
     log(f"LP exported: {dec.get('triangle_equivalent')} tri-eq "
         f"(budget {budget}, decimated={dec.get('decimated')})")
 
-    def _render_review() -> list[str]:
-        # Close-ups (round 4) come from the spec's template — the finishing
-        # layer never decides WHAT to frame, only threads it through.
+    def _render_review() -> tuple[list[str], dict[str, Any] | None]:
+        # Close-ups (round 4) and contrast probes (Phase 8 item 2) come
+        # from the spec's template — the finishing layer never decides
+        # WHAT to frame or measure, only threads it through.
         closeups = [
             {"name": c.name, "part": c.part, "direction": c.direction,
              "pad": c.pad, "frame": c.frame}
             for c in (getattr(spec, "review_closeups", None) or [])
+        ]
+        probes = [
+            {"name": p.name, "view": p.view, "region": list(p.region),
+             "cycles": list(p.cycles), "band": list(p.band),
+             "min_amplitude": p.min_amplitude, "axes": p.axes}
+            for p in (getattr(spec, "contrast_probes", None) or [])
         ]
         rv = _timed("review_renders", lambda: _require(runner.execute_op("render_views", {
             "model_path": str(lp_glb),
@@ -475,8 +530,9 @@ def finish_delivery(
         if rv.get("closeup_skips"):
             log(f"review close-ups skipped: {rv['closeup_skips']}")
         files_rendered = sorted(str(p) for p in review_dir.glob("*.png"))
+        render_metrics = _collect_render_metrics(rv.get("views", {}), probes, log)
         log(f"review renders awaiting owner review: {files_rendered}")
-        return files_rendered
+        return files_rendered, render_metrics
 
     # ── 3b. PLACEHOLDER-DIMENSION REFUSAL (owner's overnight order, T4) ──────
     # The pipeline is exercised (structural review renders are valid output)
@@ -484,7 +540,7 @@ def finish_delivery(
     # owner supplies real ones (rule 9 — never inferred, never a guessed
     # standard size). Evidence lands in output/blocked/<JOB>/qa_report.json.
     if job.dims_placeholder:
-        review_files = _render_review()
+        review_files, render_metrics = _render_review()
         blocked_dir = out_root.parent / "blocked" / job.job_code
         blocked_dir.mkdir(parents=True, exist_ok=True)
         blocked_report = {
@@ -517,6 +573,7 @@ def finish_delivery(
                 "uv_diagnostics": prep.get("uv"),
                 "bake": bake.get("maps"),
                 "review_renders": review_files,
+                "render_metrics": render_metrics,
                 "review_note": "Structural review only — band order, materials, "
                                "tape and label placement. Proportions render "
                                "correctly at any dims (fractions of H), but "
@@ -589,8 +646,9 @@ def finish_delivery(
 
     # ── 5. review renders for the owner (valid T3 output: awaits review) ────
     review_files: list[str] = []
+    render_metrics: dict[str, Any] | None = None
     if review_renders:
-        review_files = _render_review()
+        review_files, render_metrics = _render_review()
 
     # ── 6. close the timing ledger: assembly + total ────────────────────────
     finish_section = {
@@ -611,6 +669,7 @@ def finish_delivery(
         "bake": bake.get("maps"),
         "ao_method": bake.get("maps", {}).get("ao_method"),
         "review_renders": review_files,
+        "render_metrics": render_metrics,
         "review_note": "Renders await owner review (T3 protocol: a list of "
                        "renders awaiting review is a valid output).",
     }

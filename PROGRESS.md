@@ -1993,3 +1993,111 @@ priority part measures 4.00× the plain part's texels/m, atlas stays valid
 **Suite: 401 passed in 121.86 s** (401 = 389 + 12 texel-priority;
 baseline grew, nothing re-baselined). S1 honored (no live vision calls).
 Committed under the owner's identity, no push.
+
+## Session log — 2026-09-02 (round 12: Phase 8 item 2 — raking key + absolute-contrast metric)
+
+Master order Phase 8 item 2: "Add a key that reveals form, reduce fill
+until form returns without reintroducing clipping, and pin a floor on
+absolute grey-level amplitude at the quilt pitch — suggest 6+ — alongside
+the existing balance and clipping checks. **A ratio alone must never gate
+this again.**" (§H context: round 4's FFT axis ratio read 0.87 while fill
+had flattened the quilt to 0.81/0.96 grey levels — a ratio reaches 1.0
+when both terms go to zero.)
+
+### The substrate bug that almost hijacked the tune
+
+The first tuning substrate (the prepared-but-unbaked GLB) was invalid:
+`prepare_delivery_scene` atlas-repacks UVs while materials still reference
+SOURCE textures, so the normal map sampled garbage UVs and tilted the
+effective shading normals arbitrarily — the crown rendered pitch-black
+under both keys while the file NORMAL attribute was healthy (nz +0.985)
+and the light math said it should be lit (keys 2.31 vs rim 0.689
+irradiance, but rendered means 19 vs 123 — a monotonicity violation that
+exposed the substrate, not the rig). **SUBSTRATE RULE**: rig tuning runs
+on a pure-form substrate (flat 0.75 albedo, textures stripped); the real
+baked LP is the verification target. Second trap on the stripped GLB:
+the knit albedo aliases onto the quilt grid — 10.55 grey levels of
+SPURIOUS y-modulation at the quilt pitch under a zero-gradient overhead
+sun. The overhead-sun discriminator (no gradient ⇒ any modulation is
+albedo) separates form from texture before any rig conclusion.
+
+### The tuned rig (committed as `setup_studio_lighting` defaults)
+
+| Light | Type | Energy | Rot (°) | Meaning |
+|---|---|---|---|---|
+| KeyA | SUN | 2.5 | (80, 0, 90) | elevation 10°, travels −X: rakes x-relief |
+| KeyB | SUN | 2.5 | (80, 0, 0) | elevation 10°, travels +Y: rakes y-relief, lights front wall |
+| FillLight | SUN | 0.1 | (25, 0, −45) | steep whisper (was 0.7) |
+| RimLight | SUN | 0.6 | (−55, 0, 0) | 35° from behind |
+
+Physics: relief modulation scales with cot(elevation) — the round-4 40°
+keys left the 14 mm quilt relief under the floor; 10° gives ~4.8× the
+modulation/mean ratio. AgX's shoulder compresses amplitude at high mean
+luminance, so a lower mean preserves modulation. Fill flattens
+measurably: ~0.5 grey levels of quilt amplitude per 0.1 fill energy
+(sweep-verified; the analytic "fill's 0.906 vertical component flattens
+x" hypothesis was WRONG — per-light ablation beat theory).
+
+### The probe (rule 11 all the way down)
+
+`src/render/metrics.py` (pure numpy+PIL): `view_stats` (balance/clipping
+over opaque pixels) + `measure_contrast_probe` — Hann-windowed rFFT2
+amplitude at the authored pitch (3-point parabolic peak in a 0.6–1.4×
+search band), scanline p95−p5 cross-check, box-blur detrend. The gate
+keys on the WEAKEST gated axis (`axes: both|x|y`): a strong y can never
+carry a dead x past the floor — the §H defect rotated 90°, caught while
+writing the tests. The measurement is conservative by ~13% at 10 cycles
+across (detrend sinc); the floor is calibrated against THIS analyzer.
+Fail-closed refusals (region < 90% opaque, < 32 px) carry
+`passed: false`, never a silent pass. Probe failure is loud recorded
+evidence in qa_report, NOT delivery refusal — the six client gates own
+refusal.
+
+Product knowledge lives in `templates/mattress.yaml`
+(`contrast_probes: crown_quilt, top view, region [0.25,0.25,0.75,0.75],
+cycles [10,10], floor 6.0, axes both`), threaded schema → template
+compile → ObjectSpec → `_collect_render_metrics` → `finish.render_metrics`
+in qa_report (both the delivered and the blocked flows) → CLI panel.
+Cycles are scale-invariant: the square top-view framing spans
+0.575 × cells_across ≈ 9.78 ≈ 10 at ANY job-card size (verified:
+detected 9.9/9.75).
+
+### Measured
+
+- Pure-form fixture (RIGTUNE0001, 2000×1200×300 mm, 17×10 quilt cells):
+  **x 9.486 / y 7.495 grey levels** (floor 6.0), detected cycles
+  9.9/9.75, means 146–171, clip 0.0000, crush ≈ 0. Deterministic — the
+  rig pin test reproduces these exact numbers.
+- **Real baked LP** (full T4 chain, `output/packages/RIGTUNE0001/`):
+  **x 9.587 / y 7.578 grey levels**, peak-to-trough 33.6, all six client
+  gates PASS (L/W exact, H Δ−0.006 mm), LP 13,380 tri-eq of 50,000,
+  124 islands 0 overlaps, texel ratio 4.0 raw / 1.0 priority-weighted.
+  The baked normal map ADDS contrast over pure form — the delivery
+  substrate exceeds the tuning substrate.
+- RIGTUNE0001 is an AUTHORED fixture card (flat mattress proportions for
+  the rig physics), not a product job; MAYA00053153 stays
+  `dims_placeholder: true` (rule 9 untouched).
+
+### Tests
+
+New `tests/test_render_metrics.py` (13, synthetic gratings): per-axis and
+additive amplitude recovery ±5% at 20 cycles (where detrend sinc ≈ 0),
+detected-cycles accuracy, out-of-band pitch exclusion, **ratio-never-gates
+(same ratio 1.0: 2/2 gl fails, 12/12 passes)**, per-axis gating
+(strong y + dead x fails on axes=both), fail-closed refusals, clipped
+fraction over opaque only. New `tests/test_render_rig.py` (3,
+Blender-marked): the default rig meets the floor on BOTH axes on the
+rendered pure-form fixture, views balanced (clip < 0.02, mean 40–230),
+and the tune environment pinned (EEVEE Next + AgX — the constants were
+tuned under these scene defaults; a Blender upgrade that changes them
+trips the floor first). 5 template-threading tests in
+`tests/test_template.py`. The round-4 cross-key rig pin was UPDATED, not
+weakened: the perpendicular two-key/no-privilege contract stands, the
+elevation band inverted to shallow raking (10° tuned, 3–17° band) with
+the §H cause recorded, fill-whisper and total-energy caps added.
+
+**Suite: 422 passed in 151.89 s** (422 = 401 + 21 new: 13 analyzer + 3
+Blender rig pin + 5 template threading; the round-4 rig pin was updated
+in place, not added). Baseline grew, nothing re-baselined. S1 honored
+(no live vision calls — the probe is numeric, no VLM involved). Committed
+under the owner's identity, no push.

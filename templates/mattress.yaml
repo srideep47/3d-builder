@@ -225,4 +225,23 @@ review_closeups:         # round 4: whole-model views crush the label to
     pad: 0.1
     frame: model_height
 
+contrast_probes:         # Phase 8 item 2 — the §H fix: an ABSOLUTE grey-level
+                         # amplitude floor at the quilt pitch. Round 4's FFT
+                         # axis ratio read 0.87 while fill light had flattened
+                         # the quilt to 0.81/0.96 grey levels — a ratio reaches
+                         # 1.0 when both terms go to zero. Never a ratio again.
+  - name: crown_quilt    # the top view's center: the quilt cell grid
+    view: top
+    region: [0.25, 0.25, 0.75, 0.75]   # normalized image coords, y from top;
+                                       # centered on the framed mattress
+    # cycles across the region are scale-invariant: the top view frames
+    # 1.15*max(L,W) of a rect whose footprint fills it, so the region spans
+    # 0.575*cross-cells; 17 cells across -> ~9.8 on both axes at ANY job
+    # size. Band [0.6,1.4] tolerates framing slop, excludes micro-prints.
+    cycles: [10, 10]
+    band: [0.6, 1.4]
+    min_amplitude: 6.0   # grey levels; amplitude = half the peak-to-trough
+                         # swing, so the floor means a 12-level visible swing
+    axes: both           # a square quilt grid must read in BOTH directions
+
 tri_budget: 50000     # Simple tier provisional ceiling (open question §9.2)

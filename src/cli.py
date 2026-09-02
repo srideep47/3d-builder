@@ -500,6 +500,35 @@ def package(
             f"review renders: {len(finish['review_renders'])} awaiting owner review "
             f"({finish['review_renders'][0] if finish['review_renders'] else '-'})",
             title="Finish Pipeline (T3)", border_style="green"))
+        rm = finish.get("render_metrics") or {}
+        probe_rows = rm.get("probes") or []
+        if probe_rows:
+            lines = []
+            for p in probe_rows:
+                if not p.get("valid"):
+                    status, detail = "[red]INVALID[/]", p.get("reason", "?")
+                elif p.get("passed"):
+                    status = "[green]PASS[/]"
+                    detail = (f"amplitude x {p['amplitude_x']} / y {p['amplitude_y']} "
+                              f"grey levels >= floor {p['min_amplitude']} "
+                              f"(axes={p['axes']})")
+                else:
+                    status = "[red]FAIL[/]"
+                    detail = (f"amplitude {p.get('amplitude')} grey levels < floor "
+                              f"{p['min_amplitude']} (x {p.get('amplitude_x')}, "
+                              f"y {p.get('amplitude_y')})")
+                lines.append(f"{p['name']} ({p['view']} view): {status} — {detail}")
+            vs = [v for v in (rm.get("views") or {}).values() if v.get("valid")]
+            if vs:
+                lines.append(
+                    f"view stats: {len(vs)} views | worst clipped "
+                    f"{max(v.get('clipped_fraction', 0) for v in vs):.4f} | "
+                    f"mean luminance {min(v['mean_luminance'] for v in vs):.0f}"
+                    f"-{max(v['mean_luminance'] for v in vs):.0f}")
+            console.print(Panel(
+                "\n".join(lines),
+                title="Render Contrast Probes (absolute grey levels — never a ratio)",
+                border_style="green"))
     console.print(f"[bold]qa_report.json:[/] [cyan]{report['package_dir']}/qa_report.json[/]")
 
     if not report["all_passed"]:

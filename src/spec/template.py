@@ -39,8 +39,8 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..client.job import JobCard
-from .schema import (ConstraintSpec, DetailSpec, ObjectSpec,
-                     PBRMaterial, PartSpec, ReviewCloseupSpec,
+from .schema import (ConstraintSpec, ContrastProbeSpec, DetailSpec,
+                     ObjectSpec, PBRMaterial, PartSpec, ReviewCloseupSpec,
                      SeamRingSpec)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -92,6 +92,18 @@ class CloseupSpec(BaseModel):
     direction: Literal["front", "back", "left", "right"] = "front"
     pad: float = Field(default=0.3, gt=0)
     frame: Literal["part", "model_height"] = "part"
+
+
+class ProbeSpec(ContrastProbeSpec):
+    """Template-side absolute-contrast probe (Phase 8 item 2).
+
+    Subclasses the ObjectSpec probe so validation lives in ONE place.
+    Authored per product class: which rendered view, the normalized probe
+    region, the expected relief cycles across it, the absolute amplitude
+    floor in grey levels (never a ratio — §H), and which axes the floor
+    gates. The cycle math is scale-invariant (cycles across the region
+    depend only on the template's own cell count and the fixed view
+    framing), so one probe definition covers every job-card size."""
 
 
 class TapeEdgeSpec(BaseModel):
@@ -228,6 +240,7 @@ class TemplateSpec(BaseModel):
     textures: dict[str, SurfaceSpec]
     features: FeaturesSpec = Field(default_factory=FeaturesSpec)
     review_closeups: list[CloseupSpec] = Field(default_factory=list)
+    contrast_probes: list[ProbeSpec] = Field(default_factory=list)
     tri_budget: int = Field(default=50000, gt=0)
 
     @field_validator("product_class")
@@ -790,6 +803,14 @@ def compile_spec(template: TemplateSpec, job: JobCard) -> tuple[ObjectSpec, list
                 pad=cu.pad, frame=cu.frame,
             )
             for cu in template.review_closeups
+        ] or None,
+        contrast_probes=[
+            ContrastProbeSpec(
+                name=p.name, view=p.view, region=list(p.region),
+                cycles=list(p.cycles), band=list(p.band),
+                min_amplitude=p.min_amplitude, axes=p.axes,
+            )
+            for p in template.contrast_probes
         ] or None,
     )
     return spec, warnings
