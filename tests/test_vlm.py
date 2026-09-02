@@ -12,15 +12,18 @@ modelVersion, responseId.
 from __future__ import annotations
 
 import base64
+import io
 import threading
 import time
 from pathlib import Path
 
 import pytest
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from PIL import Image
 
 from src.agent.loop import AgentLoop
+from src.ai import vlm
 from src.ai.vlm import (GEMINI_API_KEY_ENV, GeminiVisionProvider,
                         LocalVLMClient, OpenAICompatibleVisionProvider,
                         VisionProvider, get_local_vlm, get_vision_provider)
@@ -152,6 +155,17 @@ def test_visual_gate_wiring(tmp_path):
 mock_gemini_app = FastAPI()
 GEMINI_CALLS: dict = {"model": None, "headers": None, "body": None}
 
+# §7 429 simulation: "off" serves normally; "rate_limit" answers 429
+# RATE_LIMIT_EXCEEDED for `remaining` calls then recovers; "quota" answers
+# 429 QUOTA_EXCEEDED / RESOURCE_EXHAUSTED forever.
+GEMINI_429: dict = {"mode": "off", "remaining": 0}
+
+
+@pytest.fixture(autouse=True)
+def _gemini_429_reset():
+    yield
+    GEMINI_429.update(mode="off", remaining=0)
+
 
 @mock_gemini_app.get("/v1beta/models")
 def gemini_list_models():
@@ -160,6 +174,17 @@ def gemini_list_models():
 
 @mock_gemini_app.post("/v1beta/models/{model}:generateContent")
 async def gemini_generate(model: str, request: Request):
+    if GEMINI_429["mode"] == "quota":
+        return JSONResponse(status_code=429, content={
+            "error": {"code": 429, "status": "RESOURCE_EXHAUSTED",
+                      "message": "quota", "details": [
+                          {"reason": "QUOTA_EXCEEDED"}]}})
+    if GEMINI_429["mode"] == "rate_limit" and GEMINI_429["remaining"] > 0:
+        GEMINI_429["remaining"] -= 1
+        return JSONResponse(status_code=429, content={
+            "error": {"code": 429, "status": "RESOURCE_EXHAUSTED",
+                      "message": "rate", "details": [
+                          {"reason": "RATE_LIMIT_EXCEEDED"}]}})
     GEMINI_CALLS["model"] = model
     GEMINI_CALLS["headers"] = dict(request.headers)
     GEMINI_CALLS["body"] = await request.json()
@@ -429,3 +454,178 @@ def test_factory_selects_provider(monkeypatch):
 
     # the historical alias still works
     assert get_local_vlm() is None or isinstance(get_local_vlm(), VisionProvider)
+
+
+# ── VISION_CONFIG §7: the 429 branch (mocked; S1 — no live calls) ────────────
+
+
+def test_rate_limit_backs_off_exponentially_then_succeeds(
+        mock_gemini_url, tmp_path, monkeypatch):
+    """RATE_LIMIT_EXCEEDED → exponential backoff with jitter, 2 s → 60 s,
+    then the call succeeds. Sleep is swapped for a recorder — no real wait."""
+    monkeypatch.setenv("THREED_VLM_API_KEY", "test-key-123")
+    sleeps: list[float] = []
+    monkeypatch.setattr(vlm, "_sleep", lambda s: sleeps.append(s))
+    GEMINI_429.update(mode="rate_limit", remaining=2)
+    img = _make_image(tmp_path)
+    provider = GeminiVisionProvider(model="gemini-3.6-flash",
+                                    base_url=mock_gemini_url)
+
+    out = provider.chat_vision("describe this", [img])
+    assert "pedestal" in out
+    assert len(sleeps) == 2
+    assert 2.0 <= sleeps[0] <= 3.0   # 2 s base + [0, 1) jitter
+    assert 4.0 <= sleeps[1] <= 5.0   # 4 s base + [0, 1) jitter
+
+
+def test_rate_limit_gives_up_after_bounded_retries(
+        mock_gemini_url, tmp_path, monkeypatch):
+    """Never loop forever: after RATE_LIMIT_MAX_RETRIES backoff retries the
+    call raises RateLimitExhaustedError (fail soft upstream), NOT the quota
+    branch — so no local-Qwen fallback is taken for a rate limit."""
+    monkeypatch.setenv("THREED_VLM_API_KEY", "test-key-123")
+    sleeps: list[float] = []
+    monkeypatch.setattr(vlm, "_sleep", lambda s: sleeps.append(s))
+    GEMINI_429.update(mode="rate_limit", remaining=10 ** 9)
+    img = _make_image(tmp_path)
+    provider = GeminiVisionProvider(model="gemini-3.6-flash",
+                                    base_url=mock_gemini_url)
+
+    with pytest.raises(vlm.RateLimitExhaustedError, match="rate limit persisted"):
+        provider.chat_vision("describe this", [img])
+    assert len(sleeps) == vlm.RATE_LIMIT_MAX_RETRIES
+    assert sleeps == sorted(sleeps)          # exponential: 2, 4, 8, 16, 32 s
+    assert 2.0 <= sleeps[0] <= 3.0
+    assert sleeps[-1] <= vlm.RATE_LIMIT_CAP_S + 1.0  # never past the 60 s cap
+
+
+def test_quota_stops_retrying_immediately(
+        mock_gemini_url, tmp_path, monkeypatch):
+    """QUOTA_EXCEEDED / RESOURCE_EXHAUSTED → stop retrying: no backoff sleep
+    at all, QuotaExhaustedError on the first response."""
+    monkeypatch.setenv("THREED_VLM_API_KEY", "test-key-123")
+    sleeps: list[float] = []
+    monkeypatch.setattr(vlm, "_sleep", lambda s: sleeps.append(s))
+    GEMINI_429.update(mode="quota", remaining=0)
+    img = _make_image(tmp_path)
+    provider = GeminiVisionProvider(model="gemini-3.6-flash",
+                                    base_url=mock_gemini_url)
+
+    with pytest.raises(vlm.QuotaExhaustedError, match="quota exhausted"):
+        provider.chat_vision("describe this", [img])
+    assert sleeps == []
+
+
+def test_quota_falls_back_to_local_qwen_verdict(
+        mock_gemini_url, mock_vlm_url, tmp_path, monkeypatch):
+    """§7 branch 2: a quota-exhausted Gemini primary is not retried — the
+    verdict comes from the configured local Qwen fallback, and the verdict
+    records quota_fallback + the fallback model honestly."""
+    monkeypatch.setattr(
+        VisionProvider, "_load_vision_config",
+        staticmethod(lambda: {
+            "vlm": {"model": "gemini-3.5-flash-lite"},
+            "local_fallback": {"base_url": mock_vlm_url, "model": "fake-vlm"},
+        }))
+    monkeypatch.setenv("THREED_VLM_API_KEY", "test-key-123")
+    GEMINI_429.update(mode="quota", remaining=0)
+    img = _make_image(tmp_path)
+    provider = GeminiVisionProvider(model="gemini-3.5-flash-lite",
+                                    base_url=mock_gemini_url)
+
+    verdict = provider.visual_verdict({"front": str(img)}, [img])
+    assert verdict["available"] is True and verdict["parsed"] is True
+    assert verdict["quota_fallback"] is True
+    assert verdict["model"] == "fake-vlm"
+    assert verdict["score"] == 8
+
+
+def test_quota_without_fallback_configured_records_honestly(
+        mock_gemini_url, tmp_path, monkeypatch):
+    """No local fallback in config → the QuotaExhaustedError surfaces as an
+    honest quota_exhausted verdict; nothing is invented."""
+    monkeypatch.setattr(
+        VisionProvider, "_load_vision_config",
+        staticmethod(lambda: {"vlm": {"model": "gemini-3.5-flash-lite"}}))
+    monkeypatch.setenv("THREED_VLM_API_KEY", "test-key-123")
+    GEMINI_429.update(mode="quota", remaining=0)
+    img = _make_image(tmp_path)
+    provider = GeminiVisionProvider(model="gemini-3.5-flash-lite",
+                                    base_url=mock_gemini_url)
+
+    verdict = provider.visual_verdict({"front": str(img)}, [img])
+    assert verdict["available"] is True and verdict["parsed"] is False
+    assert verdict["quota_exhausted"] is True
+    assert "quota" in verdict["error"]
+
+
+def test_local_primary_has_no_second_fallback(mock_vlm_url):
+    """The local tier is already the fallback tier — get_quota_fallback_provider
+    returns None rather than looping back to itself."""
+    from src.ai.vlm import get_quota_fallback_provider
+    local = OpenAICompatibleVisionProvider(base_url=mock_vlm_url, model="fake-vlm")
+    assert get_quota_fallback_provider(local) is None
+
+
+# ── Phase 5 image-size policy (overviews 768, close-ups never downscaled) ────
+
+
+def test_image_b64_downscales_only_oversized_images(tmp_path):
+    big = tmp_path / "big.png"
+    Image.new("RGB", (2000, 1000), (10, 20, 30)).save(big)
+
+    # overview/reference policy: downscale to ≤768, aspect preserved
+    _, b64 = vlm._image_b64(big, vlm.OVERVIEW_MAX_DIM)
+    resized = Image.open(io.BytesIO(base64.b64decode(b64)))
+    assert resized.size == (768, 384)
+
+    # close-up policy (max_dim=None): bytes pass through untouched
+    _, b64 = vlm._image_b64(big, None)
+    assert base64.b64decode(b64) == big.read_bytes()
+
+    # already at or below the cap: untouched
+    small = tmp_path / "small.png"
+    Image.new("RGB", (64, 64), (1, 2, 3)).save(small)
+    _, b64 = vlm._image_b64(small, vlm.OVERVIEW_MAX_DIM)
+    assert base64.b64decode(b64) == small.read_bytes()
+
+
+def test_visual_verdict_threads_the_image_policy(
+        mock_gemini_url, tmp_path, monkeypatch):
+    """Reference photos and overview renders arrive at the VLM downscaled to
+    ≤768; close-up renders arrive at NATIVE size — never downscaled."""
+    monkeypatch.setenv("THREED_VLM_API_KEY", "test-key-123")
+    big = tmp_path / "big.png"
+    Image.new("RGB", (2000, 2000), (90, 90, 130)).save(big)
+    provider = GeminiVisionProvider(model="gemini-3.6-flash",
+                                    base_url=mock_gemini_url)
+
+    verdict = provider.visual_verdict(
+        {"front": str(big), "label_closeup": str(big)}, [big])
+    assert verdict["parsed"] is True
+    assert verdict["image_policy"] == {
+        "overview_and_reference_max_dim": 768, "closeups_untouched": True}
+
+    inline = [p["inline_data"] for p in GEMINI_CALLS["body"]["contents"][0]["parts"]
+              if "inline_data" in p]
+    assert len(inline) == 3  # reference, front overview, label close-up
+    sizes = [Image.open(io.BytesIO(base64.b64decode(i["data"]))).size
+             for i in inline]
+    assert sizes[0] == (768, 768)   # reference photo
+    assert sizes[1] == (768, 768)   # overview render
+    assert sizes[2] == (2000, 2000)  # close-up: untouched
+
+
+def test_describe_sends_reference_photos_at_768(
+        mock_gemini_url, tmp_path, monkeypatch):
+    monkeypatch.setenv("THREED_VLM_API_KEY", "test-key-123")
+    big = tmp_path / "big.png"
+    Image.new("RGB", (3000, 1500), (5, 5, 5)).save(big)
+    provider = GeminiVisionProvider(model="gemini-3.6-flash",
+                                    base_url=mock_gemini_url)
+
+    assert "pedestal" in provider.describe_reference_images([big])
+    inline = [p["inline_data"] for p in GEMINI_CALLS["body"]["contents"][0]["parts"]
+              if "inline_data" in p]
+    size = Image.open(io.BytesIO(base64.b64decode(inline[0]["data"]))).size
+    assert size == (768, 384)

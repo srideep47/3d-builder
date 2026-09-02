@@ -26,7 +26,10 @@ roles:
     temperature: 0.1
 
 agent:
-  max_iterations: 5
+  # Phase 5 master order: "Hard iteration cap, start at 8. On cap: stop,
+  # report exactly what failed with the evidence." A cap-exhausted run gets
+  # manifest status "iteration_cap_exhausted" + metrics.cap_report.
+  max_iterations: 8
   wall_clock_budget_s: 900
   tool_choice: "auto"
   fallback_json_protocol: true
@@ -60,3 +63,11 @@ vision:
     api_key_env: THREED_VLM_API_KEY  # key comes from the ENV only, never this file;
                      # gemini also falls back to GEMINI_API_KEY (same value)
     timeout_sec: 120
+  # VISION_CONFIG §7 branch 2: when Gemini answers 429 QUOTA_EXCEEDED /
+  # RESOURCE_EXHAUSTED the call is NOT retried — the verdict comes from this
+  # local Qwen provider instead (vLLM on Forge; loading/unloading it and
+  # returning the GPU to Blender is a server-side ops action). null = no
+  # fallback configured; the run then records quota_exhausted honestly.
+  local_fallback:
+    base_url: null   # e.g. http://127.0.0.1:8001/v1 (OpenAI-compatible)
+    model: null      # e.g. Qwen/Qwen2.5-VL-27B-Instruct

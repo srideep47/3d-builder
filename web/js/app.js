@@ -860,7 +860,7 @@ async function refreshRunsTable() {
     tbody.innerHTML = "";
     runs.forEach((r) => {
       const st = r.status || (r.live ? "running" : "unknown");
-      const cls = st === "completed" ? "ok" : ["failed", "budget_exhausted"].includes(st) ? "bad" : st === "running" ? "info" : "warn";
+      const cls = st === "completed" ? "ok" : ["failed", "budget_exhausted", "iteration_cap_exhausted"].includes(st) ? "bad" : st === "running" ? "info" : "warn";
       const dims = (r.dimensions_m || []).map((d) => (d ?? 0).toFixed(2)).join(" × ");
       const tr = document.createElement("tr");
       tr.innerHTML = `

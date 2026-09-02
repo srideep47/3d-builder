@@ -35,6 +35,71 @@ def _safe_filename(name: str) -> str:
     return stem[:80]
 
 
+# Phase 5 owner-texture library: the directory the owner drops scanned
+# surfaces into (master order Phase 4). Auto-detected so callers change
+# nothing; an explicit AgentLoop(owner_texture_root=...) wins.
+_DEFAULT_OWNER_TEXTURE_ROOT = Path("input/textures/owner")
+
+
+def _iteration_cap_report(
+    max_iterations: int,
+    iterations_run: int,
+    verification: VerificationReport | None,
+    last_error: str | None,
+) -> dict[str, Any]:
+    """Phase 5 closed-loop contract: on iteration-cap exhaustion, report
+    exactly what failed with the evidence. Never claim a success you cannot
+    evidence — the manifest carries this verbatim."""
+    report: dict[str, Any] = {
+        "max_iterations": max_iterations,
+        "iterations_run": iterations_run,
+    }
+    if verification is not None:
+        dim = verification.dimension_gate
+        mesh = verification.mesh_gate
+        report["dimension_gate"] = {
+            "passed": dim.passed,
+            "measurements_checked": dim.measurements_checked,
+            "passed_count": dim.passed_count,
+            "failed_count": dim.failed_count,
+            "max_delta_m": dim.max_delta_m,
+            "failed_details": [d for d in dim.details if not d.get("passed")],
+            "ground_contact_passed": dim.ground_contact_passed,
+            "ground_contact_failures": dim.ground_contact_failures,
+        }
+        report["mesh_gate"] = {
+            "passed": mesh.passed,
+            "faces_count": mesh.faces_count,
+            "warnings": list(mesh.warnings),
+            "errors": list(mesh.errors),
+        }
+        failures = []
+        if not dim.passed:
+            failures.append(
+                f"dimension gate FAILED ({dim.passed_count}/"
+                f"{dim.measurements_checked} measurements passed, max delta "
+                f"{dim.max_delta_m * 1000.0:.2f} mm)"
+            )
+        if not mesh.passed:
+            failures.append(
+                f"mesh gate FAILED ({mesh.faces_count} faces; warnings: "
+                f"{'; '.join(mesh.warnings) or 'none'})"
+            )
+        report["message"] = (
+            f"Iteration cap ({max_iterations}) reached without passing gates: "
+            + "; ".join(failures)
+            + ". Stopped per the closed-loop contract; no success is claimed."
+        )
+    else:
+        report["last_error"] = last_error
+        report["message"] = (
+            f"Iteration cap ({max_iterations}) reached without a verified "
+            f"build: {last_error or 'unknown error'}. Stopped per the "
+            "closed-loop contract; no success is claimed."
+        )
+    return report
+
+
 @dataclass
 class AgentRunResult:
     success: bool
@@ -56,14 +121,26 @@ class AgentLoop:
         verifier: Verifier | None = None,
         run_store: RunStore | None = None,
         max_iterations: int | None = None,
+        owner_texture_root: str | Path | None = None,
     ):
         self.provider = provider or AptosGLMProvider()
         self.runner = runner or BlenderRunner()
         self.verifier = verifier or Verifier()
         self.run_store = run_store or RunStore()
         agent_cfg = self.provider.config.get("agent", {}) or {}
-        self.max_iterations = max_iterations or int(agent_cfg.get("max_iterations", 5))
+        # Phase 5 master order: "Hard iteration cap, start at 8."
+        self.max_iterations = max_iterations or int(agent_cfg.get("max_iterations", 8))
         self.wall_clock_budget_s = float(agent_cfg.get("wall_clock_budget_s", 900))
+        # Phase 5: owner-supplied texture library for brain selection —
+        # explicit root wins, else auto-detect the default drop directory.
+        if owner_texture_root is not None:
+            self.owner_texture_root = Path(owner_texture_root)
+        else:
+            self.owner_texture_root = (
+                _DEFAULT_OWNER_TEXTURE_ROOT
+                if _DEFAULT_OWNER_TEXTURE_ROOT.is_dir()
+                else None
+            )
         # img3d (neural image-to-3D) provider — resolved lazily on first use so
         # builds without organic parts never touch the service.
         self._img3d_provider = None
@@ -216,6 +293,44 @@ class AgentLoop:
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
+    def _owner_texture_section(self) -> str | None:
+        """The owner-supplied texture library as a selection menu for the
+        analyst (master order Phase 4/5): index the drop directory
+        (deterministic, writes index.json) and list every scanned surface
+        with its exact texture_dir path. None when no library exists — the
+        analyst then uses material presets exactly as before. The brain may
+        only pick from this list or the presets: never a diffusion-generated
+        texture, never an invented path."""
+        root = self.owner_texture_root
+        if root is None or not root.is_dir():
+            return None
+        try:
+            from ..textures.owner_index import index_owner_textures
+
+            index = index_owner_textures(Path(root))
+        except Exception:
+            return None
+        surfaces = index.get("surfaces") or []
+        if not surfaces:
+            return None
+        lines = ["OWNER TEXTURE LIBRARY (scanned surfaces — preferred over presets):"]
+        for s in surfaces:
+            maps = ", ".join(sorted((s.get("maps") or {}).keys()))
+            res = s.get("min_resolution_px")
+            lines.append(
+                f'- "{s["name"]}": texture_dir="{s["path"]}" '
+                f"(maps: {maps or 'none'}; min resolution: {res if res is not None else '?'} px)"
+            )
+        lines.append(
+            "Selection contract: when a part's material matches a scanned "
+            'surface, set that part material\'s "texture_dir" to the exact '
+            "listed path (verbatim) alongside its preset. Pick the closest "
+            "surface by look, not by name. NEVER invent a texture_dir that "
+            "was not listed and NEVER use a diffusion-generated texture — "
+            "only these scans or the material presets."
+        )
+        return "\n".join(lines)
+
     def _correct_spec(self, current_spec: ObjectSpec, instruction: str) -> ObjectSpec | None:
         """Ask the corrector for a fixed spec. Returns a validated spec or None."""
         user_prompt = (
@@ -241,6 +356,9 @@ class AgentLoop:
         user_text = f"User Request:\n{prompt}\n"
         if measurements_text:
             user_text += f"\nExact Measurements Required:\n{measurements_text}\n"
+        owner_textures = self._owner_texture_section()
+        if owner_textures:
+            user_text += f"\n{owner_textures}\n"
         if images:
             paths = ", ".join(str(p) for p in images)
             user_text += (
@@ -476,15 +594,23 @@ class AgentLoop:
             )
 
             try:
-                render_res = self.runner.execute_op(
-                    "render_views",
-                    {
-                        "model_path": step_path,
-                        "views": ["front", "side", "top", "iso"],
-                        "output_dir": str(renders_dir.resolve()),
-                        "prefix": f"step_{iteration}",
-                    },
-                )
+                render_params: dict[str, Any] = {
+                    "model_path": step_path,
+                    "views": ["front", "side", "top", "iso"],
+                    "output_dir": str(renders_dir.resolve()),
+                    "prefix": f"step_{iteration}",
+                }
+                # Phase 5: render the spec's review close-ups alongside the
+                # overviews so the visual gate sees label/border detail at
+                # full resolution (never downscaled — vlm.py policy).
+                closeups = [
+                    {"name": c.name, "part": c.part, "direction": c.direction,
+                     "pad": c.pad, "frame": c.frame}
+                    for c in (getattr(current_spec, "review_closeups", None) or [])
+                ]
+                if closeups:
+                    render_params["closeups"] = closeups
+                render_res = self.runner.execute_op("render_views", render_params)
                 rendered_views = render_res.get("views", rendered_views)
                 emit("render_done", index=iteration, views=rendered_views)
             except Exception as e:
@@ -534,6 +660,29 @@ class AgentLoop:
                 last_error = latest_verification.feedback_for_agent
                 break
 
+        # Phase 5 closed loop: a run that exhausts the iteration cap without
+        # passing gates must say so explicitly. Without this, a cap-exhausted
+        # run whose corrector "fixed" the spec on the final iteration would
+        # exit the while loop with last_error=None and report
+        # completed_with_warnings + unresolved_error: null — a silent,
+        # unevidenced near-success. The master order: "On cap: stop, report
+        # exactly what failed with the evidence."
+        passed = bool(latest_verification and latest_verification.passed)
+        iteration_cap_hit = (
+            not passed
+            and iteration >= self.max_iterations
+            and not budget_exhausted
+            and not cancelled()
+        )
+        cap_report = None
+        if iteration_cap_hit:
+            cap_report = _iteration_cap_report(
+                self.max_iterations, iteration, latest_verification, last_error
+            )
+            if not last_error:
+                last_error = cap_report["message"]
+            emit("iteration_cap_hit", **cap_report)
+
         # Keep the last good artifact even when gates did not pass.
         if not final_glb_path.exists():
             for i in range(iteration, 0, -1):
@@ -556,6 +705,8 @@ class AgentLoop:
             emit=emit,
             user_cancelled=cancelled(),
             visual_verdict=visual_verdict,
+            iteration_cap_hit=iteration_cap_hit,
+            cap_report=cap_report,
         )
 
     def _run_visual_gate(self, rendered_views, image_paths, spec, emit) -> dict | None:
@@ -600,6 +751,8 @@ class AgentLoop:
         emit=None,
         user_cancelled: bool = False,
         visual_verdict: dict | None = None,
+        iteration_cap_hit: bool = False,
+        cap_report: dict | None = None,
     ) -> AgentRunResult:
         passed = bool(verification and verification.passed)
         self.run_store.save_spec(run_dir, spec)
@@ -607,6 +760,8 @@ class AgentLoop:
         status = "completed" if passed else "completed_with_warnings"
         if budget_exhausted and not passed:
             status = "budget_exhausted"
+        if iteration_cap_hit and not passed:
+            status = "iteration_cap_exhausted"
         if user_cancelled and not passed:
             status = "cancelled"
 
@@ -629,6 +784,8 @@ class AgentLoop:
                 "mesh_warnings": verification.mesh_gate.warnings if verification else [],
                 "unresolved_error": error,
                 "visual_verdict": visual_verdict,
+                "iteration_cap_hit": iteration_cap_hit,
+                "cap_report": cap_report,
             },
             status=status,
         )

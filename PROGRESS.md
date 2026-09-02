@@ -1567,3 +1567,125 @@ itself; write=False; missing root fails loud.
 nothing re-baselined). MAYA00053153 dims untouched (rule 9). Committed
 under the owner's identity, no push.
 
+
+## Session log — 2026-09-02 (round 8: Phase 5 — the closed loop)
+
+Master order Phase 5: `build → inspect (gates) → green? → review (vision)
+→ decide → fix → repeat; red → skip vision, fix, repeat`. Gates before
+eyes, always. Hard iteration cap, start at 8. On cap: stop, report
+exactly what failed with the evidence. Never loop forever. Never claim a
+success you cannot evidence.
+
+### What changed
+
+**Iteration cap 5 → 8** — `config/ai.yaml agent.max_iterations: 8` +
+loop.py fallback default 8. Pinned by a config test.
+
+**Honest cap report** (`loop.py`, the gap that motivated this round): a
+cap-exhausted run whose corrector "fixed" the spec on the final iteration
+used to exit the while loop with `last_error=None` and report
+`completed_with_warnings` + `unresolved_error: null` — a silent,
+unevidenced near-success. Now every cap-exhausted run (red gates OR never
+verified) gets:
+- manifest status `iteration_cap_exhausted` (surfaced by the web run
+  registry via the manifest read; `web/js/app.js` classes it "bad");
+- `metrics.iteration_cap_hit: true` + `metrics.cap_report` — which gates
+  failed with values: dimension gate (checked/passed/failed counts, max
+  delta in the message in mm, per-measurement failed details, ground
+  contact) and mesh gate (faces, warnings, errors), or `last_error` when
+  no iteration ever produced a verified build;
+- a guaranteed non-None `unresolved_error` naming the cap ("Iteration cap
+  (8) reached without passing gates: dimension gate FAILED (1/2
+  measurements passed, max delta 60.00 mm); … no success is claimed.");
+- an `iteration_cap_hit` progress event for the web UI.
+
+**Gates before eyes, pinned**: new `tests/test_closed_loop.py` drives
+`AgentLoop.run()` end-to-end with fakes (provider/runner/verifier/VLM —
+no Blender, no network): 3 red iterations → ZERO vision verdict calls
+(the analyst-eye describe is allowed pre-loop; verdicts are not); green →
+exactly ONE advisory verdict after `verification.passed`.
+
+**Owner texture library → analyst prompt**: `AgentLoop(owner_texture_root=…)`
+(default auto-detects `input/textures/owner/`) indexes the drop directory
+via Phase 4's `owner_index.py` and appends an "OWNER TEXTURE LIBRARY"
+section to the analyst user text: every scanned surface with its exact
+resolved `texture_dir` path, maps, min resolution, and the selection
+contract (closest surface by look; NEVER invent a path; NEVER
+diffusion — only these scans or presets). `ANALYST_SYSTEM_PROMPT`
+MATERIALS documents `texture_dir` the same way. No library / empty
+library → no section (presets only, exactly as before). The harness
+already consumes `texture_dir` (canonical map names), so a selected
+surface builds end-to-end.
+
+**Close-ups in the loop's renders**: the spec's `review_closeups` now
+ride into the loop's `render_views` op (same shape as the review tool), so
+the visual gate receives label/border frames — the master order's
+close-up rule only works if the loop actually produces them.
+
+**429 branching implemented** (`src/ai/vlm.py`, VISION_CONFIG §7 —
+previously policy-only in docs): every chat POST goes through
+`_post_with_429_policy`:
+- `RATE_LIMIT_EXCEEDED` → exponential backoff with jitter: base
+  2 s × 2ⁿ capped at 60 s, + uniform jitter [0, 1) s, at most
+  `RATE_LIMIT_MAX_RETRIES = 5` retries, then `RateLimitExhaustedError`
+  (fail soft; NOT the quota branch — no local fallback for a rate limit).
+- `QUOTA_EXCEEDED` / `RESOURCE_EXHAUSTED` → `QuotaExhaustedError`
+  immediately, no retry. Classification prioritizes the specific
+  `RATE_LIMIT_EXCEEDED` reason code — real Gemini rate-limit bodies also
+  carry `status: "RESOURCE_EXHAUSTED"`, which alone is the quota branch
+  per the §7 table.
+- Quota → local Qwen verdict: `visual_verdict` routes through
+  `_chat_vision_quota_fallback` — when the primary (Gemini) is
+  quota-exhausted the call is served by the local OpenAI-compatible
+  provider configured under `vision.local_fallback` (base_url + model of
+  the vLLM server; loading/unloading it and returning the GPU to Blender
+  is a server-side ops action, documented in code). The verdict records
+  `quota_fallback: true` + the fallback model honestly. No fallback
+  configured → honest `quota_exhausted` error verdict. The local tier has
+  no second fallback (no loop-back).
+- Tests monkeypatch `vlm._sleep` to RECORD delays — no real waiting; all
+  against the mocked Gemini/local servers (S1: no live vision calls).
+
+**Phase 5 image-size policy** (`vlm.py`): overview renders
+(front/side/top/iso) and reference photos are downscaled to ≤768×768
+(LANCZOS, aspect preserved, JPEG q90 / PNG) before sending; close-up
+renders (any non-overview key) are NEVER downscaled — fine detail is
+their entire purpose. `describe_reference_images` sends refs at ≤768.
+Verdicts record the applied `image_policy`. `chat_vision` grew an
+optional `image_max_dims` parameter (parallel to image_paths; None
+entries pass through untouched) — backward compatible.
+
+### Tests
+
+`tests/test_closed_loop.py` (10): red-gates cap report (error text,
+manifest status `iteration_cap_exhausted`, cap_report evidence incl.
+failed measurement details, non-None unresolved_error, zero vision
+calls, corrector ran every red iteration); green → exactly one vision
+call + `completed`; build-failure cap (no verification → last_error in
+cap_report); budget exhaustion is NOT a cap (status stays
+`budget_exhausted`); review_closeups rendered into the loop's views;
+owner library in the analyst prompt (both surfaces + exact paths +
+never-diffusion, index.json written) + no-library/empty-library/
+explicit-missing-root skips; config pins `max_iterations: 8`.
+
+`tests/test_vlm.py` (+9): rate-limit backoff sequence (2 s and 4 s bases
++ jitter, recorded sleeps, then success); bounded give-up (exactly 5
+retries, sorted exponential, ≤ 60 s + 1 s cap, RateLimitExhaustedError);
+quota → zero sleeps + QuotaExhaustedError; quota → local-Qwen verdict
+(`quota_fallback`, fallback model, parsed verdict); quota without
+fallback → honest `quota_exhausted`; local primary has no second
+fallback; `_image_b64` downscale semantics (oversized → 768 aspect-
+preserved, close-up None → byte-identical, small → untouched);
+`visual_verdict` threads the policy (mock server receives 768/768/2000
+for reference/overview/close-up); describe sends refs at ≤768.
+
+One classifier bug found by the tests: the first `_classify_429` treated
+any `RESOURCE_EXHAUSTED` body as quota, but real Gemini rate-limit bodies
+carry that status string too — the specific `RATE_LIMIT_EXCEEDED` reason
+code now wins (documented in the classifier docstring).
+
+**Suite: 351 passed in 131.75 s** (332 baseline + 19 new; baseline grew,
+nothing re-baselined). S1 honored: no live vision calls — all 429/quota/
+image-policy paths verified against the mocked Gemini v1beta and local
+OpenAI-compatible servers with recorded sleeps. MAYA00053153 dims
+untouched (rule 9). Committed under the owner's identity, no push.

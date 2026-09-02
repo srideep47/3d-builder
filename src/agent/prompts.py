@@ -66,6 +66,13 @@ MATERIALS (flat PBR values export correctly to GLB)
   "velvet_fabric", "frosted_glass", "white_marble".
 - Example: {"preset": "oak_wood", "roughness": 0.55}.
 - Only set "procedural": true when fine surface detail matters for preview renders.
+- Owner texture library: when the user message lists scanned surfaces with a
+  "texture_dir", prefer them over presets for matching materials — set the part
+  material's "texture_dir" to the exact listed path, keeping the preset as the
+  base, e.g. {"preset": "oak_wood", "texture_dir": "input/textures/owner/oak_plank"}.
+  The build reads albedo/roughness/height maps from that directory. NEVER set a
+  "texture_dir" that was not listed, and NEVER use a diffusion-generated
+  texture — only the listed scans or the presets.
 
 MEASUREMENTS (the accuracy contract — the build is verified against these)
 - List EVERY user-given dimension in "measurements":

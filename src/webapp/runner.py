@@ -25,7 +25,7 @@ class ActiveRun:
     run_dir: Path
     mode: str  # "ai" | "spec"
     label: str
-    status: str = "running"  # running | completed | completed_with_warnings | failed | cancelled | budget_exhausted
+    status: str = "running"  # running | completed | completed_with_warnings | failed | cancelled | budget_exhausted | iteration_cap_exhausted
     started: float = field(default_factory=time.time)
     events: list[dict[str, Any]] = field(default_factory=list)
     subscribers: list[tuple[Any, Any]] = field(default_factory=list)  # (event_loop, queue)
