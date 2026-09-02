@@ -11,7 +11,7 @@ PC 2 (Scout) calls it over LAN. See PLAN.md §9 and PROJECT_PLAN.md §13.2.
 |---|---|---|---|
 | `mock` | none | ✅ working | deterministic displaced icosphere; pipeline bring-up + tests |
 | `tripo_sr` | ~6 GB | ✅ wired | fastest/lightest real model; vendored repo + HF weights |
-| `trellis` | ~16 GB | ⬜ stub | best geometry; install during the M4 bake-off |
+| `trellis` | ~6–16 GB | ✅ wired | TRELLIS.2-4B via **trellis.cpp** (MIT C++/GGML port): prebuilt Windows CUDA server + GGUF weights under `models/trellis/` — `scripts/setup-trellis-cpp.ps1`; nothing installed into either venv |
 | `hunyuan3d` | ~12 GB | ⬜ stub | best PBR textures; install during the M4 bake-off |
 
 ## Running (mock backend — main env is enough)
@@ -33,6 +33,32 @@ services/img3d_service/.venv/Scripts/python -m uvicorn app:app --app-dir service
 
 Weights are cached under `<repo>/models/` (gitignored). Job artifacts under
 `services/img3d_service/data/` (gitignored).
+
+## Running (trellis backend — TRELLIS.2 via trellis.cpp)
+
+TRELLIS.2 (microsoft/TRELLIS.2, MIT, 4B) has no official Windows package —
+the reference Python repo is Linux-only with CUDA-toolkit submodules
+(NVlabs-licensed nvdiffrast/nvdiffrec among them). The backend therefore
+drives the MIT-licensed C++/GGML port [trellis.cpp](https://github.com/pwilkin/trellis.cpp):
+a prebuilt resident HTTP server (GPU) running the TRELLIS.2-4B weights as
+GGUF. Neither Python venv gains a single dependency (httpx only).
+
+```powershell
+# once (~10 GB at the default q8 tier; f16 ~16.5 GB, q4 ~6 GB):
+powershell -ExecutionPolicy Bypass -File scripts/setup-trellis-cpp.ps1
+# then, like any GPU backend:
+scripts/start-img3d.ps1 trellis
+```
+
+The backend spawns `models/trellis/bin/trellis-server.exe` itself on
+`127.0.0.1:8712` (adopting an already-healthy server on that port, and
+terminating only the process it spawned at exit). Default resolution is 512
+(the light path; the 1024 cascade also fits the 16 GB card). Env knobs:
+`IMG3D_TRELLIS_URL` (talk to an external server instead, e.g. Trellis
+Studio), `IMG3D_TRELLIS_PORT`, `IMG3D_TRELLIS_RES`, `IMG3D_TRELLIS_ARGS`
+(raw server flags, e.g. `--gpu 1`), `IMG3D_TRELLIS_MODELS`/`IMG3D_TRELLIS_BIN`
+(path overrides). Server log: `models/trellis/server.log`. One image in →
+one PBR-textured GLB out; background removal (BiRefNet) runs server-side.
 
 ## API
 

@@ -292,7 +292,10 @@ GLB (3DGuy's generation-authorization pattern).
 - **`ImageTo3DProvider` ABC** in `src/img3d/provider.py`; the service and any future
   third-party API are interchangeable implementations selected in `config/hardware.yaml`.
 - **Model bake-off at M4 on the 4080 Super**, scored on the golden benchmark set:
-  - **TRELLIS** — best geometry quality, textured output, fits 16 GB.
+  - **TRELLIS** — best geometry quality, textured output, fits 16 GB. Implemented
+    as TRELLIS.2-4B via trellis.cpp (MIT C++/GGML port: prebuilt Windows CUDA
+    server + GGUF weights under `models/trellis/`) — the reference Python repo
+    is Linux-only with CUDA-toolkit submodules.
   - **Hunyuan3D-2.1** — strongest PBR textures, ~12 GB.
   - **TripoSR** — fastest/lightest (~6 GB), lower quality; kept as the low-VRAM fallback.
 - **Service shape**: FastAPI on PC 1 (`/health`, `/generate` → job id, `/result/<id>`),

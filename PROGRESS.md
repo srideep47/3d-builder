@@ -2495,3 +2495,130 @@ documentation) + 5 blender-marked in `tests/test_retopology.py`
 harness parametric refusal, T3 e2e threading). **Suite: 451 passed in
 173.29 s** (baseline 442 + 9). S1 honored (no live vision calls).
 Committed under the owner's identity, no push.
+
+## Round 17 — Phase 8.5 R3: the TRELLIS.2 backend BUILT (via trellis.cpp)
+
+The master order named "TRELLIS 2 (MIT, 16 GB at 512³)". Research
+first, because both halves of that name needed correcting on the
+record: the model is **TRELLIS.2** (repo `microsoft/TRELLIS.2` — dot
+notation, NOT the v1 repo), 4B-param flow-matching image-to-3D over
+O-Voxel sparse latents with PBR surface attributes (arXiv:2512.14692,
+MIT). The official requirement is **24 GB VRAM, Linux-only**; "16 GB
+at 512³" is community-measured behavior, not a vendor claim. And the
+reference Python repo cannot run on this Windows machine at all
+(NVlabs-licensed nvdiffrast/nvdiffrec submodules, CUDA toolchain —
+it would also fight our torch 2.6.0+cu124 service venv). So R3 ships
+TRELLIS.2-4B through **trellis.cpp** (pwilkin, MIT, C++/GGML port):
+a prebuilt Windows CUDA binary with a resident HTTP server, running
+the model as GGUF. Zero new Python dependencies in either venv —
+this was the deciding factor over the reference repo.
+
+### What was built
+
+- **`services/img3d_service/providers/trellis.py`** (was a stub): the
+  real `TrellisBackend` — an httpx client to the trellis-server, with
+  two modes: **remote** (`IMG3D_TRELLIS_URL` — point at an
+  already-running server) and **managed spawn** (default,
+  127.0.0.1:8712): `load()` verifies the 10 GGUF files + binary
+  fail-closed, spawns `trellis-server.exe` (CREATE_NO_WINDOW, log at
+  `models/trellis/server.log`), polls `/health` up to 90 s, registers
+  atexit cleanup. A healthy server at the target port is ADOPTED, not
+  re-spawned, and `shutdown()` only ever kills a process this backend
+  started. `generate()` posts the pinned multipart contract (file part
+  `image`, fields `seed`/`resolution`), checks the GLB magic, and
+  either passes the server bytes through untouched (no target and
+  under `max_tris` — PBR textures preserved) or decimates (optional
+  fast_simplification, guarded) and scales per-axis to
+  `target_size_m`.
+- **`scripts/setup-trellis-cpp.ps1`**: downloads the v0.6.0 cuda zip
+  (`trellis-cuda-windows-x64.zip`) → `models/trellis/bin/` and the 10
+  q8 GGUFs from `ilintar/trellis2-gguf` flattened into
+  `models/trellis/` (what `--models` points at); `-Quant f16|q8|q4`,
+  `-Backend cuda|cuda12|vulkan|rocm`, skip-if-non-empty, verifies the
+  full set. Weights stay gitignored under `models/`.
+- **Server contract pinned from the v0.6.0 source**
+  (`src/trellis-server.cpp`), not from docs: GET `/health` → 200
+  `ok` (text/plain); POST `/generate` multipart — file part `image`
+  REQUIRED (400 if absent), text fields `seed`, `resolution`
+  (512/1024/1536), `bg_removal`, `uv`, `band`, `webp` → 200 GLB bytes
+  or 400/500 JSON `{"error": ...}`. CLI flags: `--models`, `--host`,
+  `--port`, `--res`, `--gpu`, `--seed`, `--bg-removal`,
+  `--require-gpu`, `--f32`, `--no-fa`, `--no-texture`, `--decim`,
+  `--atlas`. No shutdown endpoint — hence adopt/kill semantics.
+- Wiring: `start-img3d.ps1 trellis` (+ weights warning),
+  `httpx>=0.27` recorded in both service requirements files (already
+  present in both venvs — nothing installed), README/PLAN.md/
+  PROJECT_PLAN.md/AGENTS.md updated. `bakeoff_img3d.py --backend
+  trellis` already worked — no changes.
+
+### Measured results (all on this machine, direct counts)
+
+- **Suite: 464 passed in 322.45 s** (baseline 451 + 13 new).
+  `tests/test_img3d_trellis.py` standalone: 13 passed in 16.20 s.
+- Install via the setup script, measured on disk:
+  `trellis-cuda-windows-x64.zip` 694.7 MB downloaded (728,541,568
+  bytes) → `trellis-server.exe` 2,976,768 bytes + `trellis-cli.exe`
+  + 8 ggml/cuda DLLs extracted (Turing+ CUDA 13.1 build; this
+  machine's RTX 4080 Super is sm 8.9, driver 610.47). GGUF q8 tier:
+  **9,997,159,776 bytes (9.31 GiB) across the 10 required files** on
+  disk (five flow-model files at ~1.28 GiB each dominate; ss_dec.gguf
+  is the smallest at 140.5 MiB).
+- With the full set on disk, `TrellisBackend().is_available()` probes
+  `(True, "ready (managed spawn on 127.0.0.1:8712, res 512)")` —
+  fail-closed verified both directions: 0 files → "missing 10/10"
+  with the setup hint, 9 files → "missing 1/10".
+
+### Confessions (§H)
+
+- **The setup script's first run exposed a silent-corruption trap in
+  my own `Save-File`**: a connection reset mid-body (curl exit 56,
+  which plain `--retry` does NOT cover) left ss_dec.gguf at 107 MB of
+  its 140.5 MB under the FINAL name — and both the skip-if-present
+  check (`Length -gt 0`) and the final verification (`Test-Path`)
+  would have treated that partial as complete, printing "backend
+  ready" over a truncated weight. Caught because the script's
+  `$ErrorActionPreference = "Stop"` halted the run (exit 1) and I
+  read the log before re-running; fixed BEFORE the resume: downloads
+  now go to `<name>.part` and only get the final name after curl
+  exits 0, plus `--retry-all-errors --retry-delay 2`; the poisoned
+  partial was deleted by hand and the run resumed off the three
+  intact files.
+- **No live GPU generation was run.** During the whole round the card
+  sat at 15,197/16,376 MiB held by the owner's processes (LM Studio
+  llama-server pid 5240 + pid 2632). They are the owner's; not
+  killed. The backend's HTTP behavior is verified against a
+  contract-pinned stub server (13 tests), and the binary + weights
+  are installed and size-verified — but the first real
+  image → GLB run is deferred to a free GPU window, and quality
+  parity of the GGUF port vs the reference repo is the port's claim
+  until the bake-off leg measures it. Registered as the top §13.3
+  backlog item.
+- My first repo search nearly concluded "TRELLIS 2 does not exist" —
+  the WebFetch of `microsoft/TRELLIS` shows no v2; TRELLIS.2 lives
+  in its own repo with dot notation. Caught by dispatching a fresh
+  research agent instead of trusting the first page.
+- One test initially asserted a constant error string against a
+  regex that could not match (the real message embeds the server's
+  JSON body, `failed (500): {"error": "pipeline exploded"}`); caught
+  by an observed failure and rewritten as two substring asserts on
+  the raised message.
+- Scope honesty: the master order's "TRELLIS 2" is delivered as
+  TRELLIS.2-4B **via a third-party C++/GGUF port**, not the reference
+  implementation — on Windows that is the only route without WSL2,
+  and it costs nothing in our venvs, but it is a different engine
+  and must prove itself in the bake-off.
+
+### Tests
+
+13 new in `tests/test_img3d_trellis.py`: stub trellis-server (stdlib
+ThreadingHTTPServer, real multipart parsing) — remote-mode
+available/unreachable reasons, the full generate contract (exact
+image bytes, seed "7", resolution "512"), resolution override +
+seed-None omission, byte-exact pass-through, per-axis scale to
+[0.30, 0.20, 0.10] m within 5 mm, decimation guard (conditional on
+optional fast_simplification), 500-error propagation, spawn gates on
+missing install + partial weights fail-closed, ready-after-setup,
+adopt-not-respawn (+ shutdown leaves adopted server alive, generate
+still works), spawn command flags, cold-generate-requires-load.
+**Suite: 464 passed in 322.45 s** (baseline 451 + 13). S1 honored.
+Committed under the owner's identity, no push.

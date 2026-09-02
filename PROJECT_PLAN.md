@@ -114,7 +114,7 @@ bottom-center `(0, 0, 0)`. All lengths are **meters** internally.
 | **M2 — Agent** | Aptos provider, tool loop, analyst/builder/verifier prompts, self-correction, live e2e | ✅ done (incl. reasoning-model taming, §7.1) |
 | **M3 — MCP + polish** | stdio MCP server (7 tools), materials/PBR, docs, golden benchmarks (dimensions.com) | ✅ done |
 | **M3.5 — Web studio UI** | FastAPI + WS + three.js studio: input → live progress → output | ✅ done (browser-verified e2e, §6) |
-| **M4 — Vision + image-to-3D** | Qwen2.5-VL local (owner-built) as analyst eye + visual gate; img3d provider bake-off; hybrid routing | 🔶 **in progress** (§13): img3d service + hybrid routing ✅ done & live-verified; TripoSR GPU backend wired; vision plug points ✅ wired (awaiting owner's Qwen-VL server); TRELLIS/Hunyuan3D bake-off slots registered |
+| **M4 — Vision + image-to-3D** | Qwen2.5-VL local (owner-built) as analyst eye + visual gate; img3d provider bake-off; hybrid routing | 🔶 **in progress** (§13): img3d service + hybrid routing ✅ done & live-verified; TripoSR GPU backend wired; vision plug points ✅ wired (awaiting owner's Qwen-VL server); TRELLIS.2 backend ✅ wired via trellis.cpp (R3); Hunyuan3D bake-off slot registered |
 
 ## 6. Current verified state (as of 2026-09-01, on Forge)
 
@@ -474,9 +474,18 @@ accuracy per backend, JSON report under `output/`).
 - `mock` ✅ (deterministic, CPU, pipeline verification)
 - `tripo_sr` ✅ wired (vendored repo + HF weights, torchmcubes scikit-image
   shim for Windows, GPU env in `services/img3d_service/.venv`)
-- `trellis` ⬜ / `hunyuan3d` ⬜ registered slots — remaining M4 work:
-  install each on the GPU env, implement the backend, run the bake-off on
-  `input/bakeoff/` (replace synthetic images with real photos first).
+- `trellis` ✅ wired (Phase 8.5 R3) — TRELLIS.2-4B via **trellis.cpp** (MIT
+  C++/GGML port; the reference Python repo is Linux-only with NVlabs-licensed
+  CUDA submodules). `scripts/setup-trellis-cpp.ps1` installs the prebuilt
+  Windows CUDA server + GGUF weights (q8 ~9.5 GB default) under
+  `models/trellis/` — nothing touches either venv. The backend spawns the
+  server on `127.0.0.1:8712` (adopting an already-healthy one), posts
+  image → GLB, and applies the shared post-processing contract. Stub-server
+  tests pin the wire contract; **the live bake-off leg still needs a free
+  GPU window** (weights not yet downloaded).
+- `hunyuan3d` ⬜ registered slot — remaining M4 work: install, implement,
+  run the bake-off on `input/bakeoff/` (replace synthetic images with real
+  photos first).
 
 **Neural mesh post-processing (always)**: backends decimate to `max_tris`
 when the simplifier is available and scale to exact target bounds; the
@@ -485,8 +494,10 @@ harness re-scales to the part's `target_size` on import and generates UVs
 
 ### 13.3 Remaining M4 backlog
 
-- Complete the TRELLIS / Hunyuan3D-2.1 legs of the bake-off; pick the
-  default `IMG3D_MODEL` based on the report.
+- Run the TRELLIS.2 leg of the bake-off on a free GPU window
+  (`scripts/setup-trellis-cpp.ps1` once, then `scripts/bakeoff_img3d.py
+  --backend trellis`); complete the Hunyuan3D-2.1 leg; pick the default
+  `IMG3D_MODEL` based on the report.
 - Owner: serve Qwen2.5-VL and set `vision.vlm` in `config/ai.yaml` (§13.1).
 - Analyst measurement-adherence hardening (deterministic scale-to-target
   post-check) — see §7.1.

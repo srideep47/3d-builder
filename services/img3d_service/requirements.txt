@@ -3,6 +3,8 @@
 fastapi>=0.111
 uvicorn[standard]>=0.30
 python-multipart>=0.0.9
+# trellis backend: HTTP client for the trellis.cpp server (no torch involved)
+httpx>=0.27
 trimesh>=4.0
 numpy>=1.26,<3
 pillow>=10.0
