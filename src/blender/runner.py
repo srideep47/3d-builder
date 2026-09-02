@@ -28,7 +28,7 @@ class BlenderExecutionError(Exception):
 
 
 class BlenderRunner:
-    def __init__(self, blender_path: str | Path | None = None):
+    def __init__(self, blender_path: str | Path | None = None, threads: int | None = None):
         if blender_path:
             self.install: BlenderInstall | None = BlenderInstall(
                 executable=str(blender_path),
@@ -41,6 +41,15 @@ class BlenderRunner:
             )
         else:
             self.install = locate_blender()
+        # Thread cap for batch throughput: N concurrent Blenders each
+        # grabbing every core oversubscribe the machine and corrupt
+        # wall-clock measurements. None = Blender's default (all cores).
+        # Explicit argument wins; otherwise THREED_BLENDER_THREADS (set per
+        # worker process by the batch driver).
+        if threads is None:
+            env_threads = (os.environ.get("THREED_BLENDER_THREADS") or "").strip()
+            threads = int(env_threads) if env_threads.isdigit() and int(env_threads) > 0 else None
+        self.threads = threads
 
     @property
     def is_available(self) -> bool:
@@ -73,6 +82,10 @@ class BlenderRunner:
                 self.install.executable,
                 "--background",
                 "--factory-startup",
+            ]
+            if self.threads:
+                cmd += ["--threads", str(self.threads)]
+            cmd += [
                 "--python",
                 str(HARNESS_SCRIPT_PATH.resolve()),
                 "--",

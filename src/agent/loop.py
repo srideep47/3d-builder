@@ -19,6 +19,7 @@ from typing import Any
 from ..ai.aptos import AptosGLMProvider, extract_json_from_text, vision_user_content
 from ..ai.schemas import ChatMessage
 from ..blender.runner import BlenderRunner
+from ..client.units import to_metres
 from ..run_store import RunManifest, RunStore
 from ..spec.resolver import resolve_spec_to_build_params
 from ..spec.schema import GenerationMethod, ObjectSpec, ShapeType
@@ -402,12 +403,47 @@ class AgentLoop:
             self.last_correction_failure = failure
         return None
 
-    def _analyst_spec(self, prompt: str, measurements_text: str, images: list[Path]) -> tuple[ObjectSpec | None, str]:
+    def _job_card_section(self, job_card) -> str:
+        """Delivery contract from the client job card (Phase 7 cold-path fix).
+
+        The internal dimension gate verifies the analyst's own declared
+        bindings, so without the card's axis convention a correctly-sized
+        model rotated 90° about Z passes the whole loop and only fails at
+        package time. Stating the binding makes the analyst orient the spec
+        correctly; the card-axis gate in verify_run catches any remainder."""
+        attr_by_axis = {
+            "x": "overall.width_x", "y": "overall.depth_y", "z": "overall.height_z",
+        }
+        lines = [
+            "CLIENT JOB CARD CONTRACT (delivery-critical):",
+            f"- Job {job_card.job_code}: the client measures the finished "
+            "model's OVERALL extents through the job card's axis map:",
+        ]
+        for dim_name in ("length", "width", "height"):
+            axis = str(getattr(job_card.axis_map, dim_name)).lower()
+            value_m = to_metres(getattr(job_card.dims, dim_name), job_card.dims.unit)
+            lines.append(
+                f"- {dim_name.upper()} = {value_m:.4f} m is the overall extent "
+                f"along the {axis.upper()} axis (bind it with applies_to "
+                f"'{attr_by_axis[axis]}')."
+            )
+        lines.append(
+            "- A model that matches every stated dimension but is rotated "
+            "relative to this axis convention FAILS client delivery — orient "
+            "the parts so the overall extents land on the card's axes."
+        )
+        return "\n".join(lines)
+
+    def _analyst_spec(
+        self, prompt: str, measurements_text: str, images: list[Path], job_card=None
+    ) -> tuple[ObjectSpec | None, str]:
         """Ask the analyst for an initial ObjectSpec. Sends reference images as
         vision content when the endpoint supports it."""
         user_text = f"User Request:\n{prompt}\n"
         if measurements_text:
             user_text += f"\nExact Measurements Required:\n{measurements_text}\n"
+        if job_card is not None:
+            user_text += f"\n{self._job_card_section(job_card)}\n"
         owner_textures = self._owner_texture_section()
         if owner_textures:
             user_text += f"\n{owner_textures}\n"
@@ -495,6 +531,7 @@ class AgentLoop:
         run_dir: str | Path | None = None,
         progress=None,
         cancel=None,
+        job_card=None,
     ) -> AgentRunResult:
         """Execute the full build-measure-verify loop.
 
@@ -534,6 +571,7 @@ class AgentLoop:
             prompt=prompt,
             measurements=measurements_text,
             images=[str(p) for p in image_paths],
+            job_code=job_card.job_code if job_card is not None else None,
         )
 
         # Step 1: obtain the initial ObjectSpec.
@@ -542,7 +580,7 @@ class AgentLoop:
             emit("analyst_done", source="user_spec", spec=json.loads(current_spec.model_dump_json()))
         else:
             emit("analyst_started")
-            spec_obj, raw = self._analyst_spec(prompt, measurements_text, image_paths)
+            spec_obj, raw = self._analyst_spec(prompt, measurements_text, image_paths, job_card=job_card)
             if spec_obj is None:
                 emit("analyst_error", error=raw[:2000])
                 return self._finish(
@@ -680,6 +718,7 @@ class AgentLoop:
                 spec=current_spec,
                 measurement_data=measure_res,
                 glb_path=step_glb,
+                job_card=job_card,
             )
             emit(
                 "verification",

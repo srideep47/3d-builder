@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import trimesh
 
+from ..client.units import to_metres
 from ..spec.schema import ObjectSpec
 from ..spec.validation import DimensionGateResult, evaluate_dimension_gate
+
+if TYPE_CHECKING:
+    from ..client.job import JobCard
 
 
 def load_merged_mesh(path: str | Path) -> trimesh.Trimesh | None:
@@ -31,6 +35,73 @@ def load_merged_mesh(path: str | Path) -> trimesh.Trimesh | None:
     return trimesh.Trimesh(
         vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.faces), process=True
     )
+
+
+def evaluate_card_axis_gate(
+    job_card: "JobCard", measurement_data: dict[str, Any]
+) -> tuple[bool, list[dict[str, Any]], list[str]]:
+    """Delivery-axis check against the client job card (Phase 7 cold-path fix).
+
+    The spec's own measurements are authored by the analyst, so the internal
+    dimension gate verifies whatever axis binding the analyst DECLARED — a
+    spec that binds "length" to the Y extent passes its own gate while the
+    client card (L→X, W→Y, H→Z) fails at package time with a 90° swap. This
+    gate compares the measured overall extents against the card's dims
+    through the card's axis map, so the mismatch surfaces INSIDE the loop
+    where the corrector can fix it, instead of after the finish chain.
+
+    Returns (passed, details, feedback_lines). Tolerance is the CARD's
+    delivery tolerance (job.dim_tolerance, default 0.01 in the card's
+    declared unit) — the same figure the client's Dimensions gate applies
+    at package time — so an internally-green build (spec tolerance ±1 mm)
+    is driven to client-green INSIDE the loop instead of failing the
+    package step by e.g. +0.1 mm."""
+    overall_dims = (measurement_data.get("overall", {}) or {}).get(
+        "dimensions", [0.0, 0.0, 0.0])
+    axis_index = {"x": 0, "y": 1, "z": 2}
+    targets = {
+        axis_index[str(job_card.axis_map.length).lower()]:
+            to_metres(job_card.dims.length, job_card.dims.unit),
+        axis_index[str(job_card.axis_map.width).lower()]:
+            to_metres(job_card.dims.width, job_card.dims.unit),
+        axis_index[str(job_card.axis_map.height).lower()]:
+            to_metres(job_card.dims.height, job_card.dims.unit),
+    }
+    tol_m = job_card.dim_tolerance_m()
+    names = {0: "length", 1: "width", 2: "height"}
+    details: list[dict[str, Any]] = []
+    feedback: list[str] = []
+    passed = True
+    for idx in sorted(targets):
+        target = targets[idx]
+        actual = overall_dims[idx] if len(overall_dims) > idx else 0.0
+        delta = abs(actual - target)
+        ok = delta <= tol_m
+        passed = passed and ok
+        details.append({
+            "name": f"job card {names[idx]} (axis {'XYZ'[idx]})",
+            "target_m": round(target, 5),
+            "actual_m": round(actual, 5),
+            "delta_m": round(delta, 5),
+            "delta_mm": round(delta * 1000, 3),
+            "tolerance_m": tol_m,
+            "passed": ok,
+        })
+        if not ok:
+            feedback.append(
+                f" - Job card axis mismatch: {'XYZ'[idx]} extent is {actual:.5f} m "
+                f"but the card's {names[idx]} is {target:.5f} m "
+                f"(delta {delta * 1000:.3f} mm, card tolerance "
+                f"±{tol_m * 1000:.3f} mm). The client measures "
+                f"{names[idx]} along {'XYZ'[idx]} (card axis map "
+                f"L→{job_card.axis_map.length.upper()}, "
+                f"W→{job_card.axis_map.width.upper()}, "
+                f"H→{job_card.axis_map.height.upper()}) — rotate or "
+                "re-dimension the parts so the overall extents match the "
+                "card on every axis, exactly (the client gate is far "
+                "tighter than the internal build tolerance)."
+            )
+    return passed, details, feedback
 
 
 @dataclass
@@ -132,6 +203,7 @@ class Verifier:
         spec: ObjectSpec,
         measurement_data: dict[str, Any],
         glb_path: str | Path,
+        job_card: "JobCard | None" = None,
     ) -> VerificationReport:
         """Comprehensive verification of dimensions against spec and mesh topological quality."""
         dim_result = evaluate_dimension_gate(spec, measurement_data)
@@ -166,6 +238,27 @@ class Verifier:
                         )
         else:
             feedback_lines.append("DIMENSION GATE PASSED: All measurements match spec within tolerance.")
+
+        if job_card is not None:
+            card_passed, card_details, card_feedback = evaluate_card_axis_gate(
+                job_card, measurement_data)
+            # Card-axis details ride in the dimension gate's details so the
+            # run manifest carries the evidence; failures force a corrector
+            # iteration exactly like any other dimension failure.
+            dim_result.details.extend(card_details)
+            if not card_passed:
+                overall_passed = False
+                dim_result.passed = False
+                dim_result.failed_count += len(
+                    [d for d in card_details if not d.get("passed")])
+                feedback_lines.append(
+                    "JOB CARD AXIS GATE FAILED (overall extents do not match "
+                    "the client job card's axis convention):")
+                feedback_lines.extend(card_feedback)
+            else:
+                feedback_lines.append(
+                    "JOB CARD AXIS GATE PASSED: overall extents match the "
+                    "client job card on every axis.")
 
         if not mesh_result.passed:
             feedback_lines.append("MESH GATE FAILED:")

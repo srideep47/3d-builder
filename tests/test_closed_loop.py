@@ -145,7 +145,7 @@ class FakeVerifier(Verifier):
         super().__init__()
         self.fail = fail
 
-    def verify_run(self, spec, measurement_data, glb_path):
+    def verify_run(self, spec, measurement_data, glb_path, job_card=None):
         # partial failure when red: overall_height fails, body_width passes
         dim = DimensionGateResult(
             passed=not self.fail,

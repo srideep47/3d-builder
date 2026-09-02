@@ -1,0 +1,30 @@
+job_code: STEPSTOOL0001
+dims:
+  length: 450.0
+  width: 420.0
+  height: 480.0
+  unit: mm
+complexity: medium
+orientation: floor
+product_class: step_stool
+part_scope: ''
+reference_dir: D:\Work\LegionStudios\3d-builder\input\references\PHASE7-D-STEPSTOOL
+axis_map:
+  length: x
+  width: y
+  height: z
+dim_tolerance: null
+dims_placeholder: false
+polycount_ceiling: 25000
+polycount_semantics: null
+file_size_caps: null
+required_formats: null
+texture_resolution: null
+fbx_axis_up: null
+fbx_axis_forward: null
+intake_evidence:
+  dims: 450 x 420 x 480 mm — quoted from the prompt
+  polycount_ceiling: 25,000 from 'polycount ceiling 25,000' (semantics unstated →
+    triangle_equivalent default)
+  complexity: 'from ''complexity: medium'''
+  orientation: from 'floor-standing'

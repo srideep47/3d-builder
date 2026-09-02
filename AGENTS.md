@@ -129,10 +129,34 @@
   renders but emits NO package — `output/blocked/<JOB>/qa_report.json` +
   `PlaceholderDimensionsError` (CLI exit code 2). Never infer dims, never
   guess a standard size.
+- **The internal dimension gate verifies the analyst's own declared
+  bindings, not the client's axis convention.** A spec that binds
+  "length" to the Y extent passes its own gate while the client card
+  (L→X, W→Y, H→Z) fails at package time with a 90° Z rotation, and the
+  client dim tolerance (0.01 in the card's declared unit — ±0.01 mm for
+  mm cards) is ~100× tighter than the internal ±1 mm, so an
+  internally-green build can fail delivery by +0.1 mm. `src.cli build
+  --job <card>` threads the card into the loop: the analyst prompt gets a
+  CLIENT JOB CARD CONTRACT section (axis map + meter-converted dims +
+  applies_to bindings) and `evaluate_card_axis_gate` (verifier.py) checks
+  the measured overall extents against the card at the CARD's tolerance
+  inside `verify_run`, so the corrector fixes both failures in-loop.
+  Pinned in `tests/test_card_axis_gate.py`.
+- **Polycount phrasing decides gate semantics.** "under N triangles" in a
+  prompt makes intake set `polycount_semantics: triangles` — the client
+  Polycount gate then counts literal triangle faces, which read ~0 on a
+  quad-clean FBX (vacuous pass). Author prompts as "polycount ceiling N"
+  (noun `polycount` → semantics None → the conservative
+  triangle-equivalent contract default).
 
 ## Verification
-- `python -m pytest tests -q` — 368 tests; `blender`-marked tests auto-skip
+- `python -m pytest tests -q` — 389 tests; `blender`-marked tests auto-skip
   when no Blender is found.
+- AI builds against a client card: `python -m src.cli build -p <prompt> -m
+  <measurements> -i <photo> -n <name> --job input/jobs/<CODE>.yaml` (the
+  card's axis contract + delivery tolerance ride into the loop);
+  batch driver: `scripts/phase7_batch.py --tag <tag>` (N jobs concurrently,
+  CPU 1K bakes, per-step logs + summary.json under `output/phase7/<tag>/`).
 - Client packages: `python -m src.cli package --spec <spec.json> --job
   job.yaml` runs the full T3 finish chain (build → quad-verify + per-island
   UV atlas → 5-map bake → LP decimation → FBX from the live quad-clean scene

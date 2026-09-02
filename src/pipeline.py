@@ -42,9 +42,15 @@ class ThreeDBuilderPipeline:
         run_dir: str | Path | None = None,
         progress=None,
         cancel=None,
+        job_card=None,
     ) -> AgentRunResult:
         """Generate a fully verified 3D model from prompt, measurements, and
-        optional reference images using GLM-5.3."""
+        optional reference images using GLM-5.3.
+
+        job_card: optional client JobCard (src/client/job.py). When present,
+        the loop states the card's axis convention to the analyst and runs the
+        card-axis gate in verification, so an axis swap is caught (and
+        corrected) inside the loop instead of at package time."""
         enhanced_prompt = prompt
         if material_preset:
             enhanced_prompt += f"\nPrimary Material Preset: {material_preset}"
@@ -57,6 +63,7 @@ class ThreeDBuilderPipeline:
             run_dir=run_dir,
             progress=progress,
             cancel=cancel,
+            job_card=job_card,
         )
 
     def generate_from_spec(
@@ -66,8 +73,12 @@ class ThreeDBuilderPipeline:
         run_dir: str | Path | None = None,
         progress=None,
         cancel=None,
+        job_card=None,
     ) -> AgentRunResult:
-        """Deterministically build and verify a 3D model from an ObjectSpec."""
+        """Deterministically build and verify a 3D model from an ObjectSpec.
+
+        job_card: optional client JobCard — no analyst prompt in this flow,
+        but the card-axis gate still runs in verification."""
         if isinstance(spec_source, ObjectSpec):
             spec_obj = spec_source
         elif isinstance(spec_source, dict):
@@ -85,6 +96,7 @@ class ThreeDBuilderPipeline:
             run_dir=run_dir,
             progress=progress,
             cancel=cancel,
+            job_card=job_card,
         )
 
     def measure_file(self, file_path: str | Path) -> dict[str, Any]:

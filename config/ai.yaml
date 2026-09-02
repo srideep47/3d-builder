@@ -4,6 +4,10 @@ base_url: "https://host0.inference.aptoslabs.com/v1"
 model_id: "zai-org/GLM-5.3"
 api_key_env: THREED_API_KEY
 timeout_sec: 300
+# SDK-level retries for transient 429/5xx/connection failures (exponential
+# backoff inside the OpenAI client). Batch throughput (Phase 7) runs several
+# agent loops against the one endpoint concurrently.
+max_retries: 4
 temperature: 0.1
 max_tokens: 16384
 

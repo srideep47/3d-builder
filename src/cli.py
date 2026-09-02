@@ -34,11 +34,14 @@ def build(
     image: Optional[list[str]] = typer.Option(None, "--image", "-i", help="Reference image path(s) analyzed by the AI analyst"),
     material: Optional[str] = typer.Option(None, "--material", "-mat", help="PBR Material preset (e.g. 'oak_wood', 'brushed_steel')"),
     name: str = typer.Option("build", "--name", "-n", help="Run name prefix"),
+    job: Optional[str] = typer.Option(None, "--job", "-j", help="Client job card YAML; threads the card's axis convention into the analyst prompt and verification"),
 ):
     """Build a 3D model using AI agent or deterministic CAD spec."""
     if not prompt and not spec:
         console.print("[bold red]Error:[/] You must provide either --prompt or --spec.", style="red")
         raise typer.Exit(1)
+
+    job_card = _load_job_or_exit(job) if job else None
 
     image_paths: list[str] = []
     for img in image or []:
@@ -64,19 +67,24 @@ def build(
     with console.status("[bold green]Generating 3D model and enforcing quality gates...[/]"):
         if spec:
             console.print(f"[bold cyan]Building from spec:[/] {spec}")
-            result = pipeline.generate_from_spec(spec, run_name=name)
+            if job_card is not None:
+                console.print(f"[bold cyan]Job card:[/] {job_card.job_code} (card-axis gate active)")
+            result = pipeline.generate_from_spec(spec, run_name=name, job_card=job_card)
         else:
             console.print(f"[bold cyan]Building from prompt:[/] '{prompt}'")
             if image_paths:
                 console.print(f"[bold cyan]Reference images:[/] {len(image_paths)}")
             if measurements:
                 console.print(f"[bold cyan]Measurements:[/] '{measurements}'")
+            if job_card is not None:
+                console.print(f"[bold cyan]Job card:[/] {job_card.job_code} (axis contract + card-axis gate active)")
             result = pipeline.generate_from_prompt(
                 prompt=prompt,
                 measurements=measurements or "",
                 material_preset=material,
                 images=image_paths,
                 run_name=name,
+                job_card=job_card,
             )
 
     if result.success:

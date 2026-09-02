@@ -1819,3 +1819,107 @@ point — the mug regression was fixed at the source, not by loosening its
 assertion; baseline grew, nothing re-baselined). S1 honored (no live
 vision calls). Rule 9 honored (no dims inferred; MAYA00053153
 untouched). Committed under the owner's identity, no push.
+
+## Session log — 2026-09-02 (round 10: Phase 7 — batch throughput)
+
+Master order Phase 7: "3 jobs concurrently (32 threads, 64 GB), CPU bakes
+at 1K for iteration, GPU reserved for final 4K; then a batch of 5 with
+real measured wall clock per model and total." S1 held for every run
+(owner has not confirmed Gemini billing; the batch driver strips both
+`THREED_VLM_API_KEY` and `GEMINI_API_KEY` per worker, analyst prompts
+record "NOTE: vision is unavailable", visual gate fails soft — the
+reviewer holds the visual verdict on the renders).
+
+### Subjects (authored fresh, never seen before)
+
+Five hard-surface objects, two CC0/museum reference photos each with
+PROVENANCE.json, PROMPT.md in the Phase 6 format, deterministic intake →
+`input/jobs/<CODE>.yaml` (dims + explicit unit, never inferred):
+
+| Job | Object | Card dims (mm) | Ceiling |
+|---|---|---|---|
+| STEPSTOOL0001 | two-step step stool | 450×420×480 | 25,000 |
+| MILKCHURN0001 | milk churn | 340×340×640 | 20,000 |
+| GARDENTROWEL0001 | garden trowel | 320×70×45 | 15,000 |
+| CHAMBERSTICK0001 | chamber candlestick | 190×140×65 | 20,000 |
+| GALVBUCKET0001 | galvanized bucket | 260×260×330 | 20,000 |
+
+Driver: `scripts/phase7_batch.py` — per-job subprocess chain
+(build → package --bake-device cpu → validate), ThreadPoolExecutor,
+`THREED_BLENDER_THREADS` per worker (32 cores ÷ concurrency), per-step
+logs + `summary.json` under `output/phase7/<tag>/`.
+
+### The shakedown found two cold-path defects (both fixed at the source)
+
+3-way shakedown (177 s total): MILKCHURN + GARDENTROWEL all gates PASS;
+STEPSTOOL **Dimensions FAIL** — L/W swapped 90° about Z (Δ∓30 mm). Root
+cause: the analyst's spec declares its own measurement→axis binding, so
+the internal dimension gate verifies the analyst's DECLARED binding; the
+loop never saw the job card, so the swap was invisible until package
+time. **Fix:** `src.cli build --job <card>` threads the card into the
+loop — the analyst prompt gets a CLIENT JOB CARD CONTRACT section (axis
+map, meter-converted dims, `applies_to` bindings) and
+`evaluate_card_axis_gate` (verifier.py) checks the measured overall
+extents against the card inside `verify_run`, so the corrector fixes it
+in-loop. Pinned in `tests/test_card_axis_gate.py` (12 tests).
+
+The first full batch then failed CHAMBERSTICK by **+0.100 mm** and
+GALVBUCKET by **+0.104 mm** — inside the internal ±1 mm (loop stopped)
+but outside the client tolerance, which is 0.01 **in the card's declared
+unit** (±0.01 mm for mm cards, ~100× tighter than the internal figure).
+**Fix:** the card-axis gate now enforces the CARD's delivery tolerance
+(`job.dim_tolerance_m()`), so an internally-green build is driven to
+client-green inside the loop. Same test file pins the near-miss case.
+
+Third fix (pre-existing, exposed by these runs): prompts phrased "under
+N triangles" made intake set `polycount_semantics: triangles` — the
+client Polycount gate then counted literal triangle faces, which read
+~0 on a quad-clean FBX (vacuous pass). Prompts rephrased to "polycount
+ceiling N" (noun `polycount` → semantics unstated → conservative
+triangle-equivalent default); all five cards re-intaken.
+
+### Batch of 5 — ALL FIVE JOBS PASS ALL SIX CLIENT GATES
+
+Concurrency 5, 6 Blender threads/worker, CPU 1K iteration bakes
+(GPU reserved), 32 logical cores / 62 GB RAM:
+
+| Job | Iterations | Build | Package | Validate | LP tri-eq | HP tri-eq | Dimensions Δ |
+|---|---|---|---|---|---|---|---|
+| STEPSTOOL0001 | 1 | 31.2 s | 21.8 s | 10.7 s | 432 | 4,800 | ±0.000 mm |
+| MILKCHURN0001 | 2 | 56.4 s | 23.7 s | 2.6 s | 2,176 | 49,152 | ±0.000 mm |
+| CHAMBERSTICK0001 | 2 | 106.0 s | 20.2 s | 2.7 s | 2,688 | 14,080 | ±0.000 mm |
+| GALVBUCKET0001 | 5 | 210.4 s | 16.8 s | 2.6 s | 1,472 | 38,464 | +0.002 mm worst |
+| GARDENTROWEL0001 | 4 | 289.4 s | 12.5 s | 2.6 s | 44 | 1,316 | ±0.000 mm |
+
+**Total wall clock: 305 s (5.1 min) for 5 verified, packaged models** —
+~61 s/model of throughput at 5-way concurrency, every model
+dimension-exact against its card (worst delta +0.002 mm, inside the
+±0.01 mm card tolerance), polycount gates now counting real
+triangle-equivalents (44–2,688 against 15,000–25,000 ceilings). Evidence:
+`output/phase7/batch5/` (per-step logs + summary.json),
+`output/packages/<CODE>/qa_report.json`. Iteration counts rose vs the
+pre-fix batch (the card gate refuses to stop at ±1 mm) — that is the
+honest cost of converging to the client's delivery tolerance in-loop;
+STEPSTOOL needed only 1 iteration because the prompt contract oriented
+the analyst correctly on the first spec.
+
+### Final 4K GPU bake (GPU was reserved during the batch)
+
+`package --spec <milkchurn run>/spec.json --job MILKCHURN0001.yaml
+--res 4096 --bake-device optix --out-root output/phase7/final4k`:
+**99.4 s** wall, `bake_device_resolved: GPU / OPTIX` on the RTX 4080
+SUPER (recorded in qa_report), 5-map bake 84.6 s at 4096², LP 2,176 /
+HP 49,152 tri-eq, 24 UV islands, 0 overlaps, texel ratio 1.0000008,
+ALL SIX GATES PASSED, 9 deliverables + qa_report under
+`output/phase7/final4k/MILKCHURN0001/`. Review renders await the
+reviewer's visual verdict:
+`output/phase7/finish/MILKCHURN0001/review/`.
+
+### Suite + commit
+
+**Suite: 389 passed in 135.43 s** (389 = 368 Phase 6 + 9
+batch-concurrency + 12 card-axis-gate; baseline grew, nothing
+re-baselined). S1 honored (no live vision calls). Rule 9 honored (no
+dims inferred; MAYA00053153 untouched). AGENTS.md invariants added: the
+card-axis gate contract and the polycount-phrasing semantics.
+Committed under the owner's identity, no push.
