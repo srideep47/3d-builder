@@ -20,12 +20,17 @@ def _to_meters(values: list[float], unit: Unit) -> list[float]:
 
 def _resolve_material(mat: PBRMaterial) -> dict[str, Any]:
     """Merge a material spec with its preset. Only explicitly-set fields override
-    the preset's values (via pydantic's model_fields_set)."""
+    the preset's values (via pydantic's model_fields_set). An explicit JSON null
+    marks the field as set but carries no value — it is treated as UNSET (the
+    preset wins) instead of being iterated or float()-ed into a TypeError."""
     if not mat.preset:
-        return mat.model_dump()
+        # No preset to merge against: drop explicitly-null optionals so the
+        # harness sees clean defaults rather than None payloads.
+        return {k: v for k, v in mat.model_dump().items() if v is not None}
 
     merged = get_preset_values(mat.preset)
-    fields_set = mat.model_fields_set
+    fields_set = {k for k in mat.model_fields_set
+                  if getattr(mat, k, None) is not None}
     if "color" in fields_set:
         merged["color"] = [float(c) for c in mat.color]
     if "roughness" in fields_set:

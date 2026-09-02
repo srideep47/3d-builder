@@ -183,7 +183,9 @@ class PartSpec(BaseModel):
     profile_points: list[list[float]] | None = None  # revolve_lathe [[r,z],...] or extrude [[x,y],...]
     path_points: list[list[float]] | None = None  # sweep [[x, y, z], ...]
     path_closed: bool = False  # sweep: close the path into a loop (no tube end caps)
-    caps: Literal["ngon", "fan"] = "ngon"  # extrude cap fill: one n-gon face or a triangle fan
+    # Extrude cap fill: fan by default — the client delivery gate is strict
+    # (0 n-gons) and the analyst has no reason to choose n-gon caps.
+    caps: Literal["ngon", "fan"] = "fan"
     position_mode: Literal["center", "base"] | None = None  # None = auto per shape
     method: GenerationMethod = GenerationMethod.PARAMETRIC
     material: PBRMaterial | None = None

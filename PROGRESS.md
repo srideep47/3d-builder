@@ -1689,3 +1689,133 @@ nothing re-baselined). S1 honored: no live vision calls — all 429/quota/
 image-policy paths verified against the mocked Gemini v1beta and local
 OpenAI-compatible servers with recorded sleeps. MAYA00053153 dims
 untouched (rule 9). Committed under the owner's identity, no push.
+
+## Session log — 2026-09-02 (round 9: Phase 6 — three unseen objects, end to end)
+
+Master order Phase 6: three objects never seen before, start to finish,
+report renders + honest read. **The reviewer is the visual judge** — S1
+held for every run (owner has not confirmed Gemini billing; both
+`THREED_VLM_API_KEY` and `GEMINI_API_KEY` stripped from the environment,
+analyst prompt records "NOTE: vision is unavailable", visual gate fails
+soft, no live vision calls).
+
+### The chain (identical for all three)
+
+`scripts/phase6_intake.py` (PROMPT.md → `input/jobs/<CODE>.yaml` via the
+deterministic intake; dims + explicit unit, never inferred) →
+`python -m src.cli build -p "$(cat PROMPT.md)" -m <measurements> -i
+<photos> -n <name>` (analyst → gates → corrector) → `package --spec
+<run>/spec.json --job input/jobs/<CODE>.yaml` (T3 finish chain) →
+`validate <pkg> --job` (client mirror).
+
+### Honest results per object
+
+**A — coat stand** (refs: Rijksmuseum objectnr 8284 + a catalog photo;
+job COATSTAND0001, 480×480×1750 mm floor): build GREEN in **2 iterations,
+35.1 s**; package 29 s; **ALL SIX client gates PASSED** — dims
+480/480/1750 mm, Δ ≤ 0.001 mm on every axis; LP 2240 tri-eq (budget
+30000), HP 95872, 66 UV islands, 0 overlaps, texel ratio 1.0000051.
+End-to-end ≈ 64 s.
+
+**B — wall-mount mailbox** (refs: two museum/street photos; job
+MAILBOX0001, 260×130×200 mm wall): three attempts, and the first two
+failures were cold-path defects, not the model —
+attempt 1 (125 s): corrector gave up at iteration 2 and the give-up was
+**silent** (defect 1); attempt 2 (958 s): corrector chased mislabeled
+targets with no measured part geometry (defect 2); attempt 3 (both fixes
+in): GREEN in **7 iterations, 545 s**; package 28 s; **2 of 6 gates FAIL,
+honestly**: Dimensions H→Z 200.73 mm vs 200.00 (**Δ+0.730 mm** — passes
+the internal ±1 mm, fails the client ±0.01 in = ±0.254 mm) and
+Orientation `wall` (intake accepts the word; the client contract defines
+no wall semantics — the validator refuses to guess, rule 9). L/W exact.
+LP 528/20000, HP 19728, 34 UV islands, 0 overlaps.
+
+**C — watering can** (refs: two museum photos; job WATERCAN0001,
+380×200×340 mm floor): build GREEN in **3 iterations, 181.8 s**; package
+24 s; **1 gate FAIL**: L→X 379.19 vs 380.00 (**Δ−0.815 mm** — internal
+placement tolerance ±5 mm passed, client ±0.254 mm failed); W/H exact.
+LP 496/25000, HP 5728, 28 UV islands, 0 overlaps.
+
+Renders (reviewer holds the visual verdict): `output/runs/
+20260902_124637_phase6_a_coatstand_8a7669/renders/`,
+`…_131627_phase6_b_mailbox_582f3d/renders/` (7 steps),
+`…_132642_phase6_c_wateringcan_866b4d/renders/`, plus finish review
+renders under `output/finish/<JOB>/review/`.
+
+### Cold-path defects found by the runs (all fixed)
+
+1. **Corrector give-up was silent.** A corrector response that failed
+   JSON extraction or ObjectSpec validation read as "cannot fix" with
+   the reason swallowed; a run could die at iteration 2 leaving no trace.
+   `_correct_spec` now retries once with the failure quoted back
+   (transient ≠ incapable), records `last_correction_failure`, and every
+   give-up reaches the manifest as `unresolved_error: "Corrector gave
+   up: …"`.
+2. **The corrector flew blind.** Gate deltas alone leave part
+   repositioning to guesswork (attempt 2 burned 958 s on mislabeled
+   targets). Gate-failure correction prompts now carry the measured
+   per-part geometry table (dims, center, bottom_z, top_z) — B converged
+   only after this (`_measured_geometry_table`).
+3. **NGON caps vs the strict delivery n-gon gate.** First live spec
+   package in history with cylinders: `prepare_delivery_scene` refused
+   20 n-gons (10 cylinders × 2 NGON caps) after the build had already
+   converged. Caps are now TRIFAN fills in `_build_cylinder` /
+   `_build_tapered_cylinder` / `_build_cone` — Blender 4.x parameter is
+   **`end_fill_type`** (`fill_type` is unrecognized) — and extrude parts
+   default to `caps: fan` at the schema level. Same triangle-equivalent
+   count, so tri ceilings are unaffected.
+4. **The regression that fix exposed, and its root cause.** After (3)
+   the coffee_mug golden benchmark lost watertightness. Causal chain,
+   pinned empirically: the EXACT boolean solver leaves **24
+   coincident-but-distinct vertex pairs joined by zero-length edges**
+   where the cut crosses the inner fan-cap ring (live mesh stays
+   edge-closed; Blender's own `validate()` strips nothing); glTF
+   tessellation ships them as **48 zero-area triangles `[P,P,Q]`**; the
+   delivery check welds by position, and each degenerate face
+   double-counts its edges (32 degree-4 + 8 degree-6 = 40 non-manifold
+   edges) → not watertight. Fix: `apply_boolean` now dissolves
+   zero-length edges (`_weld_solver_duplicates`, bmesh
+   `dissolve_degenerate`, dist 1e-7 m — 2500× below the tightest client
+   tolerance, so only solver artifacts can match). Bonus: the pinched
+   5-vert loop faces dissolve back to quads (mug n-gons 48 → 0).
+   Isolation verified: a bare TRIFAN cylinder is clean (0 zero-length
+   edges) and the already-shipped COATSTAND LP/HP weld watertight with 0
+   zero-area faces — the pathology is boolean-solver-only.
+5. **Measurement grammar enforced pre-build + honest UNMEASURABLE
+   feedback** (earlier in the phase): `applies_to` targets are
+   structure-checked (unknown part / unmeasurable attribute refuse
+   before any Blender call); verifier feedback names the reason instead
+   of a fake Δ0 mm when a measurement cannot be taken.
+
+### Findings recorded, deliberately NOT fixed (owner decisions)
+
+- **Internal ±1 mm vs client ±0.254 mm tolerance gap.** B (+0.730) and
+  C (−0.815) pass the internal gate and fail the client gate. Flipping
+  the default was rejected mid-phase: the golden benchmark specs
+  (coffee_mug, coffee_table, counter_stool, chiral_test) carry
+  measurements without explicit `tolerance_m` and depend on the default.
+  Options: tighten the default + add explicit tolerances to the goldens,
+  or add a delivery-side re-check at client tolerance inside the loop.
+- **Orientation `wall`** is accepted by intake vocabulary but has no
+  client-contract semantics → the validator refuses to guess (rule 9).
+  Needs a client clarification or an intake-vocabulary restriction.
+- **No `center_z` in the measurement grammar**: A's peg-ring centers
+  land 14 mm low (the analyst maps center-height constraints to
+  `top_z`).
+- **B body/dome split** 126.5/73.5 mm vs the prompt's stated 135/65.
+
+### Tests
+
+**+17 (351 → 368)**: explicit-JSON-null materials (2), resolver crash →
+build error not run crash (1), corrector retry/give-up-reason/validation
+reason/measured-geometry table (5), extrude caps default fan (1),
+applies_to grammar + UNMEASURABLE feedback (4), and the NEW
+blender-marked `tests/test_spec_shapes_delivery.py` (4: every vocabulary
+shape n-gon-free; every shape a closed solid; boolean result welds
+watertight after glTF; boolean result exports zero zero-area faces).
+
+**Suite: 368 passed in 131.47 s** (was 365 passed + 1 failed at the low
+point — the mug regression was fixed at the source, not by loosening its
+assertion; baseline grew, nothing re-baselined). S1 honored (no live
+vision calls). Rule 9 honored (no dims inferred; MAYA00053153
+untouched). Committed under the owner's identity, no push.

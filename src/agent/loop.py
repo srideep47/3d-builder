@@ -127,6 +127,9 @@ class AgentLoop:
         self.runner = runner or BlenderRunner()
         self.verifier = verifier or Verifier()
         self.run_store = run_store or RunStore()
+        # Set by _correct_spec when the corrector gives up; read at the
+        # break sites so the manifest records the reason.
+        self.last_correction_failure: str | None = None
         agent_cfg = self.provider.config.get("agent", {}) or {}
         # Phase 5 master order: "Hard iteration cap, start at 8."
         self.max_iterations = max_iterations or int(agent_cfg.get("max_iterations", 8))
@@ -331,24 +334,73 @@ class AgentLoop:
         )
         return "\n".join(lines)
 
+    @staticmethod
+    def _measured_geometry_table(measure_res: dict | None) -> str:
+        """Compact per-part measured geometry for the corrector.
+
+        Gate deltas alone leave part repositioning to guesswork: the
+        corrector knows the dome is 65 mm too tall but not where the dome
+        part actually sits. The measured centers and extents make the fix
+        computable (Phase 6: the mailbox dome)."""
+        if not measure_res:
+            return ""
+        lines = ["", "Measured geometry of the last build (meters):"]
+        overall = measure_res.get("overall") or {}
+        if overall.get("dimensions") is not None:
+            dims = [round(float(v), 4) for v in overall["dimensions"]]
+            lines.append(f"  overall: dims {dims}")
+        for name, p in sorted((measure_res.get("parts") or {}).items()):
+            dims = [round(float(v), 4) for v in p.get("dimensions") or []]
+            center = [round(float(v), 4) for v in p.get("center") or []]
+            lines.append(
+                f"  {name}: dims {dims} center {center} "
+                f"bottom_z {round(float(p.get('bottom_z', 0.0)), 4)} "
+                f"top_z {round(float(p.get('top_z', 0.0)), 4)}"
+            )
+        if len(lines) <= 1:
+            return ""
+        return "\n".join(lines)
+
     def _correct_spec(self, current_spec: ObjectSpec, instruction: str) -> ObjectSpec | None:
-        """Ask the corrector for a fixed spec. Returns a validated spec or None."""
+        """Ask the corrector for a fixed spec. Returns a validated spec or None.
+
+        A corrector response that fails JSON extraction or spec validation is
+        a transient output failure, not a "cannot fix" verdict: one retry
+        with the reason quoted back precedes giving up. The final failure
+        reason is left in self.last_correction_failure so the run record can
+        say WHY the corrector stopped — a silent give-up is unreportable
+        (Phase 6: the mailbox run died at iteration 2 with no trace)."""
+        self.last_correction_failure = None
         user_prompt = (
             f"{instruction}\n\n"
             f"Current ObjectSpec:\n{current_spec.model_dump_json(indent=2)}\n\n"
             "Return the complete corrected ObjectSpec JSON and nothing else."
         )
-        _, parsed = self.provider.complete_json(
-            system_prompt=CORRECTOR_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            role="corrector",
-        )
-        if not parsed:
-            return None
-        try:
-            return ObjectSpec.model_validate(parsed)
-        except Exception:
-            return None
+        failure = ""
+        for _ in range(2):
+            prompt = user_prompt
+            if failure:
+                prompt += (
+                    f"\n\nYour previous response was rejected: {failure} "
+                    "Return ONLY the complete corrected ObjectSpec JSON."
+                )
+            content, parsed = self.provider.complete_json(
+                system_prompt=CORRECTOR_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                role="corrector",
+            )
+            if not parsed:
+                failure = (
+                    "corrector response did not contain parseable JSON "
+                    f"(content length {len(content or '')})"
+                )
+            else:
+                try:
+                    return ObjectSpec.model_validate(parsed)
+                except Exception as e:
+                    failure = f"corrector spec failed validation: {str(e)[:300]}"
+            self.last_correction_failure = failure
+        return None
 
     def _analyst_spec(self, prompt: str, measurements_text: str, images: list[Path]) -> tuple[ObjectSpec | None, str]:
         """Ask the analyst for an initial ObjectSpec. Sends reference images as
@@ -554,9 +606,12 @@ class AgentLoop:
             self._normalize_spec_methods(current_spec)
             self._reattach_neural_meshes(current_spec, run_dir)
 
-            build_params = resolve_spec_to_build_params(current_spec, output_glb_path=str(step_glb.resolve()))
-            emit("build_started", index=iteration, parts=[p.name for p in current_spec.parts])
             try:
+                # Spec-to-params resolution is part of the build: a spec that
+                # parses but crashes the resolver is a build error the
+                # corrector can fix, never a reason to kill the run.
+                build_params = resolve_spec_to_build_params(current_spec, output_glb_path=str(step_glb.resolve()))
+                emit("build_started", index=iteration, parts=[p.name for p in current_spec.parts])
                 self.runner.execute_op("build_from_spec", build_params)
             except Exception as e:
                 last_error = str(e)
@@ -565,12 +620,16 @@ class AgentLoop:
                     break
                 fixed = self._correct_spec(
                     current_spec,
-                    f"Blender build failed with this error:\\n{last_error[:1500]}",
+                    f"Build failed with this error:\\n{last_error[:1500]}",
                 )
                 if fixed:
                     current_spec = fixed
                     emit("correction_done", fixed=True, after="build_error")
                     continue
+                if self.last_correction_failure:
+                    last_error += (
+                        "\nCorrector gave up: " + self.last_correction_failure
+                    )
                 break
             emit("build_done", index=iteration, step_glb=str(step_glb))
 
@@ -651,13 +710,18 @@ class AgentLoop:
             emit("correction_started", reason="gate failures", feedback=latest_verification.feedback_for_agent[:1500])
             fixed = self._correct_spec(
                 current_spec,
-                f"Verification results for step {iteration}:\\n{latest_verification.feedback_for_agent}",
+                f"Verification results for step {iteration}:\\n{latest_verification.feedback_for_agent}"
+                + self._measured_geometry_table(measure_res),
             )
             if fixed:
                 current_spec = fixed
                 emit("correction_done", fixed=True)
             else:
                 last_error = latest_verification.feedback_for_agent
+                if self.last_correction_failure:
+                    last_error += (
+                        "\nCorrector gave up: " + self.last_correction_failure
+                    )
                 break
 
         # Phase 5 closed loop: a run that exhausts the iteration cap without

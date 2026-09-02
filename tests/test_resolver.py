@@ -8,7 +8,9 @@ from src.spec.schema import (
     ObjectSpec,
     PartSpec,
     PBRMaterial,
+    ShapeType,
 )
+from src.materials.pbr import get_preset_values
 from src.spec.resolver import resolve_spec_to_build_params
 
 
@@ -99,3 +101,80 @@ def test_constraints_passed_through():
     )
     params = resolve_spec_to_build_params(spec)
     assert params["spec"]["constraints"][0]["type"] == "ground_contact"
+
+
+def test_explicit_json_null_material_fields_are_treated_as_unset():
+    """Phase 6 cold-path defect: the live analyst emitted "texture_size": null
+    (and other explicit nulls). Pydantic marks those fields SET, but they carry
+    no value — the preset must win instead of the resolver iterating None and
+    raising TypeError before the harness ever runs."""
+    spec = ObjectSpec(
+        name="coat_stand",
+        parts=[
+            PartSpec(
+                name="pole",
+                dimensions=[0.056, 0.056, 1.66],
+                material=PBRMaterial.model_validate({
+                    "preset": "walnut_wood",
+                    "texture_size": None,
+                    "texture_dir": None,
+                    "bump_strength": None,
+                    "emission": None,
+                }),
+            )
+        ],
+    )
+    params = resolve_spec_to_build_params(spec)
+    mat = params["spec"]["parts"][0]["material"]
+    preset = get_preset_values("walnut_wood")
+    # Explicit nulls behave exactly like unset fields: preset values win and
+    # no None payload reaches the harness.
+    assert mat["roughness"] == preset["roughness"]
+    assert mat["color"] == preset["color"]
+    assert "texture_size" not in mat
+    assert "texture_dir" not in mat
+    assert "bump_strength" not in mat
+    assert None not in mat.values()
+
+
+def test_presetless_material_drops_explicit_nulls():
+    """A material with no preset dumps without explicitly-null optionals —
+    the harness sees clean defaults, never a None payload."""
+    spec = ObjectSpec(
+        name="plain",
+        parts=[
+            PartSpec(
+                name="body",
+                dimensions=[0.2, 0.2, 0.3],
+                material=PBRMaterial.model_validate({
+                    "texture_size": None, "texture_dir": None, "bump_strength": None,
+                    "preset": None,
+                }),
+            )
+        ],
+    )
+    params = resolve_spec_to_build_params(spec)
+    mat = params["spec"]["parts"][0]["material"]
+    assert mat == {} or None not in mat.values()
+    assert "texture_size" not in mat
+
+
+def test_extrude_caps_default_to_fan_for_delivery():
+    """Phase 6 cold-path defect: extrude parts defaulted to n-gon caps, which
+    the client delivery gate refuses (0 n-gons, strict). The default is now
+    fan — n-gon-free by construction without analyst knowledge of the gate."""
+    spec = ObjectSpec(
+        name="caps_default",
+        parts=[
+            PartSpec(
+                name="rib",
+                shape=ShapeType.EXTRUDE,
+                dimensions=[0.1, 0.1, 0.4],
+                profile_points=[[0.05, 0], [0.05, 0.05], [0.0, 0.05],
+                                [-0.05, 0.05], [-0.05, -0.05], [0.05, -0.05]],
+            )
+        ],
+    )
+    params = resolve_spec_to_build_params(spec)
+    part = params["spec"]["parts"][0]
+    assert part["caps"] == "fan"

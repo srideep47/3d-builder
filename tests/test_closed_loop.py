@@ -404,3 +404,164 @@ def test_config_pins_the_phase_5_iteration_cap():
     """Master order Phase 5: 'Hard iteration cap, start at 8.'"""
     cfg = yaml.safe_load(CONFIG_AI_YAML.read_text(encoding="utf-8"))
     assert cfg["agent"]["max_iterations"] == 8
+
+
+# ── Group 4: Phase 6 cold-path containment ──────────────────────────────────
+
+
+def test_resolver_crash_is_a_build_error_not_a_run_crash(tmp_path, monkeypatch):
+    """Phase 6 cold-path defect, found by the first live end-to-end run: the
+    analyst emitted "texture_size": null, the resolver raised TypeError BEFORE
+    the harness ran, and the exception escaped to the CLI — no manifest, no
+    corrector round, no honest report. Resolution is part of the build: the
+    loop must feed the error to the corrector and, if it cannot converge,
+    exhaust the cap with evidence."""
+    import src.agent.loop as loop_mod
+
+    def _boom(spec, output_glb_path):
+        raise TypeError("'NoneType' object is not iterable")
+
+    monkeypatch.setattr(loop_mod, "resolve_spec_to_build_params", _boom)
+    loop, vlm = _make_loop(tmp_path, fail=True, max_iterations=3)
+    events: list[dict] = []
+    res = loop.run(prompt="a box", run_dir=tmp_path / "run",
+                   progress=events.append)
+
+    assert res.success is False
+    m = _manifest(tmp_path / "run")
+    assert m["status"] == "iteration_cap_exhausted"
+    assert m["metrics"]["cap_report"]["last_error"] == \
+        "'NoneType' object is not iterable"
+    assert m["metrics"]["unresolved_error"]
+    # The harness itself was never reached — the failure is resolution-side.
+    assert all(op != "build_from_spec" for op, _ in loop.runner.ops)
+    assert any(e.get("event") == "build_error" for e in events)
+    # The corrector got its chances (cap 3) before the honest stop.
+    assert loop.provider.corrector_calls == 3
+
+
+# ── Group 5: corrector give-up is evidenced, and transient garbage gets
+# one retry (Phase 6: the mailbox run died at iteration 2 with no trace of
+# why the corrector stopped — a silent give-up is unreportable). ─────────────
+
+
+class _ScriptedCorrectorProvider(FakeProvider):
+    """Corrector responses from a script: a str is returned as unparseable
+    content, a dict as parsed-but-maybe-invalid JSON."""
+
+    def __init__(self, spec, script, agent_cfg=None):
+        super().__init__(spec, agent_cfg=agent_cfg)
+        self.script = list(script)
+        self.corrector_prompts: list[str] = []
+
+    def complete_json(self, system_prompt, user_prompt, role="analyst", **kw):
+        if role != "corrector":
+            return super().complete_json(system_prompt, user_prompt, role=role, **kw)
+        self.corrector_prompts.append(user_prompt)
+        self.corrector_calls += 1
+        item = self.script.pop(0) if self.script else {"nope": True}
+        if isinstance(item, str):
+            return item, None
+        return json.dumps(item), deepcopy(item)
+
+
+def test_corrector_transient_garbage_gets_one_retry(tmp_path):
+    """An unparseable corrector response is transient output noise, not a
+    'cannot fix' verdict: the loop retries once with the reason quoted back
+    before giving up."""
+    spec = _spec()
+    provider = _ScriptedCorrectorProvider(
+        spec, ["not json at all"],  # attempt 1 garbage; attempt 2 = fixture spec
+        agent_cfg={"max_iterations": 1, "wall_clock_budget_s": 900},
+    )
+    loop = AgentLoop(provider=provider, runner=FakeRunner(),
+                     verifier=FakeVerifier(fail=True),
+                     run_store=RunStore(root_dir=tmp_path / "runs"))
+    events: list[dict] = []
+    loop.run(prompt="a box", run_dir=tmp_path / "run", progress=events.append)
+
+    assert provider.corrector_calls == 2  # garbage, then the successful retry
+    assert any(e.get("event") == "correction_done" and e.get("fixed")
+               for e in events)
+    # the transient failure stays on record even though the retry recovered
+    assert loop.last_correction_failure
+
+
+def test_corrector_giveup_reason_reaches_the_manifest(tmp_path):
+    """When the corrector gives up, the manifest's unresolved_error must say
+    WHY (parse failure) — not just repeat the gate feedback."""
+    spec = _spec()
+    provider = _ScriptedCorrectorProvider(
+        spec, ["garbage", "still garbage"],
+        agent_cfg={"max_iterations": 3, "wall_clock_budget_s": 900},
+    )
+    loop = AgentLoop(provider=provider, runner=FakeRunner(),
+                     verifier=FakeVerifier(fail=True),
+                     run_store=RunStore(root_dir=tmp_path / "runs"))
+    res = loop.run(prompt="a box", run_dir=tmp_path / "run")
+
+    assert res.success is False
+    assert provider.corrector_calls == 2  # one _correct_spec, two attempts
+    m = _manifest(tmp_path / "run")
+    err = m["metrics"]["unresolved_error"]
+    assert "Corrector gave up" in err
+    assert "parseable JSON" in err
+
+
+def test_corrector_validation_failure_reason_reaches_the_manifest(tmp_path):
+    """Same contract for the other give-up branch: JSON that parses but
+    fails ObjectSpec validation must name the validation failure."""
+    spec = _spec()
+    provider = _ScriptedCorrectorProvider(
+        spec, [{"parts": "not-a-list"}, {"parts": "not-a-list"}],
+        agent_cfg={"max_iterations": 3, "wall_clock_budget_s": 900},
+    )
+    loop = AgentLoop(provider=provider, runner=FakeRunner(),
+                     verifier=FakeVerifier(fail=True),
+                     run_store=RunStore(root_dir=tmp_path / "runs"))
+    loop.run(prompt="a box", run_dir=tmp_path / "run")
+
+    m = _manifest(tmp_path / "run")
+    err = m["metrics"]["unresolved_error"]
+    assert "Corrector gave up" in err
+    assert "spec failed validation" in err
+
+
+def test_corrector_receives_measured_part_geometry(tmp_path):
+    """Phase 6 finding: gate deltas alone leave part repositioning to
+    guesswork — the corrector must also see the measured per-part centers
+    and extents so a spatial fix is computable, not a coin flip."""
+    spec = _spec()
+    provider = _ScriptedCorrectorProvider(
+        spec, ["garbage", "garbage"],  # corrector gives up; prompt recorded
+        agent_cfg={"max_iterations": 3, "wall_clock_budget_s": 900},
+    )
+    loop = AgentLoop(provider=provider, runner=FakeRunner(),
+                     verifier=FakeVerifier(fail=True),
+                     run_store=RunStore(root_dir=tmp_path / "runs"))
+    loop.run(prompt="a box", run_dir=tmp_path / "run")
+
+    assert provider.corrector_prompts
+    prompt = provider.corrector_prompts[0]
+    assert "Measured geometry of the last build" in prompt
+    assert "dims [0.2, 0.2, 0.24]" in prompt  # FakeRunner's overall bounds
+
+
+def test_measured_geometry_table_formats_parts():
+    from src.agent.loop import AgentLoop
+
+    table = AgentLoop._measured_geometry_table({
+        "overall": {"dimensions": [0.26, 0.13, 0.2]},
+        "parts": {
+            "body_dome": {"dimensions": [0.13, 0.13, 0.26], "center": [0, 0, 0.135],
+                          "bottom_z": 0.005, "top_z": 0.2},
+            "body_lower": {"dimensions": [0.26, 0.13, 0.135], "center": [0, 0, 0.0675],
+                           "bottom_z": 0.0, "top_z": 0.135},
+        },
+    })
+    assert "overall: dims [0.26, 0.13, 0.2]" in table
+    assert "body_dome: dims [0.13, 0.13, 0.26] center [0.0, 0.0, 0.135] bottom_z 0.005 top_z 0.2" in table
+    assert "body_lower" in table
+    # sorted by part name; nothing measured → no table at all
+    assert AgentLoop._measured_geometry_table(None) == ""
+    assert AgentLoop._measured_geometry_table({}) == ""

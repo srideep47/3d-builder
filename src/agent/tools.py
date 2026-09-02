@@ -495,8 +495,14 @@ class AgentToolExecutor:
 
             if output_glb is None:
                 output_glb = str(self.workdir / f"build_{int(time.time())}.glb")
-            params = resolve_spec_to_build_params(spec_obj, output_glb_path=str(Path(output_glb).resolve()))
-            result = self.runner.execute_op("build_from_spec", params)
+            try:
+                # Resolution is part of the build: a spec that parses but
+                # crashes the resolver is a build failure, not an exception
+                # for the tool caller to choke on.
+                params = resolve_spec_to_build_params(spec_obj, output_glb_path=str(Path(output_glb).resolve()))
+                result = self.runner.execute_op("build_from_spec", params)
+            except Exception as e:
+                return {"success": False, "error": f"Build failed: {e}"}
             if result.get("success"):
                 self.last_built_glb = str(Path(output_glb).resolve())
                 self.last_spec = spec_obj

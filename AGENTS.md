@@ -70,6 +70,25 @@
 - **Boolean-consumed parts have freed RNA structs.** After `apply_boolean`
   removes the tool object, filter object lists by identity (`is not`), never by
   `.name`.
+- **The EXACT boolean solver leaves zero-length edges behind.** Where a cut
+  crosses a tri-fan cap ring it can emit coincident-but-distinct vertex pairs
+  joined by zero-length edges — the live mesh stays edge-closed (and
+  `validate()` strips nothing), but glTF tessellation ships them as zero-area
+  triangles whose position-welded edges read non-manifold in the watertight
+  check. `apply_boolean` dissolves them (`_weld_solver_duplicates`, dist
+  1e-7 m); pinned in `tests/test_spec_shapes_delivery.py`.
+- **Primitive caps must be TRIFAN, and the Blender 4.x parameter is
+  `end_fill_type`** (`fill_type` is unrecognized) on
+  `primitive_cylinder_add`/`primitive_cone_add`. NGON caps put n-gons in the
+  delivery scene and `prepare_delivery_scene` refuses (client gate: strict 0).
+  Extrude parts default `caps: fan` at the schema level. Same
+  triangle-equivalent count, so tier ceilings are unaffected.
+- **The corrector is retried, never silently dropped.** A corrector response
+  failing JSON extraction or ObjectSpec validation is transient (one retry
+  with the reason quoted); a real give-up records its reason into the
+  manifest `unresolved_error`. Gate-failure correction prompts carry the
+  measured per-part geometry table (dims/center/bottom_z/top_z) — deltas
+  alone leave repositioning to guesswork.
 - **The shape enum, the analyst prompt, and the harness `_build_shape`
   dispatch must stay in sync.** Shapes: box, rounded_box, cylinder,
   tapered_cylinder, sphere, cone, torus, tapered_extrude, revolve_lathe,
@@ -112,7 +131,7 @@
   guess a standard size.
 
 ## Verification
-- `python -m pytest tests -q` — 351 tests; `blender`-marked tests auto-skip
+- `python -m pytest tests -q` — 368 tests; `blender`-marked tests auto-skip
   when no Blender is found.
 - Client packages: `python -m src.cli package --spec <spec.json> --job
   job.yaml` runs the full T3 finish chain (build → quad-verify + per-island

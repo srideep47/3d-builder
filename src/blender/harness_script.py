@@ -329,8 +329,13 @@ def _build_cylinder(name, dims, segments=32):
 
     radius = float(dims[0]) * 0.5
     depth = float(dims[2]) if len(dims) > 2 else float(dims[0])
+    # TRIFAN caps (end_fill_type): the default NGON fill puts one n-gon on
+    # each cap and the delivery scene gate is strict (0 n-gons). A tri-fan
+    # cap has the same triangle-equivalent count, so the tri ceiling is
+    # unaffected.
     bpy.ops.mesh.primitive_cylinder_add(
-        radius=radius, depth=depth, vertices=int(segments), location=(0, 0, 0)
+        radius=radius, depth=depth, vertices=int(segments),
+        end_fill_type="TRIFAN", location=(0, 0, 0),
     )
     obj = bpy.context.active_object
     obj.name = name
@@ -348,6 +353,7 @@ def _build_tapered_cylinder(name, dims, top_scale, segments=32):
         radius2=bottom_r * ts,
         depth=depth,
         vertices=int(segments),
+        end_fill_type="TRIFAN",
         location=(0, 0, 0),
     )
     obj = bpy.context.active_object
@@ -376,6 +382,7 @@ def _build_cone(name, dims, segments=32):
         radius2=0.0,
         depth=float(dims[2]) if len(dims) > 2 else float(dims[0]),
         vertices=int(segments),
+        end_fill_type="TRIFAN",
         location=(0, 0, 0),
     )
     obj = bpy.context.active_object
@@ -732,6 +739,30 @@ def apply_world_mirror(obj, axis):
     return _join_objects([obj, dup], obj.name)
 
 
+def _weld_solver_duplicates(obj):
+    """Collapse zero-length edges left by the EXACT boolean solver.
+
+    The solver can emit coincident-but-distinct vertex pairs joined by a
+    zero-length edge (seen where a tri-fan cap ring meets the cut wall).
+    The live mesh stays edge-closed, but glTF tessellation turns those
+    loops into zero-area triangles whose welded edges read as non-manifold
+    in the delivery watertight check. Dissolving them also converts the
+    affected 5-vert loop faces back to quads. 1e-7 m is 2500x below the
+    tightest client tolerance, so only solver artifacts can match."""
+    import bmesh
+
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(obj.data)
+        zero = [e for e in bm.edges if e.calc_length() < 1e-7]
+        if zero:
+            bmesh.ops.dissolve_degenerate(bm, edges=zero, dist=1e-7)
+            bm.to_mesh(obj.data)
+            obj.data.update()
+    finally:
+        bm.free()
+
+
 def apply_boolean(target, tool, operation="difference"):
     import bpy
 
@@ -741,6 +772,7 @@ def apply_boolean(target, tool, operation="difference"):
     mod.object = tool
     select_only([target])
     bpy.ops.object.modifier_apply(modifier=mod.name)
+    _weld_solver_duplicates(target)
     bpy.data.objects.remove(tool, do_unlink=True)
     # Purge the orphaned tool mesh so it cannot leak into exports.
     for me in list(bpy.data.meshes):

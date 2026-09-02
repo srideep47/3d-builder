@@ -145,10 +145,25 @@ class Verifier:
             feedback_lines.append(f"DIMENSION GATE FAILED ({dim_result.failed_count} measurements out of tolerance):")
             for d in dim_result.details:
                 if not d.get("passed", False):
-                    feedback_lines.append(
-                        f" - Measurement '{d['name']}': Target {d['target_m']}m, Actual {d['actual_m']}m, "
-                        f"Delta {d.get('delta_mm', 0)}mm (Tolerance: {d['tolerance_m']*1000}mm)"
-                    )
+                    if d.get("actual_m") is None:
+                        # Unmeasurable target (Phase 6 cold-path defect: the
+                        # old line printed "Actual Nonem, Delta 0mm" — a fake
+                        # zero delta the corrector chased for iterations).
+                        feedback_lines.append(
+                            f" - Measurement '{d['name']}': UNMEASURABLE — {d.get('reason', 'no measured value for this target')}. "
+                            "Rewrite its applies_to to the measurement grammar "
+                            "(overall.width_x | overall.depth_y | overall.height_z | "
+                            "<part>.width_x | <part>.depth_y | <part>.height_z | "
+                            "<part>.top_z | <part>.bottom_z) pointing at a real part, "
+                            "and set target_value to that measurable quantity "
+                            "(a center height becomes the part's top_z with the "
+                            "target adjusted by half its height)."
+                        )
+                    else:
+                        feedback_lines.append(
+                            f" - Measurement '{d['name']}': Target {d['target_m']}m, Actual {d['actual_m']}m, "
+                            f"Delta {d.get('delta_mm', 0)}mm (Tolerance: {d['tolerance_m']*1000}mm)"
+                        )
         else:
             feedback_lines.append("DIMENSION GATE PASSED: All measurements match spec within tolerance.")
 

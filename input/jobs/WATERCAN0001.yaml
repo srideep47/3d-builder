@@ -1,0 +1,29 @@
+job_code: WATERCAN0001
+dims:
+  length: 380.0
+  width: 200.0
+  height: 340.0
+  unit: mm
+complexity: simple
+orientation: floor
+product_class: watering_can
+part_scope: ''
+reference_dir: D:\Work\LegionStudios\3d-builder\input\references\PHASE6-C-WATERINGCAN
+axis_map:
+  length: x
+  width: y
+  height: z
+dim_tolerance: null
+dims_placeholder: false
+polycount_ceiling: 25000
+polycount_semantics: triangles
+file_size_caps: null
+required_formats: null
+texture_resolution: null
+fbx_axis_up: null
+fbx_axis_forward: null
+intake_evidence:
+  dims: 380 x 200 x 340 mm — quoted from the prompt
+  polycount_ceiling: '25,000 from ''under 25,000 triangles'' (semantics: triangles)'
+  complexity: 'from ''complexity: simple'''
+  orientation: from 'rests on the ground'
