@@ -1351,6 +1351,28 @@ def _topology_diagnostics(mesh_obj):
     return loose_v, loose_e, boundary, nonmanifold
 
 
+def _welded_closed_solid(mesh_obj):
+    """Closed-shell test on a vertex-welded copy. glTF splits vertices per
+    normal/UV attribute, so an imported closed box shows every edge as a
+    boundary in the raw mesh; welding (dist=1e-6 m — the splits are exact
+    duplicates, far below any real feature) restores shared edges first."""
+    import bmesh
+
+    bm = bmesh.new()
+    bm.from_mesh(mesh_obj.data)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-6)
+    faces = len(bm.faces)
+    boundary = nonmanifold = 0
+    for e in bm.edges:
+        n = len(e.link_faces)
+        if n == 1:
+            boundary += 1
+        elif n > 2:
+            nonmanifold += 1
+    bm.free()
+    return bool(faces > 0 and boundary == 0 and nonmanifold == 0)
+
+
 def op_count_ngons(params):
     """Count faces with more than 4 vertices (client n-gon gate)."""
     model_path = params.get("model_path")
@@ -1386,12 +1408,32 @@ def op_topology_report(params):
         return {"success": False, "error": "No mesh objects in scene"}
     tris, quads, ngons, tri_eq, faces, verts = _count_face_kinds(meshes)
     loose_v = loose_e = boundary = nonmanifold = 0
+    objects_detail = []
     for m in meshes:
         lv, le, be, nm = _topology_diagnostics(m)
         loose_v += lv
         loose_e += le
         boundary += be
         nonmanifold += nm
+        o_tris, o_quads, o_ngons, o_tri_eq, o_faces, o_verts = _count_face_kinds([m])
+        objects_detail.append({
+            "name": m.name,
+            "vertices": o_verts,
+            "faces_total": o_faces,
+            "triangles": o_tris,
+            "quads": o_quads,
+            "ngons": o_ngons,
+            "triangle_equivalent": o_tri_eq,
+            "loose_vertices": lv,
+            "loose_edges": le,
+            # RAW boundary/nonmanifold — glTF attribute splits make these
+            # nonzero on any imported closed box; closed_solid is the
+            # welded answer to "is this part a closed shell"
+            "boundary_edges": be,
+            "nonmanifold_edges": nm,
+            "closed_solid": _welded_closed_solid(m),
+            "bounds": get_mesh_bounds([m]),
+        })
     bounds = get_mesh_bounds(meshes)
     return {
         "success": True,
@@ -1409,6 +1451,7 @@ def op_topology_report(params):
         "boundary_edges": boundary,
         "nonmanifold_edges": nonmanifold,
         "bounds": bounds,
+        "objects_detail": objects_detail,
     }
 
 
@@ -1870,6 +1913,29 @@ def op_generate_uvs(params):
         bpy.ops.object.mode_set(mode="OBJECT")
     out = export_any(str(params["output"]))
     return {"success": True, "path": out}
+
+
+def op_uv_report(params):
+    """Read-only UV diagnostics for a model file: island count, 0-1 space
+    bounds, exact island overlaps, and texel density per object at
+    `resolution`. Pure measurement — unwrapping lives in generate_uvs; this op
+    only reports what is already in the file (islands_total=0 with a reason
+    when the file has no UV layers)."""
+    model_path = params.get("model_path")
+    if not model_path:
+        raise ValueError("model_path is required")
+    reset_scene()
+    import_any(str(model_path))
+    meshes = mesh_objects()
+    if not meshes:
+        return {"success": False, "error": "No mesh objects in scene"}
+    resolution = int(params.get("resolution", 1024))
+    return {
+        "success": True,
+        "model_path": str(model_path),
+        "resolution": resolution,
+        "uv": _uv_diagnostics(meshes, resolution=resolution),
+    }
 
 
 def op_scale_to_exact_bounds(params):
@@ -3298,6 +3364,7 @@ DISPATCH = {
     "convert": op_convert,
     "decimate": op_decimate,
     "generate_uvs": op_generate_uvs,
+    "uv_report": op_uv_report,
     "scale_to_exact_bounds": op_scale_to_exact_bounds,
     "center_origin": op_center_origin,
     "apply_material": op_apply_material,

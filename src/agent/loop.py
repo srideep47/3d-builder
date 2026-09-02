@@ -24,6 +24,7 @@ from ..spec.resolver import resolve_spec_to_build_params
 from ..spec.schema import GenerationMethod, ObjectSpec, ShapeType
 from ..spec.validation import validate_spec_structure
 from .prompts import ANALYST_SYSTEM_PROMPT, CORRECTOR_SYSTEM_PROMPT
+from .tools import advisory_visual_verdict
 from .verifier import VerificationReport, Verifier
 
 
@@ -562,11 +563,8 @@ class AgentLoop:
         renders against the reference images with the local VLM; the verdict
         is recorded in the manifest but never blocks the run.
 
-        Escalation (docs/VISION_CONFIG.md §3): when the default model
-        disagrees with the measured gates — this gate only runs AFTER the
-        gates are green, so matches_reference=False IS that disagreement —
-        exactly ONE escalated verdict is taken with the configured
-        escalation model, and both verdicts are recorded."""
+        Escalation lives in tools.advisory_visual_verdict (docs/VISION_CONFIG.md
+        §3, shared with the review tool so the policy cannot drift)."""
         if not rendered_views or not image_paths:
             return None
         vlm = self._get_vlm()
@@ -577,13 +575,7 @@ class AgentLoop:
             return None
         try:
             summary = f"{spec.name}: {len(spec.parts)} parts" if spec is not None else ""
-            verdict = vlm.visual_verdict(rendered_views, refs, model_summary=summary)
-            if (verdict.get("parsed") and not verdict.get("matches_reference")
-                    and getattr(vlm, "escalation_model", None)):
-                escalated = vlm.visual_verdict(
-                    rendered_views, refs, model_summary=summary, escalate=True)
-                escalated["escalated_from"] = verdict
-                verdict = escalated
+            verdict = advisory_visual_verdict(vlm, rendered_views, refs, model_summary=summary)
         except Exception as e:
             verdict = {"available": True, "parsed": False, "error": str(e)[:400]}
         if emit is not None:

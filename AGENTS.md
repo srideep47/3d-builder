@@ -7,7 +7,7 @@
 ## Architecture
 3D Builder is structured in 4 layers plus a web interface and a GPU microservice:
 1. **Interfaces**: `src/cli.py` (Typer CLI), `src/mcp_server.py` (MCP stdio server; mcp 2.x `MCPServer`, 1.x fallback), `src/webapp/` (FastAPI server + run registry) serving `web/` (three.js studio UI; `python -m src.cli ui`).
-2. **Agent Layer**: `src/agent/loop.py` (analyst → neural parts → build → measure → render → gates → corrector; emits progress events, supports cancel + run_dir reuse), `src/agent/prompts.py` (Analyst, Corrector), `src/agent/verifier.py` (dimension + mesh gates), `src/ai/aptos.py` (GLM-5.3 integration), `src/ai/vlm.py` (vision providers behind a `VisionProvider` ABC — T5: local Qwen-VL via OpenAI-compatible vLLM AND Google Gemini v1beta; analyst eye + advisory visual gate; selected by `config/ai.yaml` `vision.vlm.provider`).
+2. **Agent Layer**: `src/agent/loop.py` (analyst → neural parts → build → measure → render → gates → corrector; emits progress events, supports cancel + run_dir reuse), `src/agent/tools.py` (AGENT_TOOLS_SCHEMA + AgentToolExecutor: build_spec/measure_model/render_model/inspect/review/finish/package — measured facts only, rule-9 refusals as tool results, hash-keyed verdict cache, shared one-step vision escalation), `src/agent/prompts.py` (Analyst, Corrector), `src/agent/verifier.py` (dimension + mesh gates), `src/ai/aptos.py` (GLM-5.3 integration), `src/ai/vlm.py` (vision providers behind a `VisionProvider` ABC — T5: local Qwen-VL via OpenAI-compatible vLLM AND Google Gemini v1beta; analyst eye + advisory visual gate; selected by `config/ai.yaml` `vision.vlm.provider`).
 3. **Spec Layer**: `src/spec/schema.py` (ObjectSpec v2 Pydantic model), `src/spec/resolver.py` (spec → build params), `src/spec/validation.py` (dimension gate), `src/spec/template.py` + `templates/<product_class>.yaml` (T4 product templates: proportions × job-card dims → ObjectSpec; the ONLY place product knowledge lives, rule 11), `src/textures/` (T4 texture composition: CC0 scans + procedural tileable patterns → canonical map sets; `scripts/fetch_cc0_textures.py` + `scripts/gen_template_textures.py`).
 4. **Capability Layer**: `src/blender/runner.py` (subprocess runner), `src/blender/harness_script.py` (self-contained headless Blender engine — runs inside Blender's Python, must not import project code), `src/img3d/client.py` (RemoteImg3DProvider → the neural service), `services/img3d_service/` (FastAPI GPU microservice, PLAN.md §9: single-job queue, mock + tripo_sr backends, trellis/hunyuan3d bake-off slots).
 5. **Client Layer**: `src/client/` (MetaZtech delivery compliance — knows the contract, never the product): `job.py` (JobCard from job.yaml; dims + explicit unit REQUIRED, never inferred; axis_map L→X/W→Y/H→Z; client dim tolerance ±0.01 in default, separate from the internal ±1 mm), `contract.py` (the single shared deliverable-set + tier-ceiling definition), `gates.py` (six pure validator gates + MeshFacts, fail-closed without mesh facts), `units.py` (metres ↔ client units, boundary only), `fbx_inspect.py` (independent binary-FBX reader — GlobalSettings/geometry/Model transforms parsed without Blender, plus the signed-permutation chirality machinery), `package.py` (assembles `output/packages/<JOB>/` + `qa_report.json`). `python -m src.cli package <glb> --job job.yaml` then `validate <pkg_dir>` mirror the client's validator locally.
@@ -46,7 +46,11 @@
   positions as node transforms. Mesh-gate checks must load via
   `src/agent/verifier.py: load_merged_mesh()` (`scene.to_mesh()` + constructor
   `process=True`) — plain `trimesh.util.concatenate` reports wrong bounds and
-  false non-watertightness.
+  false non-watertightness. Same trap harness-side: a closed box imported
+  from GLB shows `boundary_edges: 24` per part, so `topology_report`'s
+  per-object `closed_solid` is computed on a WELDED copy
+  (`_welded_closed_solid`, remove_doubles 1e-6 m); the raw edge counts stay
+  in the report as file facts.
 - **Procedural node shaders do not survive GLB export.** Default materials are
   flat PBR values; use the `bake_materials` op when procedural detail is needed.
 - **Selected-to-active bakes cast rays INWARD (Blender `bake.cc` negate_v3).**

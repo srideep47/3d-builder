@@ -1336,3 +1336,97 @@ it. Coordinate lists need guards exactly like measurements do.)
    determinism scripts now record device crashes as findings and continue.
 
 MAYA00053153 dims untouched (rule 9). 263 tests green. Committed, no push.
+
+## Session log — 2026-09-02 (round 6: Phase 3.1 — the agent's delivery tools, measured facts only)
+
+### Brain test — measured gates green on all three specs (§7 visual verdict pending)
+
+The reviewer ran the three authored specs through the full loop
+(`output/runs/20260902_051750_braintest_*`); measured results from the
+manifests:
+
+| spec | dimension gate | mesh gate | tri-eq | bounds (m) | worst delta | wall |
+|---|---|---|---|---|---|---|
+| A writing desk | passed | passed | 374 | 1.200 × 0.750 × 0.600 | 0.0 mm | 5.4 s |
+| B teacup | passed | passed | 2016 | 0.135 × 0.075 × 0.105 | 0.01 mm | — |
+| C doormat | passed | passed | 160 | 0.750 × 0.020 × 0.450 | 0.0 mm | — |
+
+Renders exist (`output/braintest_renders/{a,b,c}/view_{front,iso,side,top}.png`)
+but NO §7 visual verdict is recorded anywhere — that judgement is the
+reviewer/owner's call (the builder is text-only). S3 therefore NOT triggered;
+per master order §D, work continued on the fork-independent Phase 3 items.
+
+### Phase 3.1 — finish / inspect / review / package as agent tools
+
+`src/agent/tools.py` now exposes the master order's tool table, all returning
+measured facts, never prose:
+
+| tool | wraps | returns |
+|---|---|---|
+| `inspect` | topology_report + measure + NEW uv_report ops + local dimension gate | per-part dims/bounds/closed-solid, polycount, n-gons, UV/texel diagnostics, every gate WITH its value (deltas in mm, budget vs tri-eq, ground-contact failures) |
+| `review` | render_views op + advisory verdict | render paths, closeup skips, verdict JSON (only when refs AND a VLM exist) |
+| `finish` | `finish_delivery` | lp/hp tri-eq, budget, bake device + step timings, UV/texel facts, gates — or the loud refusal |
+| `package` | `package_delivery` | package dir, gates, file manifest (sizes/hashes), placeholders — or the loud refusal |
+
+Design points pinned by tests:
+
+- **State threading**: `build_spec` records `last_spec` alongside
+  `last_built_glb`; finish/review/inspect default to it. An explicitly-passed
+  INVALID spec errors loudly — never a silent fallback to the stale spec.
+- **Rule 9 through the tool boundary**: `PlaceholderDimensionsError` is
+  caught and returned as `{"success": false, "refused": true, "reason":
+  "dims_placeholder", "error": ...}` — a result the brain can read, never an
+  exception crashing the loop. The package tool does NOT demand a source GLB
+  for a placeholder job (the refusal fires before the source is touched, so
+  a missing GLB can never mask it — pinned with the MAYA card).
+- **Verdict cache** (VISION_CONFIG §6): keyed by sha256 of render + reference
+  image contents + model id; a cache hit is flagged `"cached": true` and
+  makes no VLM call (pinned: 2 identical reviews → 1 call).
+- **One shared escalation policy** (§3): `advisory_visual_verdict()` in
+  tools.py is now used by BOTH the agent loop's visual gate and the review
+  tool (behavior-preserving refactor of `loop._run_visual_gate`; FakeVLM
+  wiring test still passes). S1 honored: no live vision calls — all verdict
+  tests run against fakes.
+- Broad exception catch on finish/package returns the error as a tool result
+  (the brain sees errors; the loop never dies mid-chain).
+
+### Harness additions (read-only measurement)
+
+- `op_uv_report` (new, registered in DISPATCH): import → `_uv_diagnostics`
+  at a caller-chosen resolution. Pure measurement — unwrapping stays in
+  `generate_uvs`; a file with no UV layers reports islands_total=0 + reason.
+- `op_topology_report` gains additive `objects_detail`: per-object
+  verts/faces/tri/quad/ngon/tri-eq, loose/boundary/nonmanifold edges,
+  bounds, and `closed_solid`.
+
+### New gotchas (round 6)
+
+1. **glTF vertex splits make every imported closed box look open.** The
+   chiral fixture's boxes report `boundary_edges: 24` per part straight
+   after build→GLB→import (vertices are split per normal/UV attribute, so no
+   edge is shared). `closed_solid` is therefore computed on a WELDED copy
+   (`bmesh.ops.remove_doubles`, dist=1e-6 m — the splits are exact
+   duplicates). The RAW boundary/nonmanifold counts stay in the report as
+   file facts; the welded answer is what gates. Same class as the known
+   "plain trimesh.concatenate reports false non-watertightness" invariant.
+2. **A fresh parametric build is NOT "no UVs".** Blender primitives carry a
+   default UV map and it survives the glTF round trip: the chiral build
+   reports islands_total=12 (6 per box), in-bounds. The atlas step is about
+   overlap elimination and packing, not UV existence — `inspect` reports
+   what is actually in the file.
+
+### Tests
+
+`tests/test_agent_tools.py` (new): 21 tests — schema registration (incl.
+Phase 3.0 no-code pin), inspect green/failure paths with values, invalid-
+spec loudness, finish argument threading + REAL refusal chain on a stub
+runner (evidence lands in blocked/, no package), package refusal without a
+source (MAYA card), review verdict cache + one-escalation + closeup
+threading + no-refs/no-VLM honesty, shared-helper unit + loop wiring, and a
+blender-marked real round trip (chiral fixture: build → inspect →
+generate_uvs → inspect; pins tri-eq 24, welded closed_solid True, raw
+boundary 24, islands 12, dimensions gate green).
+
+**Suite: 284 passed in 138 s** (263 baseline + 21 new; baseline grew,
+nothing re-baselined). MAYA00053153 dims untouched (rule 9). Committed, no
+push.
