@@ -1,0 +1,26 @@
+job_code: WEB791458
+dims:
+  length: 80.0
+  width: 60.0
+  height: 12.0
+  unit: in
+complexity: simple
+orientation: floor
+product_class: unclassified
+part_scope: ''
+reference_dir: D:\Work\LegionStudios\3d-builder\input\reference
+axis_map:
+  length: x
+  width: y
+  height: z
+dim_tolerance: null
+dims_placeholder: false
+polycount_ceiling: null
+polycount_semantics: null
+file_size_caps: null
+required_formats: null
+texture_resolution: null
+fbx_axis_up: null
+fbx_axis_forward: null
+intake_evidence:
+  dims: 80 x 60 x 12 in — quoted from the prompt

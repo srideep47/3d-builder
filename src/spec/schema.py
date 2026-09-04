@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from enum import Enum
 from typing import Any, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Unit(str, Enum):
@@ -53,9 +53,36 @@ class ShapeType(str, Enum):
 
 
 class GenerationMethod(str, Enum):
+    """Where a part's geometry comes from — the mesh-source contract
+    (Phase 8 item 3). Every part declares exactly ONE source:
+
+    - ``parametric``    — synthesized from the shape vocabulary by the harness.
+    - ``custom_script`` — synthesized by the part's ``code`` in the harness.
+    - ``image_to_3d``   — GENERATED at build time by the neural service from
+      a reference image; the loop materializes ``mesh_path`` (run cache).
+    - ``imported``      — an existing mesh FILE supplied with the spec (an
+      owner asset, a purchased model). Never regenerated; the file is the
+      geometry. ``mesh_path`` + ``target_size`` are authored, not derived.
+    - ``scanned``       — reality capture (3D-scan / photogrammetry file).
+      Same mechanics as ``imported``; different provenance: raw capture is
+      expected dense and noisy and MUST be retopologized before delivery
+      (Phase 8 item 4) — the method value is the hook that flags it.
+
+    All file-backed sources (image_to_3d, imported, scanned) pass through
+    ONE mechanical path in the harness: import → join → rescale to
+    ``target_size`` → place. Provenance differs; the contract does not.
+    """
+
     PARAMETRIC = "parametric"
     IMAGE_TO_3D = "image_to_3d"
     CUSTOM_SCRIPT = "custom_script"
+    IMPORTED = "imported"
+    SCANNED = "scanned"
+
+    @property
+    def is_file_backed(self) -> bool:
+        """True when the part's geometry arrives as a mesh file."""
+        return self in (GenerationMethod.IMAGE_TO_3D, GenerationMethod.IMPORTED, GenerationMethod.SCANNED)
 
 
 class PBRMaterial(BaseModel):
@@ -148,6 +175,95 @@ class DetailSpec(BaseModel):
     displacement: DisplacementSpec | None = None
 
 
+class SeamRingSpec(BaseModel):
+    """A faint pressed seam ring around an extruded wall (round 4): the wall
+    is subdivided at this height and the ring's vertices are pushed inward
+    by `depth` along the local wall normal, forming a soft crease that
+    shades like a stitched seam. Real LP geometry — resolution-independent,
+    survives decimation — because a texture-space line cannot be positioned
+    reliably against the atlas packer (island phase is arbitrary).
+    """
+    z: float      # ring height above the part base, metres
+    depth: float  # inward inset at the ring, metres
+
+
+class ReviewCloseupSpec(BaseModel):
+    """Review-render close-up on one named part (round 4): whole-model views
+    crush small features (a 48x104 mm label is 21x45 px at 1K) — the close-up
+    frames the part so the reviewer can actually read it. Product knowledge
+    (WHICH part, which side) lives in the template, never in pipeline code.
+    """
+    name: str                                        # file suffix: <prefix>_<name>.png
+    part: str                                        # part name to frame
+    direction: Literal["front", "back", "left", "right"] = "front"
+    pad: float = 0.3                                 # frame margin, fraction of the framed extent
+    frame: Literal["part", "model_height"] = "part"  # part bounds, or full model height at the part's x/y
+
+
+class ContrastProbeSpec(BaseModel):
+    """Absolute-contrast probe on one rendered view (Phase 8 item 2).
+
+    The §H defect: a fill-flattened quilt passed review because the FFT
+    axis RATIO looked healthy — a ratio reaches 1.0 when both terms go to
+    zero. A probe pins an absolute grey-level amplitude floor (owner's
+    suggestion: 6+, i.e. a 12-level peak-to-trough swing) at the product's
+    relief pitch. Product knowledge (which view, which region, what pitch)
+    lives in the template — rule 11; the finishing layer only threads it
+    through and records the numbers.
+    """
+    name: str                                              # report label
+    view: Literal["front", "side", "top", "iso"] = "top"   # which rendered view
+    # normalized image coords (x0, y0, x1, y1), y from the TOP
+    region: list[float]
+    # expected relief cycles ACROSS the region, [x, y]
+    cycles: list[float]
+    band: list[float] = Field(default_factory=lambda: [0.6, 1.4])
+    min_amplitude: float = 6.0                             # grey levels
+    axes: Literal["both", "x", "y"] = "both"               # which axes the floor gates
+
+    @model_validator(mode="after")
+    def _sane(self) -> "ContrastProbeSpec":
+        if len(self.region) != 4:
+            raise ValueError("region must be [x0, y0, x1, y1]")
+        x0, y0, x1, y1 = self.region
+        if not (0.0 <= x0 < x1 <= 1.0 and 0.0 <= y0 < y1 <= 1.0):
+            raise ValueError(
+                f"region {self.region} must satisfy 0<=x0<x1<=1 and 0<=y0<y1<=1 "
+                "(normalized image coordinates, y from the top)")
+        if len(self.cycles) != 2 or any(c <= 0 for c in self.cycles):
+            raise ValueError(f"cycles {self.cycles} must be two positive values [x, y]")
+        if len(self.band) != 2 or not (0.0 < self.band[0] < self.band[1]):
+            raise ValueError(f"band {self.band} must be 0 < lo < hi")
+        if self.min_amplitude < 0:
+            raise ValueError("min_amplitude must be >= 0")
+        return self
+
+
+class RetopologySpec(BaseModel):
+    """Optional retopology stage for file-backed parts (Phase 8.5 R2,
+    docs/MESH_SOURCES.md §7-8): applied by the harness in the LIVE scene
+    after the import weld, before rescale — a GLB round trip would
+    triangulate the quads. Exactly one tool per part: QuadriFlow silently
+    no-ops on voxel-remeshed geometry (measured defect, byte-identical at
+    every target), so chaining tools is refused here rather than detected
+    downstream."""
+    tool: Literal["quadriflow", "voxel"]
+    # quadriflow: target quad count (honored within ~10%, measured)
+    target_faces: int | None = Field(default=None, ge=100, le=200000)
+    # voxel: remesh voxel size in SPEC UNITS (converted to metres by the
+    # resolver, like dimensions). Usable floor ~5 mm on ~0.4 m objects —
+    # 4 mm collapsed dims by 28/17/61 mm (measured, §5.3).
+    voxel_size: float | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _tool_params(self) -> "RetopologySpec":
+        if self.tool == "quadriflow" and self.target_faces is None:
+            raise ValueError("retopology tool 'quadriflow' requires target_faces")
+        if self.tool == "voxel" and self.voxel_size is None:
+            raise ValueError("retopology tool 'voxel' requires voxel_size (metres)")
+        return self
+
+
 class PartSpec(BaseModel):
     name: str
     shape: ShapeType = ShapeType.ROUNDED_BOX
@@ -158,22 +274,103 @@ class PartSpec(BaseModel):
     profile_points: list[list[float]] | None = None  # revolve_lathe [[r,z],...] or extrude [[x,y],...]
     path_points: list[list[float]] | None = None  # sweep [[x, y, z], ...]
     path_closed: bool = False  # sweep: close the path into a loop (no tube end caps)
-    caps: Literal["ngon", "fan"] = "ngon"  # extrude cap fill: one n-gon face or a triangle fan
+    # Extrude cap fill: fan by default — the client delivery gate is strict
+    # (0 n-gons) and the analyst has no reason to choose n-gon caps.
+    caps: Literal["ngon", "fan"] = "fan"
     position_mode: Literal["center", "base"] | None = None  # None = auto per shape
     method: GenerationMethod = GenerationMethod.PARAMETRIC
     material: PBRMaterial | None = None
     modifiers: Modifiers | None = None
     smooth_shade: bool = False
     segments: int | None = None
-    # image_to_3d parts: crop of the reference image, generated mesh, final size
+    # file-backed parts (image_to_3d / imported / scanned): crop of the
+    # reference image (image_to_3d only), the mesh file, and its final size.
+    # target_size is the rescale target in spec units — never inferred from
+    # the file (rule 9: owner-stated dimensions only).
     image_crop: str | None = None
     mesh_path: str | None = None
     target_size: list[float] | None = None
+    # how the raw file bbox is mapped onto target_size: "fit" (default)
+    # rescales per-axis so the bbox lands EXACTLY on target_size (dimension
+    # gates exact, but a mismatched aspect ratio is stretched); "uniform"
+    # applies one factor — min of the per-axis ratios — so aspect is
+    # preserved and no axis exceeds target_size (authored assets and scans,
+    # where per-axis stretch is damage).
+    mesh_scale: Literal["fit", "uniform"] = "fit"
     # script method: agent-authored bpy code
     code: str | None = None
     # optional high-poly detail instructions for the bake pass (DetailSpec)
     detail: DetailSpec | None = None
+    # pressed seam rings on extruded walls (metres; template converts fractions)
+    seam_rings: list[SeamRingSpec] | None = None
+    # Atlas texel-density multiplier for this part's surfaces (Phase 8 item 1:
+    # a uniform atlas gives velvet detail it cannot show while printed text
+    # starves). 1.0 = the uniform share; a label at 4.0 gets 4x the texels
+    # per metre of the shared atlas. Total atlas use is unchanged — the
+    # packer renormalises across all parts.
+    texel_priority: float = Field(default=1.0, ge=0.25, le=16.0)
+    # optional retopology applied in-harness after the import weld
+    # (docs/MESH_SOURCES.md): quadriflow (quads, closes small holes) or
+    # voxel (density control). File-backed methods only — parametric parts
+    # are born quad-clean.
+    retopology: RetopologySpec | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _one_mesh_source(self):
+        """Mesh-source contract (Phase 8 item 3), enforced fail-closed: a
+        part declares exactly one geometry source and carries only the
+        fields that source is entitled to. A part with two sources (e.g.
+        parametric + mesh_path) or a file-backed part without its file
+        would otherwise build silently wrong or skip silently."""
+        m = self.method
+        if m in (GenerationMethod.PARAMETRIC, GenerationMethod.CUSTOM_SCRIPT):
+            if self.mesh_path is not None:
+                raise ValueError(
+                    f"Part '{self.name}' is {m.value} but carries mesh_path — "
+                    "a part has exactly one geometry source; drop mesh_path or "
+                    "set method to a file-backed value (image_to_3d/imported/scanned)."
+                )
+        if m in (GenerationMethod.IMPORTED, GenerationMethod.SCANNED):
+            if not self.mesh_path:
+                raise ValueError(
+                    f"Part '{self.name}' is {m.value} — mesh_path is required "
+                    "(the file IS the geometry; nothing generates it)."
+                )
+            if not self.target_size:
+                raise ValueError(
+                    f"Part '{self.name}' is {m.value} — target_size is required "
+                    "(owner-stated size in spec units; file units are never trusted)."
+                )
+        if self.image_crop is not None and m != GenerationMethod.IMAGE_TO_3D:
+            raise ValueError(
+                f"Part '{self.name}' carries image_crop but is {m.value} — "
+                "image_crop selects the reference image for image_to_3d parts only."
+            )
+        if self.retopology is not None and m not in (
+            GenerationMethod.IMAGE_TO_3D,
+            GenerationMethod.IMPORTED,
+            GenerationMethod.SCANNED,
+        ):
+            raise ValueError(
+                f"Part '{self.name}' carries retopology but is {m.value} — "
+                "retopology applies to file-backed geometry (image_to_3d/"
+                "imported/scanned) after the import weld; parametric parts "
+                "are born quad-clean."
+            )
+        if self.code is not None and m != GenerationMethod.CUSTOM_SCRIPT:
+            raise ValueError(
+                f"Part '{self.name}' carries code but is {m.value} — "
+                "code is executed only for custom_script parts."
+            )
+        if self.target_size is not None and (
+            len(self.target_size) != 3 or any(v <= 0 for v in self.target_size)
+        ):
+            raise ValueError(
+                f"Part '{self.name}' target_size must be 3 positive values, "
+                f"got {self.target_size}."
+            )
+        return self
 
 
 class MeasurementSpec(BaseModel):
@@ -203,3 +400,9 @@ class ObjectSpec(BaseModel):
     measurements: list[MeasurementSpec] = Field(default_factory=list)
     constraints: list[ConstraintSpec] = Field(default_factory=list)
     tri_budget: int = 60000
+    # review-render close-ups (round 4): threaded verbatim into the
+    # render_views op; product knowledge lives in the template
+    review_closeups: list[ReviewCloseupSpec] | None = None
+    # absolute-contrast probes (Phase 8 item 2): run against the rendered
+    # review views; amplitude floor in grey levels, never a ratio
+    contrast_probes: list[ContrastProbeSpec] | None = None

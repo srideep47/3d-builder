@@ -1,0 +1,29 @@
+job_code: COATSTAND0001
+dims:
+  length: 480.0
+  width: 480.0
+  height: 1750.0
+  unit: mm
+complexity: simple
+orientation: floor
+product_class: coat_stand
+part_scope: ''
+reference_dir: D:\Work\LegionStudios\3d-builder\input\references\PHASE6-A-COATSTAND
+axis_map:
+  length: x
+  width: y
+  height: z
+dim_tolerance: null
+dims_placeholder: false
+polycount_ceiling: 30000
+polycount_semantics: triangles
+file_size_caps: null
+required_formats: null
+texture_resolution: null
+fbx_axis_up: null
+fbx_axis_forward: null
+intake_evidence:
+  dims: 480 x 480 x 1750 mm — quoted from the prompt
+  polycount_ceiling: '30,000 from ''under 30,000 triangles'' (semantics: triangles)'
+  complexity: 'from ''complexity: simple'''
+  orientation: from 'floor-standing'

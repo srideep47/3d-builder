@@ -62,6 +62,7 @@
               <div class="mode-switch" id="mode-switch">
                 <button class="mode-btn active" data-mode="ai">AI Build</button>
                 <button class="mode-btn" data-mode="spec">From Spec</button>
+                <button class="mode-btn" data-mode="neural">Neural Intake</button>
               </div>
             </div>
 
@@ -117,6 +118,96 @@
                 <span id="spec-validate-msg" class="spec-msg"></span>
               </div>
               <input type="file" id="spec-file-input" accept=".json" hidden>
+            </div>
+
+            <div id="form-neural" class="form-body hidden">
+              <label class="field">
+                <span class="field-label">Prompt <em>— constraints for the JobCard; the neural model takes no prompt (§3.4)</em></span>
+                <textarea id="np-prompt" rows="3" placeholder="e.g. A quilted mattress with taped edge bands and a zippered cover. polycount ceiling 50000"></textarea>
+              </label>
+
+              <div class="field">
+                <span class="field-label">Reference views <em>— labelled slots, front required</em></span>
+                <div class="view-slots" id="np-slots">
+                  <div class="view-slot" data-label="front">
+                    <div class="vs-head"><span class="vs-label">front</span><span class="vs-req">required</span></div>
+                    <div class="vs-drop" id="np-drop-front">
+                      <input type="file" id="np-file-front" accept="image/*" hidden>
+                      <span class="vs-hint">＋ drop / click</span>
+                      <img class="vs-thumb hidden" alt="front">
+                    </div>
+                  </div>
+                  <div class="view-slot" data-label="back">
+                    <div class="vs-head"><span class="vs-label">back</span></div>
+                    <div class="vs-drop" id="np-drop-back">
+                      <input type="file" id="np-file-back" accept="image/*" hidden>
+                      <span class="vs-hint">＋ drop / click</span>
+                      <img class="vs-thumb hidden" alt="back">
+                    </div>
+                  </div>
+                  <div class="view-slot" data-label="left">
+                    <div class="vs-head"><span class="vs-label">left</span></div>
+                    <div class="vs-drop" id="np-drop-left">
+                      <input type="file" id="np-file-left" accept="image/*" hidden>
+                      <span class="vs-hint">＋ drop / click</span>
+                      <img class="vs-thumb hidden" alt="left">
+                    </div>
+                  </div>
+                  <div class="view-slot" data-label="right">
+                    <div class="vs-head"><span class="vs-label">right</span></div>
+                    <div class="vs-drop" id="np-drop-right">
+                      <input type="file" id="np-file-right" accept="image/*" hidden>
+                      <span class="vs-hint">＋ drop / click</span>
+                      <img class="vs-thumb hidden" alt="right">
+                    </div>
+                  </div>
+                </div>
+                <div id="np-diversity" class="diversity-box hidden"></div>
+              </div>
+
+              <div class="field">
+                <span class="field-label">Dimensions <em>— owner-supplied, exact, never inferred (rule 9)</em></span>
+                <div class="dims-row">
+                  <input id="np-l" type="number" step="any" min="0" placeholder="L">
+                  <input id="np-w" type="number" step="any" min="0" placeholder="W">
+                  <input id="np-h" type="number" step="any" min="0" placeholder="H">
+                  <select id="np-unit">
+                    <option value="in" selected>in</option>
+                    <option value="m">m</option>
+                    <option value="cm">cm</option>
+                    <option value="mm">mm</option>
+                    <option value="ft">ft</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="field-row">
+                <label class="field">
+                  <span class="field-label">Route</span>
+                  <select id="np-route">
+                    <option value="auto" selected>Auto — cheapest first</option>
+                    <option value="template">Template</option>
+                    <option value="parametric">Parametric</option>
+                    <option value="neural">Neural (TRELLIS)</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field-label">Product class <em>— template match</em></span>
+                  <input id="np-class" type="text" placeholder="e.g. mattress" spellcheck="false" autocomplete="off">
+                </label>
+              </div>
+              <div id="np-route-preview" class="route-preview hidden"></div>
+
+              <div class="field-row">
+                <label class="field">
+                  <span class="field-label">Job code <em>— optional, auto-generated</em></span>
+                  <input id="np-code" type="text" placeholder="e.g. MAYA00053153" spellcheck="false" autocomplete="off">
+                </label>
+                <label class="field checkbox-field">
+                  <input type="checkbox" id="np-fabric">
+                  <span class="field-label">Declared fabric <em>— metallic must read ~0 (§3.6)</em></span>
+                </label>
+              </div>
             </div>
 
             <div class="form-actions">

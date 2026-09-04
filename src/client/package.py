@@ -29,6 +29,7 @@ import json
 import platform
 import shutil
 import sys
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,7 +37,7 @@ from typing import Any, Callable
 
 from PIL import Image
 
-from .contract import OPEN_QUESTIONS, TIER_TRI_CEILINGS
+from .contract import OPEN_QUESTIONS
 from .fbx_inspect import read_fbx_info
 from .gates import MeshFacts, run_all_gates
 from .job import JobCard
@@ -53,9 +54,18 @@ _PLACEHOLDER_TEXTURES: dict[str, tuple[int, int, int]] = {
 
 # The axis convention we ask the exporter for. The FBX-standard Y-up is what
 # third-party consumers expect; qa_report records what was ACTUALLY written
-# (independently parsed) next to this request.
+# (independently parsed) next to this request. A job card may override the
+# pair (Phase 4: fbx_axis_up/fbx_axis_forward — set together, never half).
 FBX_AXIS_UP = "Y"
 FBX_AXIS_FORWARD = "-Z"
+
+
+def _fbx_axes(job: JobCard) -> tuple[str, str]:
+    """(axis_up, axis_forward) requested from the exporter: card override >
+    the FBX-standard Y-up default (open question 'fbx-axis-convention')."""
+    if job.fbx_axis_up is not None:
+        return job.fbx_axis_up, job.fbx_axis_forward or FBX_AXIS_FORWARD
+    return FBX_AXIS_UP, FBX_AXIS_FORWARD
 
 
 def _sha256(path: Path) -> str:
@@ -142,6 +152,23 @@ def _assemble_and_audit(
     )
 
     info_res = runner.execute_op("info", {})
+    # Phase 4: per-file required flag against the card's effective deliverable
+    # set, and the override note when the owner's prompt changed the contract.
+    required_names = {job.job_code + s for s in job.effective_required_suffixes()}
+    for entry in files:
+        entry["required"] = entry["name"] in required_names
+    contract_note = None
+    if job.required_formats is not None:
+        contract_note = {
+            "required_suffixes": job.effective_required_suffixes(),
+            "note": (
+                "The owner's prompt overrode the required deliverable set. The "
+                "gates enforce exactly this list; the finishing chain still "
+                "emits the standard superset (a partial chain degrades the "
+                "FBX — its materials come from the bake), so files marked "
+                "required: false are extras, not contract violations."
+            ),
+        }
     report = {
         "schema": "threed-qa-report/1",
         "job_code": job.job_code,
@@ -152,7 +179,7 @@ def _assemble_and_audit(
         "job_card": job.model_dump(mode="json"),
         "gates": [r.to_dict() for r in results],
         "axis_convention": {
-            "requested": {"axis_up": FBX_AXIS_UP, "axis_forward": FBX_AXIS_FORWARD},
+            "requested": dict(zip(("axis_up", "axis_forward"), _fbx_axes(job))),
             "written": fbx_info.axes.to_dict(),
             "fbx_version": fbx_info.version,
             "creator": fbx_info.creator,
@@ -176,6 +203,8 @@ def _assemble_and_audit(
     }
     if placeholders is not None:
         report["placeholders"] = placeholders
+    if contract_note is not None:
+        report["contract_note"] = contract_note
     if extra_sections:
         report.update(extra_sections)
 
@@ -238,8 +267,8 @@ def package_delivery(
     fbx_res = runner.execute_op("export_fbx", {
         "input": str(source_glb),
         "path": str(fbx_path),
-        "axis_up": FBX_AXIS_UP,
-        "axis_forward": FBX_AXIS_FORWARD,
+        "axis_up": _fbx_axes(job)[0],
+        "axis_forward": _fbx_axes(job)[1],
     })
     _record(fbx_path, note="binary FBX exported from the source GLB "
                            "(triangulated: glTF stores triangles only)")
@@ -291,6 +320,54 @@ _BAKE_MAP_FILES: dict[str, str] = {
 }
 
 
+def _collect_render_metrics(
+    views: dict, probes: list[dict], log: Callable[[str], None]
+) -> dict[str, Any] | None:
+    """Measure the rendered review views (Phase 8 item 2 — the §H fix).
+
+    view_stats (balance + clipping) on every rendered view, plus the
+    template's absolute-contrast probes (grey-level amplitude at the
+    authored relief pitch — never a ratio). Probes fail CLOSED (an
+    unmeasurable region reports valid=False + passed=False + reason, never
+    a silent pass), but a probe failure is loud recorded evidence for the
+    owner/reviewer, NOT a delivery refusal — the six client gates own
+    refusal. Returns None when there is nothing to measure.
+    """
+    if not views and not probes:
+        return None
+    from ..render.metrics import measure_contrast_probe, view_stats
+
+    view_results = {name: view_stats(path) for name, path in sorted(views.items())}
+    probe_results: list[dict[str, Any]] = []
+    for p in probes:
+        path = views.get(p["view"])
+        if path is None:
+            r: dict[str, Any] = {"valid": False, "passed": False,
+                                 "reason": f"view {p['view']!r} was not rendered"}
+        else:
+            r = measure_contrast_probe(
+                path, tuple(p["region"]), tuple(p["cycles"]),
+                band=tuple(p["band"]), min_amplitude=p["min_amplitude"],
+                axes=p["axes"])
+        probe_results.append({"name": p["name"], "view": p["view"], **r})
+        if not r.get("valid"):
+            log(f"contrast probe {p['name']} INVALID ({p['view']} view): "
+                f"{r.get('reason', '?')} — recorded, not a delivery refusal")
+        elif r.get("passed"):
+            log(f"contrast probe {p['name']} PASS ({p['view']} view): "
+                f"amplitude x {r['amplitude_x']} / y {r['amplitude_y']} grey "
+                f"levels >= floor {p['min_amplitude']} (axes={p['axes']}, "
+                f"detected cycles x {r['detected_cycles_x']} / "
+                f"y {r['detected_cycles_y']})")
+        else:
+            log(f"contrast probe {p['name']} FAIL ({p['view']} view): "
+                f"amplitude {r.get('amplitude')} grey levels < floor "
+                f"{p['min_amplitude']} (x {r.get('amplitude_x')}, "
+                f"y {r.get('amplitude_y')}) — flat relief, the rig or the "
+                f"geometry lost the quilt")
+    return {"views": view_results, "probes": probe_results}
+
+
 def finish_delivery(
     job: JobCard,
     spec,
@@ -298,14 +375,34 @@ def finish_delivery(
     runner=None,
     log: Callable[[str], None] | None = None,
     work_dir: Path | str | None = None,
-    resolution: int = 1024,
+    resolution: int | None = 1024,
     review_renders: bool = True,
+    bake_timeout_sec: float = 300.0,
+    bake_device: str = "auto",
 ) -> dict[str, Any]:
     """T3 full-quality finishing chain for a verified spec.
 
     prepare (quad-verify + UV atlas) → bake the real 5-map set from a
     high-poly detail shell → decimate the LP to the tier budget → export the
     deliverable FBX + USDZ → assemble the package + qa_report.json.
+
+    ``resolution``: bake/atlas resolution in px. None (the CLI default) lets
+    the job card's `texture_resolution` drive it (owner prompt, Phase 4);
+    1024 when neither is set. 4K bakes need a larger bake_timeout_sec.
+
+    ``bake_timeout_sec``: the subprocess timeout for the bake step. The
+    300 s default is fine at 1K, but bake time scales ~with texel count —
+    a 4K bake needs ~16x (the first 4K attempt silently died at 300 s
+    after baking only the AO pass; see the round-2 session log). Pass a
+    larger value (3600 is comfortable for 4K on this hardware) whenever
+    ``resolution`` > 1024.
+
+    ``bake_device``: Cycles compute device for the bake — "auto" (default;
+    OptiX → CUDA → HIP → ONEAPI → METAL, CPU when none is present), a
+    specific type ("optix", "cuda", ...), or "cpu". The device actually
+    used is recorded in qa_report.json under ``finish.bake_device_resolved``
+    (requested type, GPU/CPU, enabled device names, fallback reason) —
+    a GPU bake must be a recorded fact, never an assumption.
 
     Owner decision (recorded in PROGRESS.md): the deliverable FBX is exported
     from the LIVE QUAD-CLEAN SCENE (scene.blend), not the triangulated GLB —
@@ -314,8 +411,10 @@ def finish_delivery(
     their human QA judges artist topology. The LP GLB is the decimated
     export; the HP GLB is the pre-deletion detail shell.
 
-    Mechanical evidence (bake stats, UV diagnostics, HP/LP tri counts)
-    travels in qa_report.json under ``finish`` — the operator is text-only:
+    Mechanical evidence (bake stats, UV diagnostics, HP/LP tri counts,
+    per-step wall clocks under ``finish.step_timings_sec`` — the §7
+    throughput budgets are only checkable with numbers) travels in
+    qa_report.json under ``finish`` — the operator is text-only:
     numbers, not eyeballs. Returns the report dict; raises loudly on any
     step failure (a package that cannot be audited must not ship).
     """
@@ -326,6 +425,11 @@ def finish_delivery(
         runner = BlenderRunner()
 
     from ..spec.resolver import resolve_spec_to_build_params
+
+    # Phase 4: resolution precedence — explicit argument > the card's
+    # texture_resolution (owner prompt) > 1024. Callers that want the card to
+    # drive the bake pass resolution=None (the CLI's --res default).
+    resolution = resolution if resolution is not None else job.effective_texture_resolution()
 
     # Absolute from here down: the harness runs Blender in a subprocess whose
     # image-path resolution is blend-relative — a relative out_root makes
@@ -346,19 +450,31 @@ def finish_delivery(
             raise RuntimeError(f"finish_delivery step {step!r} failed: {res.get('error')}")
         return res
 
+    # Per-step wall clocks (PLAN_AUTONOMOUS §7 states budgets; qa_report
+    # records reality so any budget miss is a measured fact, not a feeling).
+    timings: dict[str, float] = {}
+    _t_chain_start = time.perf_counter()
+
+    def _timed(step: str, fn):
+        _t0 = time.perf_counter()
+        try:
+            return fn()
+        finally:
+            timings[step] = round(time.perf_counter() - _t0, 3)
+
     # ── 1. prepare: build, verify quads, UV atlas, save the live scene ──────
     build_params = resolve_spec_to_build_params(spec)
-    prep = _require(runner.execute_op("prepare_delivery_scene", {
+    prep = _timed("prepare_scene", lambda: _require(runner.execute_op("prepare_delivery_scene", {
         "build": build_params,
         "out_blend": str(scene_blend),
-    }), "prepare_delivery_scene")
+    }), "prepare_delivery_scene"))
     log(f"prepared quad-clean scene: {scene_blend} "
         f"(atlas pack_scale {prep.get('uv_atlas', {}).get('pack_scale', '?')})")
 
     # ── 2. bake: real 5-map texture set from the HP detail shell ────────────
     detail_map = {p["name"]: p["detail"] for p in build_params["spec"]["parts"]
                   if p.get("detail")}
-    bake = _require(runner.execute_op("bake_maps", {
+    bake = _timed("bake_maps", lambda: _require(runner.execute_op("bake_maps", {
         "input": str(scene_blend),
         "out_dir": str(maps_dir),
         "maps": None,
@@ -369,30 +485,54 @@ def finish_delivery(
         "detail_normal": True,
         "hp_glb": str(hp_glb),
         "save_blend": str(scene_blend),
-    }), "bake_maps")
-    log(f"baked maps: {sorted(k for k, v in bake.get('maps', {}).items() if isinstance(v, dict) and 'stats' in v)}")
+        "device": bake_device,
+    }, timeout_sec=bake_timeout_sec), "bake_maps"))
+    log(f"baked maps ({bake.get('device', {}).get('device', '?')} via "
+        f"{bake.get('device', {}).get('compute_device_type') or 'CPU'}): "
+        f"{sorted(k for k, v in bake.get('maps', {}).items() if isinstance(v, dict) and 'stats' in v)}")
 
     # ── 3. LP: decimate the delivery scene to the tier budget ───────────────
-    budget = TIER_TRI_CEILINGS.get(job.complexity)
+    # Phase 4: the card's explicit ceiling overrides the tier table (and
+    # unblocks 'complex'); the spec tri_budget remains the last-resort
+    # fallback when no ceiling is known at all.
+    budget = job.effective_polycount_ceiling()
     if budget is None:
         budget = int(getattr(spec, "tri_budget", 60_000))
-    dec = _require(runner.execute_op("decimate_to_budget", {
+    dec = _timed("decimate_lp", lambda: _require(runner.execute_op("decimate_to_budget", {
         "input": str(scene_blend),
         "output": str(lp_glb),
         "budget": budget,
-    }), "decimate_to_budget")
+    }), "decimate_to_budget"))
     log(f"LP exported: {dec.get('triangle_equivalent')} tri-eq "
         f"(budget {budget}, decimated={dec.get('decimated')})")
 
-    def _render_review() -> list[str]:
-        rv = _require(runner.execute_op("render_views", {
+    def _render_review() -> tuple[list[str], dict[str, Any] | None]:
+        # Close-ups (round 4) and contrast probes (Phase 8 item 2) come
+        # from the spec's template — the finishing layer never decides
+        # WHAT to frame or measure, only threads it through.
+        closeups = [
+            {"name": c.name, "part": c.part, "direction": c.direction,
+             "pad": c.pad, "frame": c.frame}
+            for c in (getattr(spec, "review_closeups", None) or [])
+        ]
+        probes = [
+            {"name": p.name, "view": p.view, "region": list(p.region),
+             "cycles": list(p.cycles), "band": list(p.band),
+             "min_amplitude": p.min_amplitude, "axes": p.axes}
+            for p in (getattr(spec, "contrast_probes", None) or [])
+        ]
+        rv = _timed("review_renders", lambda: _require(runner.execute_op("render_views", {
             "model_path": str(lp_glb),
             "output_dir": str(review_dir),
             "prefix": job.job_code,
-        }), "render_views")
+            "closeups": closeups,
+        }), "render_views"))
+        if rv.get("closeup_skips"):
+            log(f"review close-ups skipped: {rv['closeup_skips']}")
         files_rendered = sorted(str(p) for p in review_dir.glob("*.png"))
+        render_metrics = _collect_render_metrics(rv.get("views", {}), probes, log)
         log(f"review renders awaiting owner review: {files_rendered}")
-        return files_rendered
+        return files_rendered, render_metrics
 
     # ── 3b. PLACEHOLDER-DIMENSION REFUSAL (owner's overnight order, T4) ──────
     # The pipeline is exercised (structural review renders are valid output)
@@ -400,7 +540,7 @@ def finish_delivery(
     # owner supplies real ones (rule 9 — never inferred, never a guessed
     # standard size). Evidence lands in output/blocked/<JOB>/qa_report.json.
     if job.dims_placeholder:
-        review_files = _render_review()
+        review_files, render_metrics = _render_review()
         blocked_dir = out_root.parent / "blocked" / job.job_code
         blocked_dir.mkdir(parents=True, exist_ok=True)
         blocked_report = {
@@ -423,11 +563,17 @@ def finish_delivery(
                 "hp_tri_equivalent": bake.get("hp_triangle_equivalent"),
                 "lp_budget": budget,
                 "texture_resolution": resolution,
+                "bake_timeout_sec": bake_timeout_sec,
+                "bake_device": bake_device,
+                "bake_device_resolved": bake.get("device"),
+                "step_timings_sec": {**timings,
+                                     "total_chain": round(time.perf_counter() - _t_chain_start, 3)},
                 "detail_parts": detail_map,
                 "uv_atlas": prep.get("uv_atlas"),
                 "uv_diagnostics": prep.get("uv"),
                 "bake": bake.get("maps"),
                 "review_renders": review_files,
+                "render_metrics": render_metrics,
                 "review_note": "Structural review only — band order, materials, "
                                "tape and label placement. Proportions render "
                                "correctly at any dims (fractions of H), but "
@@ -462,21 +608,21 @@ def finish_delivery(
         })
 
     fbx_path = package_dir / f"{job.job_code}.fbx"
-    _require(runner.execute_op("export_fbx", {
+    _timed("export_fbx", lambda: _require(runner.execute_op("export_fbx", {
         "input": str(scene_blend),
         "path": str(fbx_path),
-        "axis_up": FBX_AXIS_UP,
-        "axis_forward": FBX_AXIS_FORWARD,
-    }), "export_fbx")
+        "axis_up": _fbx_axes(job)[0],
+        "axis_forward": _fbx_axes(job)[1],
+    }), "export_fbx"))
     _record(fbx_path, note="exported from the LIVE QUAD-CLEAN SCENE (owner "
                            "decision): quads preserved, n-gon gate meaningful, "
                            "polycount counted as authored")
 
     usdz_path = package_dir / f"{job.job_code}_LP.usdz"
-    usdz_res = _require(runner.execute_op("export_usdz", {
+    usdz_res = _timed("export_usdz", lambda: _require(runner.execute_op("export_usdz", {
         "input": str(lp_glb),
         "path": str(usdz_path),
-    }), "export_usdz")
+    }), "export_usdz"))
     _record(usdz_path, note=f"export method: {usdz_res.get('method', '?')} "
                             f"(from the decimated LP GLB)")
 
@@ -500,9 +646,11 @@ def finish_delivery(
 
     # ── 5. review renders for the owner (valid T3 output: awaits review) ────
     review_files: list[str] = []
+    render_metrics: dict[str, Any] | None = None
     if review_renders:
-        review_files = _render_review()
+        review_files, render_metrics = _render_review()
 
+    # ── 6. close the timing ledger: assembly + total ────────────────────────
     finish_section = {
         "fbx_source": "live_quad_scene",
         "lp_tri_equivalent": dec.get("triangle_equivalent"),
@@ -510,12 +658,18 @@ def finish_delivery(
         "lp_budget": budget,
         "lp_decimated": dec.get("decimated"),
         "texture_resolution": resolution,
+        "bake_timeout_sec": bake_timeout_sec,
+        "bake_device": bake_device,
+        "bake_device_resolved": bake.get("device"),
+        "step_timings_sec": {**timings,
+                             "total_chain": round(time.perf_counter() - _t_chain_start, 3)},
         "detail_parts": detail_map,
         "uv_atlas": prep.get("uv_atlas"),
         "uv_diagnostics": prep.get("uv"),
         "bake": bake.get("maps"),
         "ao_method": bake.get("maps", {}).get("ao_method"),
         "review_renders": review_files,
+        "render_metrics": render_metrics,
         "review_note": "Renders await owner review (T3 protocol: a list of "
                        "renders awaiting review is a valid output).",
     }

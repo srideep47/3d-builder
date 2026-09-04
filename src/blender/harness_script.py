@@ -121,6 +121,127 @@ def import_any(path):
     return [o for o in bpy.data.objects if o not in before]
 
 
+def _weld_imported_mesh(obj, threshold=1e-6):
+    """R1 weld-on-import (docs/MESH_SOURCES.md §4, §5.1): glTF/FBX store one
+    vertex per face-corner wherever normals or UVs differ, so a flat-shaded
+    scan imports as disconnected triangles — every edge a boundary edge.
+    That split is the measured root cause of per-face UV islands (5,118 on
+    a 5,119-triangle scan; the atlas packer cannot walk across faces) and of
+    QuadriFlow refusing the mesh. A by-distance weld at 1 um restores shared
+    topology without measurably moving bounds; UV seams survive because UVs
+    are per-loop attributes, not per-vertex. Returns before/after vertex and
+    boundary-edge counts — the export re-splits, so this report is the only
+    observable evidence the weld ran."""
+    import bmesh
+    import bpy
+
+    stats = {
+        "verts_before": len(obj.data.vertices),
+        "verts_after": len(obj.data.vertices),
+        "boundary_edges_before": 0,
+        "boundary_edges_after": 0,
+    }
+    if not obj.data.polygons:
+        return stats
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    stats["boundary_edges_before"] = sum(1 for e in bm.edges if e.is_boundary)
+    bm.free()
+    select_only([obj])
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.remove_doubles(threshold=threshold)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    stats["verts_after"] = len(obj.data.vertices)
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    stats["boundary_edges_after"] = sum(1 for e in bm.edges if e.is_boundary)
+    bm.free()
+    return stats
+
+
+def _topology_stats(obj):
+    """Direct mesh facts (verts/faces/quads/tris/boundary edges) — the §H
+    unit of evidence for the weld and retopology reports."""
+    import bmesh
+
+    me = obj.data
+    quads = sum(1 for p in me.polygons if len(p.vertices) == 4)
+    tris = sum(1 for p in me.polygons if len(p.vertices) == 3)
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    boundary = sum(1 for e in bm.edges if e.is_boundary)
+    bm.free()
+    return {
+        "verts": len(me.vertices),
+        "faces": len(me.polygons),
+        "quads": quads,
+        "tris": tris,
+        "boundary_edges": boundary,
+    }
+
+
+def _apply_retopology(obj, cfg):
+    """R2 retopology block (docs/MESH_SOURCES.md §7-8): runs in the LIVE
+    scene after the import weld — a GLB round trip would triangulate the
+    quads. Fail-closed no-op guard: QuadriFlow can silently return its
+    input unchanged (measured on voxel-remeshed geometry — byte-identical
+    at every target 2k-12k), so an unchanged mesh is an ERROR naming the
+    tool, never a silent pass. Voxel keeps adaptivity 0.0 and the measured
+    usable floor voxel_size >= 0.005 on ~0.4 m objects (0.004 collapsed
+    dims by 28/17/61 mm)."""
+    import bpy
+
+    tool = str(cfg.get("tool", "")).lower()
+    stats_before = _topology_stats(obj)
+    select_only([obj])
+    if tool == "quadriflow":
+        target = int(cfg.get("target_faces") or 0)
+        if target <= 0:
+            return {"success": False,
+                    "error": "retopology 'quadriflow' requires a positive target_faces"}
+        bpy.ops.object.quadriflow_remesh(target_faces=target)
+    elif tool == "voxel":
+        voxel_size = float(cfg.get("voxel_size") or 0.0)
+        if voxel_size <= 0:
+            return {"success": False,
+                    "error": "retopology 'voxel' requires a positive voxel_size (metres)"}
+        mod = obj.modifiers.new(name="ThreedRetopoVoxel", type="REMESH")
+        mod.mode = "VOXEL"
+        mod.voxel_size = voxel_size
+        mod.adaptivity = 0.0
+        select_only([obj])
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+    else:
+        return {"success": False, "error": f"Unknown retopology tool: {tool!r}"}
+    stats_after = _topology_stats(obj)
+    if stats_after["faces"] == 0:
+        return {
+            "success": False,
+            "error": (
+                f"retopology '{tool}' emptied the mesh "
+                f"({stats_before['faces']} -> 0 faces) — refusing to continue"
+            ),
+        }
+    if (stats_after["faces"] == stats_before["faces"]
+            and stats_after["verts"] == stats_before["verts"]):
+        return {
+            "success": False,
+            "error": (
+                f"retopology '{tool}' is a silent no-op "
+                f"({stats_before['faces']} faces, {stats_before['verts']} verts "
+                f"unchanged) — the tool refused the input; never assume it ran"
+            ),
+        }
+    return {
+        "success": True,
+        "tool": tool,
+        "params": {k: cfg[k] for k in ("target_faces", "voxel_size") if cfg.get(k) is not None},
+        "before": stats_before,
+        "after": stats_after,
+    }
+
+
 def export_any(path, selected_only=False, apply_modifiers=True):
     import bpy
 
@@ -329,8 +450,13 @@ def _build_cylinder(name, dims, segments=32):
 
     radius = float(dims[0]) * 0.5
     depth = float(dims[2]) if len(dims) > 2 else float(dims[0])
+    # TRIFAN caps (end_fill_type): the default NGON fill puts one n-gon on
+    # each cap and the delivery scene gate is strict (0 n-gons). A tri-fan
+    # cap has the same triangle-equivalent count, so the tri ceiling is
+    # unaffected.
     bpy.ops.mesh.primitive_cylinder_add(
-        radius=radius, depth=depth, vertices=int(segments), location=(0, 0, 0)
+        radius=radius, depth=depth, vertices=int(segments),
+        end_fill_type="TRIFAN", location=(0, 0, 0),
     )
     obj = bpy.context.active_object
     obj.name = name
@@ -348,6 +474,7 @@ def _build_tapered_cylinder(name, dims, top_scale, segments=32):
         radius2=bottom_r * ts,
         depth=depth,
         vertices=int(segments),
+        end_fill_type="TRIFAN",
         location=(0, 0, 0),
     )
     obj = bpy.context.active_object
@@ -376,6 +503,7 @@ def _build_cone(name, dims, segments=32):
         radius2=0.0,
         depth=float(dims[2]) if len(dims) > 2 else float(dims[0]),
         vertices=int(segments),
+        end_fill_type="TRIFAN",
         location=(0, 0, 0),
     )
     obj = bpy.context.active_object
@@ -501,25 +629,90 @@ def _fan_cap(bm, ring):
     return faces
 
 
-def _build_extrude(name, profile_points, height, top_scale=None, caps="ngon"):
+def _profile_2d_normals(pts):
+    """Per-vertex 2D wall normals of a closed [[x, y], ...] loop, oriented
+    OUTWARD regardless of the loop's winding (signed-area test — the left
+    normal of an edge points inward for CCW loops, outward for CW)."""
+    import math
+
+    n = len(pts)
+    area = 0.5 * sum(
+        pts[i][0] * pts[(i + 1) % n][1] - pts[(i + 1) % n][0] * pts[i][1]
+        for i in range(n)
+    )
+    # CCW (area > 0): the left edge normal points inward, so outward is the
+    # right normal (dy, -dx); CW loops are the mirror.
+    s = 1.0 if area > 0 else -1.0
+    normals = []
+    for i in range(n):
+        ax, ay = pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]
+        bx, by = pts[(i + 1) % n][0] - pts[i][0], pts[(i + 1) % n][1] - pts[i][1]
+        nx, ny = s * (ay + by), s * -(ax + bx)
+        ln = math.hypot(nx, ny)
+        normals.append((nx / ln, ny / ln) if ln > 1e-12 else (0.0, 0.0))
+    return normals
+
+
+def _build_extrude(name, profile_points, height, top_scale=None, caps="ngon",
+                   seam_rings=None):
     """Extrude a [[x, y], ...] polygon; optional taper toward the profile
     centroid. `caps="fan"` triangulates the end caps from the ring centroid
     (n-gon-free, required for >4-point profiles under the client's strict
-    n-gon gate); "ngon" keeps the historical single-face caps."""
+    n-gon gate); "ngon" keeps the historical single-face caps.
+
+    `seam_rings` (round 4): [{"z": m above base, "depth": inward m}, ...] —
+    each inserts a faint pressed crease: rings at z-w, z (inset `depth`
+    along the local wall normal), z+w, with w = 2*depth. Real LP geometry:
+    the crease shades under raking light and picks up bake AO, so a stitched
+    seam reads without any colour change."""
     import bmesh
 
     if not profile_points or len(profile_points) < 3:
         raise ValueError(f"extrude part '{name}' needs >= 3 profile_points [[x, y], ...]")
     height = float(height)
+    if height <= 0:
+        raise ValueError(f"extrude part '{name}' needs a positive height")
     taper = float(top_scale[0]) if top_scale else 1.0
 
     pts = [(float(p[0]), float(p[1])) for p in profile_points]
     cx = sum(p[0] for p in pts) / len(pts)
     cy = sum(p[1] for p in pts) / len(pts)
+    normals = _profile_2d_normals(pts)
+
+    # ring stack: (z, inset) pairs from base to top; seam creases expand
+    # into three rings each. Rings must stay ordered and non-degenerate.
+    ring_stack = [(0.0, 0.0)]
+    for sr in sorted(seam_rings or [], key=lambda s: float(s["z"])):
+        z, d = float(sr["z"]), float(sr["depth"])
+        if not (0.0 < z < height) or d <= 0:
+            raise ValueError(
+                f"extrude part '{name}': seam ring z={z:.4f} depth={d:.4f} "
+                f"must satisfy 0 < z < {height:.4f} and depth > 0"
+            )
+        w = 2.0 * d
+        if z - w <= ring_stack[-1][0] or z + w >= height:
+            raise ValueError(
+                f"extrude part '{name}': seam crease at z={z:.4f} (half-width "
+                f"{w:.4f}) does not fit between the previous ring "
+                f"({ring_stack[-1][0]:.4f}) and the top ({height:.4f})"
+            )
+        ring_stack += [(z - w, 0.0), (z, d), (z + w, 0.0)]
+    ring_stack.append((height, 0.0))
+
+    def _ring_verts(z, inset):
+        t = z / height
+        verts = []
+        for (x, y), (nx, ny) in zip(pts, normals):
+            bx = (x - cx) * taper + cx
+            by = (y - cy) * taper + cy
+            vx = x + (bx - x) * t - nx * inset
+            vy = y + (by - y) * t - ny * inset
+            verts.append(bm.verts.new((vx, vy, z)))
+        return verts
 
     bm = bmesh.new()
-    bottom = [bm.verts.new((x, y, 0.0)) for x, y in pts]
-    top = [bm.verts.new(((x - cx) * taper + cx, (y - cy) * taper + cy, height)) for x, y in pts]
+    rings = [_ring_verts(z, d) for z, d in ring_stack]
+    bottom, top = rings[0], rings[-1]
     n = len(pts)
     if caps == "fan":
         _fan_cap(bm, list(reversed(bottom)))
@@ -527,8 +720,10 @@ def _build_extrude(name, profile_points, height, top_scale=None, caps="ngon"):
     else:
         bm.faces.new(list(reversed(bottom)))
         bm.faces.new(top)
-    for i in range(n):
-        bm.faces.new((bottom[i], bottom[(i + 1) % n], top[(i + 1) % n], top[i]))
+    for r in range(len(rings) - 1):
+        lo, hi = rings[r], rings[r + 1]
+        for i in range(n):
+            bm.faces.new((lo[i], lo[(i + 1) % n], hi[(i + 1) % n], hi[i]))
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     return _object_from_bmesh(bm, name)
 
@@ -573,6 +768,8 @@ def _build_sweep(name, path_points, dims, closed=False):
         curve.bevel_mode = "OBJECT"
     else:
         curve.bevel_depth = float(dims[0]) * 0.5
+        # a round CORD (tape edges), not the default low-poly bevel profile
+        curve.bevel_resolution = 4
 
     obj = bpy.data.objects.new(name, curve)
     bpy.context.collection.objects.link(obj)
@@ -663,6 +860,30 @@ def apply_world_mirror(obj, axis):
     return _join_objects([obj, dup], obj.name)
 
 
+def _weld_solver_duplicates(obj):
+    """Collapse zero-length edges left by the EXACT boolean solver.
+
+    The solver can emit coincident-but-distinct vertex pairs joined by a
+    zero-length edge (seen where a tri-fan cap ring meets the cut wall).
+    The live mesh stays edge-closed, but glTF tessellation turns those
+    loops into zero-area triangles whose welded edges read as non-manifold
+    in the delivery watertight check. Dissolving them also converts the
+    affected 5-vert loop faces back to quads. 1e-7 m is 2500x below the
+    tightest client tolerance, so only solver artifacts can match."""
+    import bmesh
+
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(obj.data)
+        zero = [e for e in bm.edges if e.calc_length() < 1e-7]
+        if zero:
+            bmesh.ops.dissolve_degenerate(bm, edges=zero, dist=1e-7)
+            bm.to_mesh(obj.data)
+            obj.data.update()
+    finally:
+        bm.free()
+
+
 def apply_boolean(target, tool, operation="difference"):
     import bpy
 
@@ -672,6 +893,7 @@ def apply_boolean(target, tool, operation="difference"):
     mod.object = tool
     select_only([target])
     bpy.ops.object.modifier_apply(modifier=mod.name)
+    _weld_solver_duplicates(target)
     bpy.data.objects.remove(tool, do_unlink=True)
     # Purge the orphaned tool mesh so it cannot leak into exports.
     for me in list(bpy.data.meshes):
@@ -940,7 +1162,8 @@ def _build_shape(part):
     if shape == "extrude":
         height = dims[2] if len(dims) > 2 else 0.1
         return _build_extrude(name, part.get("profile_points"), height, part.get("top_scale"),
-                              caps=str(part.get("caps", "ngon")).lower())
+                              caps=str(part.get("caps", "ngon")).lower(),
+                              seam_rings=part.get("seam_rings"))
     if shape == "sweep":
         return _build_sweep(name, part.get("path_points"), dims,
                             closed=bool(part.get("path_closed", False)))
@@ -990,6 +1213,8 @@ def op_build_from_spec(params):
     warnings = []
     built = {}
     obj_list = []
+    weld_stats = {}
+    retopo_stats = {}
 
     # Pass 1: build geometry, detail modifiers, positioning, assembly modifiers.
     for part in parts:
@@ -1012,29 +1237,75 @@ def op_build_from_spec(params):
                 warnings.append(f"Script part '{name}' created no object named '{name}'")
             continue
 
-        if method == "image_to_3d" or str(part.get("shape", "")).lower() == "organic":
-            # 'organic' shapes are only ever neural — route them through the
-            # same import path so a spec without a generated mesh degrades to
-            # a warning instead of an 'Unknown shape' build error.
+        if part.get("retopology") and method not in ("image_to_3d", "imported", "scanned") \
+                and str(part.get("shape", "")).lower() != "organic":
+            # The schema refuses this spec outright; a raw build-params
+            # caller bypassing Pydantic must not get a silent drop instead.
+            return {
+                "success": False,
+                "error": (
+                    f"Part '{name}' carries retopology but is {method} — "
+                    "retopology applies to file-backed parts "
+                    "(image_to_3d/imported/scanned) after the import weld"
+                ),
+                "warnings": warnings,
+            }
+
+        if method in ("image_to_3d", "imported", "scanned") or str(part.get("shape", "")).lower() == "organic":
+            # Mesh-source contract (Phase 8 item 3): ALL file-backed sources
+            # (neural image_to_3d, imported assets, scans) pass through this
+            # ONE mechanical path — import → join → rescale → place. Only the
+            # provenance differs. 'organic' shapes route here too so a spec
+            # without a generated mesh degrades to a warning instead of an
+            # 'Unknown shape' build error.
             mesh_path = part.get("mesh_path")
-            if not mesh_path or not os.path.exists(str(mesh_path)):
+            if not mesh_path:
                 warnings.append(
-                    f"Part '{name}' is image_to_3d but has no generated mesh_path yet — skipped"
+                    f"Part '{name}' is {method} but has no mesh_path — skipped"
+                )
+                continue
+            if not os.path.exists(str(mesh_path)):
+                warnings.append(
+                    f"Part '{name}' ({method}) mesh file not found: {mesh_path} — skipped"
                 )
                 continue
             imported = import_any(str(mesh_path))
             meshes = [o for o in imported if o.type == "MESH"]
             if not meshes:
-                warnings.append(f"image_to_3d part '{name}' imported no meshes")
+                warnings.append(f"{method} part '{name}' imported no meshes")
                 continue
             if len(meshes) > 1:
                 obj = _join_objects(meshes, name)
             else:
                 obj = meshes[0]
                 obj.name = name
+            # R1: weld AFTER join (join fuses datablocks but keeps per-object
+            # coincident verts separate) and BEFORE rescale, so smart_project
+            # and any later retopology see shared topology. Parametric parts
+            # never pass through here — born-in-Blender geometry is welded
+            # by construction.
+            weld_stats[name] = _weld_imported_mesh(obj)
+            # R2: the optional retopology block runs on the WELDED mesh in
+            # the live scene (a GLB round trip would triangulate the quads),
+            # before rescale so target_size still lands exact. Fail-closed:
+            # a silent no-op or empty output fails the whole op.
+            retopo_cfg = part.get("retopology")
+            if retopo_cfg:
+                report = _apply_retopology(obj, retopo_cfg)
+                if not report.get("success", False):
+                    return {
+                        "success": False,
+                        "error": f"Part '{name}': {report.get('error')}",
+                        "warnings": warnings,
+                        "weld": weld_stats,
+                    }
+                retopo_stats[name] = report
             target = part.get("target_size") or part.get("dimensions")
             if target:
-                _scale_object_to_bounds(obj, [float(v) for v in target])
+                _scale_object_to_bounds(
+                    obj, [float(v) for v in target],
+                    mode=str(part.get("mesh_scale", "fit")),
+                )
             _place_part(obj, part)
             built[name] = obj
             obj_list.append(obj)
@@ -1166,29 +1437,49 @@ def op_build_from_spec(params):
         "parts_created": len(obj_list),
         "part_names": [o.name for o in obj_list],
         "warnings": warnings,
+        "weld": weld_stats,
+        "retopology": retopo_stats,
         "overall_bounds": final_bounds,
         "output_path": str(output_path) if output_path else None,
     }
 
 
-def _scale_object_to_bounds(obj, target_axes):
-    """Scale a single object so its world bbox matches the target per-axis sizes."""
+def _scale_object_to_bounds(obj, target_axes, mode="fit"):
+    """Scale a single object so its world bbox matches the target sizes.
+
+    mode "fit" (default): per-axis — the bbox lands exactly on target_axes
+    (dimension gates exact; a mismatched aspect ratio is stretched).
+    mode "uniform": one factor, the MIN of the per-axis ratios — aspect is
+    preserved and no axis exceeds its target (imported assets / scans,
+    where per-axis stretch is damage). Axes with no target or a degenerate
+    current size are left unscaled in both modes."""
     bb = world_bbox([obj])
     if bb is None:
         return
     (mn, mx) = bb
+    factors = []
     for i in range(3):
         current = mx[i] - mn[i]
         t = target_axes[i] if i < len(target_axes) else None
         target = float(t) if t is not None else current
         if current > 1e-9 and target > 0:
-            factor = target / current
-            if i == 0:
-                obj.scale.x *= factor
-            elif i == 1:
-                obj.scale.y *= factor
-            else:
-                obj.scale.z *= factor
+            factors.append(target / current)
+        else:
+            factors.append(None)
+    if mode == "uniform":
+        valid = [f for f in factors if f is not None]
+        if valid:
+            f = min(valid)
+            factors = [f] * 3
+    for i, factor in enumerate(factors):
+        if factor is None:
+            continue
+        if i == 0:
+            obj.scale.x *= factor
+        elif i == 1:
+            obj.scale.y *= factor
+        else:
+            obj.scale.z *= factor
     _apply_transforms(obj, location=False, rotation=False, scale=True)
 
 
@@ -1281,6 +1572,28 @@ def _topology_diagnostics(mesh_obj):
     return loose_v, loose_e, boundary, nonmanifold
 
 
+def _welded_closed_solid(mesh_obj):
+    """Closed-shell test on a vertex-welded copy. glTF splits vertices per
+    normal/UV attribute, so an imported closed box shows every edge as a
+    boundary in the raw mesh; welding (dist=1e-6 m — the splits are exact
+    duplicates, far below any real feature) restores shared edges first."""
+    import bmesh
+
+    bm = bmesh.new()
+    bm.from_mesh(mesh_obj.data)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-6)
+    faces = len(bm.faces)
+    boundary = nonmanifold = 0
+    for e in bm.edges:
+        n = len(e.link_faces)
+        if n == 1:
+            boundary += 1
+        elif n > 2:
+            nonmanifold += 1
+    bm.free()
+    return bool(faces > 0 and boundary == 0 and nonmanifold == 0)
+
+
 def op_count_ngons(params):
     """Count faces with more than 4 vertices (client n-gon gate)."""
     model_path = params.get("model_path")
@@ -1316,12 +1629,32 @@ def op_topology_report(params):
         return {"success": False, "error": "No mesh objects in scene"}
     tris, quads, ngons, tri_eq, faces, verts = _count_face_kinds(meshes)
     loose_v = loose_e = boundary = nonmanifold = 0
+    objects_detail = []
     for m in meshes:
         lv, le, be, nm = _topology_diagnostics(m)
         loose_v += lv
         loose_e += le
         boundary += be
         nonmanifold += nm
+        o_tris, o_quads, o_ngons, o_tri_eq, o_faces, o_verts = _count_face_kinds([m])
+        objects_detail.append({
+            "name": m.name,
+            "vertices": o_verts,
+            "faces_total": o_faces,
+            "triangles": o_tris,
+            "quads": o_quads,
+            "ngons": o_ngons,
+            "triangle_equivalent": o_tri_eq,
+            "loose_vertices": lv,
+            "loose_edges": le,
+            # RAW boundary/nonmanifold — glTF attribute splits make these
+            # nonzero on any imported closed box; closed_solid is the
+            # welded answer to "is this part a closed shell"
+            "boundary_edges": be,
+            "nonmanifold_edges": nm,
+            "closed_solid": _welded_closed_solid(m),
+            "bounds": get_mesh_bounds([m]),
+        })
     bounds = get_mesh_bounds(meshes)
     return {
         "success": True,
@@ -1339,6 +1672,7 @@ def op_topology_report(params):
         "boundary_edges": boundary,
         "nonmanifold_edges": nonmanifold,
         "bounds": bounds,
+        "objects_detail": objects_detail,
     }
 
 
@@ -1449,23 +1783,81 @@ def op_export_usdz(params):
     }
 
 
-def setup_studio_lighting():
+def setup_studio_lighting(rigs=None):
+    """Cross-key review rig (round 4; Phase 8 item 2 re-tuned on measured
+    absolute contrast): the review renders are the QUALITY GATE, so the rig
+    must not misrepresent the model.
+
+    - TWO axis-aligned raking keys, 90 deg apart in azimuth: a single key
+      shades only the relief lines perpendicular to its azimuth, so a
+      correct square quilt grid photographs as one-directional corduroy.
+      One key travels along -X (rakes X-gradient relief, lights the +X
+      face the side view sees), the other along +Y (rakes Y-gradient
+      relief, lights the front face) — every surface axis keeps exactly
+      one full-strength raking light, so neither is privileged.
+    - Phase 8 item 2 tune (fixture RIGTUNE0001, flat 2000x1200x300 mm
+      crown, pure-form substrate, src/render/metrics.py): the round-4
+      keys at 40 deg elevation left the 14 mm quilt relief under the
+      6-grey-level floor on the X axis (2.85 gl measured) — relief
+      contrast scales with cot(elevation) and the quilt is shallow.
+      Keys now rake at 10 deg elevation (cot 40 -> cot 10 is ~4.8x the
+      modulation/mean ratio) with energy 2.5: measured 9.49 gl (X) /
+      7.50 gl (Y) at the quilt pitch, both above the 6 floor, all four
+      views mean 146-171, zero clipping.
+    - Fill reduced 0.7 -> 0.1 per the owner's order ("reduce fill until
+      form returns"): fill is a steep near-vertical wash — it lifts puff
+      valleys toward peak luminance and the AgX shoulder compresses what
+      remains. Measured on the sweep: every 0.1 of fill cost ~0.5 gl of
+      quilt amplitude. A whisper remains for corner lift.
+    - Rim from behind separates the silhouette (front/side views); its
+      35 deg elevation grazes Y-relief too, which is why it stays at the
+      lower 0.6 energy.
+    - Total energy well under the round-3 rig's 7 W/m^2: bright fabric
+      must land with specular headroom, not clip to pure white
+      ("white-on-white" hid the 9.4% velvet from the reviewer).
+
+    SUBSTRATE RULE (Phase 8 lesson, hard-won): rig tuning must NOT use a
+    prepared-but-unbaked GLB. The prepared scene carries atlas-repacked
+    UVs while its materials still reference SOURCE textures — the normal
+    map then samples through garbage UVs and tilts the effective shading
+    normals arbitrarily (measured: crown pitch-black under both keys,
+    healthy +0.97 nz in the file). Tune on a pure-form substrate (flat
+    albedo, normal maps stripped) and VERIFY on the real baked LP —
+    src/client/package.py threads the probes over the baked LP renders.
+
+    Sun direction convention (verified against the round-3 rig's light
+    locations): direction = Rz(rz) @ Rx(rx) @ (0, 0, -1), so the horizontal
+    travel azimuth is 90 + rz degrees and the elevation is 90 - rx degrees.
+
+    `rigs` (optional, caller-threaded — used by the rig sweep that tuned
+    these constants) overrides the committed rig: a list of
+    (name, type, energy, (rot_x, rot_y, rot_z)) tuples.
+    """
     import bpy
 
     for obj in list(bpy.data.objects):
         if obj.type in ("LIGHT", "CAMERA"):
             bpy.data.objects.remove(obj, do_unlink=True)
 
-    rigs = [
-        ("KeyLight", "SUN", 3.5, (45, 0, 45), (4.0, -4.0, 5.0)),
-        ("FillLight", "SUN", 1.5, (55, 0, -35), (-4.0, -3.0, 3.0)),
-        ("RimLight", "SUN", 2.0, (-45, 0, 0), (0.0, 5.0, 4.0)),
-    ]
-    for name, ltype, energy, rot, loc in rigs:
+    # (name, energy, (rot_x, rot_y, rot_z) in degrees) — suns are
+    # direction-only; location is irrelevant.
+    if rigs is None:
+        rigs = [
+            # X-axis key: travels toward -X, elevation 10 (from the +X side).
+            # Low elevation = raking: shallow quilt relief reads as form.
+            ("KeyA", "SUN", 2.5, (80, 0, 90)),
+            # Y-axis key: travels toward +Y, elevation 10 (from the front).
+            ("KeyB", "SUN", 2.5, (80, 0, 0)),
+            # Steep soft fill from front-right-top (travel az 45, elev 65):
+            # a whisper — fill flattens relief amplitude measurably.
+            ("FillLight", "SUN", 0.1, (25, 0, -45)),
+            # Rim from behind, elevation 35 (travel toward -Y).
+            ("RimLight", "SUN", 0.6, (-55, 0, 0)),
+        ]
+    for name, ltype, energy, rot in rigs:
         light_data = bpy.data.lights.new(name=name, type=ltype)
         light_data.energy = energy
         light_obj = bpy.data.objects.new(name=name, object_data=light_data)
-        light_obj.location = loc
         light_obj.rotation_euler = (math.radians(rot[0]), math.radians(rot[1]), math.radians(rot[2]))
         bpy.context.collection.objects.link(light_obj)
 
@@ -1501,6 +1893,54 @@ def frame_camera_ortho(cam, bounds, view="iso"):
     cam.data.ortho_scale = ortho_scale * 1.15
 
 
+def frame_closeup_ortho(cam, model_bounds, target_bounds, direction="front",
+                        frame="part", pad=0.3):
+    """Orthographic close-up framed on one target object (round 4: the
+    reviewer needs label/border detail that a whole-model frame crushes to
+    a few pixels).
+
+    direction: which side the camera sits on (front/back = -/+Y,
+    left/right = -/+X), using the same orientations as the standard views.
+    frame: "part" — frame the target's own bounds (plus `pad` fraction);
+          "model_height" — keep the target's x/y but frame the MODEL's
+          full height, showing the target in its stack context.
+    """
+    from mathutils import Euler, Vector
+
+    tc = Vector(target_bounds["center"])
+    mc = Vector(model_bounds["center"])
+    td = Vector(target_bounds["dimensions"])
+    md = Vector(model_bounds["dimensions"])
+    dist = max(md.length, 0.1) * 2.4
+
+    if frame == "model_height":
+        along = td.x if direction in ("front", "back") else td.y
+        scale = max(md.z, along) * (1.0 + pad)
+        center = Vector((tc.x, tc.y, mc.z))
+    else:  # "part"
+        if direction in ("front", "back"):
+            scale = max(td.x, td.z) * (1.0 + pad)
+        else:
+            scale = max(td.y, td.z) * (1.0 + pad)
+        center = tc
+
+    if direction == "front":
+        cam.location = Vector((center.x, center.y - dist, center.z))
+        cam.rotation_euler = Euler((math.radians(90), 0, 0), "XYZ")
+    elif direction == "back":
+        cam.location = Vector((center.x, center.y + dist, center.z))
+        cam.rotation_euler = Euler((math.radians(90), 0, math.radians(180)), "XYZ")
+    elif direction == "left":
+        cam.location = Vector((center.x - dist, center.y, center.z))
+        cam.rotation_euler = Euler((math.radians(90), 0, math.radians(90)), "XYZ")
+    else:  # right
+        cam.location = Vector((center.x + dist, center.y, center.z))
+        cam.rotation_euler = Euler((math.radians(90), 0, math.radians(-90)), "XYZ")
+
+    cam.data.type = "ORTHO"
+    cam.data.ortho_scale = scale
+
+
 def op_render_views(params):
     model_path = params.get("model_path")
     if model_path:
@@ -1514,7 +1954,13 @@ def op_render_views(params):
         return {"success": False, "error": "No meshes to render"}
 
     bounds = get_mesh_bounds(meshes)
-    setup_studio_lighting()
+    # caller-threaded rig override (rig sweeps / alternative studios); None
+    # keeps the committed tuned rig
+    lighting = params.get("lighting")
+    if lighting is not None:
+        lighting = [(r["name"], r.get("type", "SUN"), float(r["energy"]),
+                     tuple(r.get("rot", (0, 0, 0)))) for r in lighting]
+    setup_studio_lighting(rigs=lighting)
 
     import bpy
 
@@ -1546,10 +1992,39 @@ def op_render_views(params):
         bpy.ops.render.render(write_still=True)
         rendered_files[str(v)] = file_path
 
+    # Close-ups (round 4): framed on a named part, e.g. a side label the
+    # whole-model views crush to a few pixels. Definitions come from the
+    # caller (the product template) — the harness only does camera math.
+    closeups = params.get("closeups") or []
+    by_name = {o.name: o for o in meshes}
+    closeup_skips = []
+    for cu in closeups:
+        cu_name = str(cu.get("name") or cu.get("part"))
+        target = by_name.get(str(cu.get("part")))
+        if target is None:
+            # glTF import can suffix object names; accept a prefix match.
+            target = next((o for o in meshes if o.name.startswith(str(cu.get("part")))), None)
+        if target is None:
+            closeup_skips.append(f"{cu_name}: part {cu.get('part')!r} not in scene")
+            continue
+        frame_closeup_ortho(
+            cam, bounds, get_mesh_bounds([target]),
+            direction=str(cu.get("direction", "front")),
+            frame=str(cu.get("frame", "part")),
+            pad=float(cu.get("pad", 0.3)),
+        )
+        file_path = os.path.abspath(os.path.join(out_dir, f"{prefix}_{cu_name}.png"))
+        scene.render.filepath = file_path
+        bpy.ops.render.render(write_still=True)
+        rendered_files[cu_name] = file_path
+
     return {
         "success": True,
         "views": rendered_files,
         "resolution": resolution,
+        "closeup_skips": closeup_skips,
+        "render_engine": scene.render.engine,
+        "view_transform": scene.view_settings.view_transform,
     }
 
 
@@ -1697,6 +2172,29 @@ def op_generate_uvs(params):
     return {"success": True, "path": out}
 
 
+def op_uv_report(params):
+    """Read-only UV diagnostics for a model file: island count, 0-1 space
+    bounds, exact island overlaps, and texel density per object at
+    `resolution`. Pure measurement — unwrapping lives in generate_uvs; this op
+    only reports what is already in the file (islands_total=0 with a reason
+    when the file has no UV layers)."""
+    model_path = params.get("model_path")
+    if not model_path:
+        raise ValueError("model_path is required")
+    reset_scene()
+    import_any(str(model_path))
+    meshes = mesh_objects()
+    if not meshes:
+        return {"success": False, "error": "No mesh objects in scene"}
+    resolution = int(params.get("resolution", 1024))
+    return {
+        "success": True,
+        "model_path": str(model_path),
+        "resolution": resolution,
+        "uv": _uv_diagnostics(meshes, resolution=resolution),
+    }
+
+
 def op_scale_to_exact_bounds(params):
     """Rescale so the world bounding box hits exact target sizes.
     `target_axes` = {"x": m, "y": m, "z": m} for anisotropic, or `target_size`
@@ -1753,6 +2251,99 @@ def op_apply_material(params):
     return {"success": True, "path": out, "material": applied}
 
 
+# Cycles compute_device_type enum values, in the order _configure_cycles_device
+# prefers them when auto-detecting (OptiX is fastest where present; CUDA is the
+# universal NVIDIA fallback; HIP/ONEAPI/METAL cover AMD/Intel/Apple so the same
+# parameter works on any host).
+_CYCLE_COMPUTE_TYPES = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
+
+
+def _configure_cycles_device(scene, device_param):
+    """Point Cycles at a compute device, PROPERLY. GPU setup is three RNA
+    writes, not one: compute_device_type in the Cycles addon preferences,
+    a get_devices() refresh, per-device `use` flags — and only THEN
+    scene.cycles.device = "GPU". Setting the scene device alone silently
+    does nothing (the GPU stays at 0% while the bake burns CPU for ~9
+    minutes — the exact bug this replaced).
+
+    device_param (mirrors bake_timeout_sec as an op parameter):
+      "auto" (default) — first available type of _CYCLE_COMPUTE_TYPES;
+      "gpu"            — same order as auto, explicit;
+      "optix"/"cuda"/"hip"/"oneapi"/"metal" — one specific type;
+      "cpu"            — CPU, no GPU probing.
+    Unknown types and absent hardware fall back to CPU CLEANLY (the bake
+    still succeeds) and say why in the returned evidence, so CI and
+    GPU-less hosts keep working unchanged.
+
+    Returns {"requested", "device", "compute_device_type", "devices_enabled",
+    "fallback_reason"} — mechanical evidence for qa_report.json: the
+    operator is text-only, "it used the GPU" must be a recorded fact.
+    """
+    import bpy
+
+    requested = str(device_param or "auto").strip().lower()
+    if requested in ("", "none", "null"):
+        requested = "auto"
+    result = {
+        "requested": requested,
+        "device": "CPU",
+        "compute_device_type": None,
+        "devices_enabled": [],
+        "fallback_reason": None,
+    }
+    if requested == "cpu":
+        scene.cycles.device = "CPU"
+        return result
+
+    prefs = bpy.context.preferences.addons["cycles"].preferences
+    candidates = (
+        list(_CYCLE_COMPUTE_TYPES)
+        if requested in ("auto", "gpu")
+        else [requested.upper()]
+    )
+    for compute_type in candidates:
+        try:
+            prefs.compute_device_type = compute_type
+        except Exception:
+            continue  # not in this build's enum — try the next candidate
+        try:
+            prefs.get_devices()
+        except Exception:
+            pass
+        enabled = []
+        for dev in getattr(prefs, "devices", []):
+            try:
+                dev.use = dev.type == compute_type
+            except Exception:
+                continue
+            if dev.use:
+                enabled.append(dev.name)
+        if enabled:
+            scene.cycles.device = "GPU"
+            result.update(
+                device="GPU", compute_device_type=compute_type,
+                devices_enabled=enabled,
+            )
+            return result
+    # Nothing usable: back to CPU, cleanly and loudly.
+    try:
+        prefs.compute_device_type = "NONE"
+    except Exception:
+        pass
+    scene.cycles.device = "CPU"
+    if requested in ("auto", "gpu"):
+        result["fallback_reason"] = (
+            f"no usable GPU compute device found (tried "
+            f"{', '.join(candidates)}); baked on CPU"
+        )
+    else:
+        result["fallback_reason"] = (
+            f"compute device type {requested.upper()!r} is not available on "
+            f"this host; baked on CPU"
+        )
+    return result
+
+
 def op_bake_materials(params):
     """Bake material colors to image textures so node-driven shaders survive
     glTF export. Requires UVs (smart-projected automatically if missing)."""
@@ -1767,7 +2358,7 @@ def op_bake_materials(params):
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
     scene.cycles.samples = int(params.get("samples", 16))
-    scene.cycles.device = "CPU"
+    device_info = _configure_cycles_device(scene, params.get("device", "auto"))
 
     out_dir = params.get("texture_dir")
     if out_dir:
@@ -1811,7 +2402,7 @@ def op_bake_materials(params):
                 image.save()
             baked.append(f"{obj.name}:{mat.name}")
 
-    result = {"success": True, "baked": baked}
+    result = {"success": True, "baked": baked, "device": device_info}
     if params.get("output"):
         result["path"] = export_any(str(params["output"]))
     return result
@@ -1880,22 +2471,33 @@ def _uv_face_groups(me):
         linked = edge.link_faces
         if len(linked) < 2:
             continue
+        # UV continuity across a shared edge is per-VERTEX. Collecting "the
+        # loop whose outgoing edge is the shared edge" picks ONE corner per
+        # face, and consistent winding puts those two corners at OPPOSITE
+        # ends of the edge — they can never match, so every face became its
+        # own island (2118 "islands" on the mattress, margin-dominated
+        # packing, ~1/3 target texel density). Key the coordinates by vertex
+        # instead and require BOTH endpoints to agree.
         per_face = []
+        ok = True
         for face in linked:
-            coords = []
+            coords = {}
             for loop in face.loops:
-                if loop.edge == edge:
+                if loop.vert in edge.verts:
                     u = loop[uv_lay].uv
-                    coords.append((u.x, u.y))
+                    coords[loop.vert.index] = (u.x, u.y)
+            if len(coords) != 2:
+                ok = False
+                break
             per_face.append((face.index, coords))
+        if not ok:
+            continue
         for a in range(len(per_face)):
             for b in range(a + 1, len(per_face)):
                 fi, ci = per_face[a]
                 fj, cj = per_face[b]
-                if len(ci) != len(cj) or not ci:
-                    continue
-                if all(any(abs(p[0] - q[0]) < eps and abs(p[1] - q[1]) < eps for q in cj)
-                       for p in ci):
+                if all(any(abs(p[0] - q[0]) < eps and abs(p[1] - q[1]) < eps
+                           for q in cj.values()) for p in ci.values()):
                     union(fi, fj)
 
     groups: dict[int, list[int]] = {}
@@ -1955,7 +2557,7 @@ def _shelf_pack(widths, heights, margin):
     return placements, scale  # best effort — the UV diagnostics catch overflow
 
 
-def _pack_uv_atlas(objects, margin=0.01, utilization=0.8):
+def _pack_uv_atlas(objects, margin=0.01, utilization=0.8, priorities=None):
     """Rescale every UV ISLAND for uniform texel density (uv_area ∝ world
     surface area per island), then shelf-pack all islands into the shared
     0-1 atlas.
@@ -1968,13 +2570,29 @@ def _pack_uv_atlas(objects, margin=0.01, utilization=0.8):
     islands are separated by UV seams by definition. The shelf packer's
     uniform overflow shrink preserves the uniformity (everything shrinks
     together). `_uv_diagnostics` re-verifies the result independently,
-    island by island, with an exact rasterized overlap test."""
+    island by island, with an exact rasterized overlap test.
+
+    `priorities` maps object name -> texel-density multiplier (Phase 8
+    item 1: printed text needs many times the density of velvet). An
+    island's target becomes rho * prio^2 * world_area (density scales with
+    sqrt(uv_area), so the multiplier squares), with rho renormalised so
+    the model still uses `utilization` of the atlas — priorities REDISTRIBUTE
+    the atlas budget, they never change total use. Missing names and None
+    behave as 1.0 (the historic uniform pack)."""
+    prio_of = {}
+    if priorities:
+        for k, v in priorities.items():
+            try:
+                prio_of[k] = max(float(v), 1e-3)
+            except (TypeError, ValueError):
+                continue
     entries = []
     for obj in objects:
         me = obj.data
         uv_layer = me.uv_layers.active
         if not uv_layer or not me.polygons:
             continue
+        prio = prio_of.get(obj.name, 1.0)
         world_area = _face_world_areas(obj)
         for face_ids in _uv_face_groups(me):
             minx = miny = 1e9
@@ -1992,18 +2610,20 @@ def _pack_uv_atlas(objects, margin=0.01, utilization=0.8):
                 continue
             entries.append({"obj": obj, "face_ids": face_ids,
                             "bbox": (minx, miny, maxx, maxy),
-                            "uv_area": uv_area, "world_area": w_area})
+                            "uv_area": uv_area, "world_area": w_area,
+                            "prio": prio})
     if not entries:
         return {"objects_packed": 0, "islands_packed": 0,
                 "note": "no UV data to pack"}
 
     avail = 1.0 - 2.0 * margin
-    total_world = sum(e["world_area"] for e in entries)
-    # target uv-area per m^2 so the whole model uses `utilization` of the atlas
-    rho = (avail * avail * utilization) / total_world
+    # target uv-area per m^2 so the whole model uses `utilization` of the
+    # atlas, weighted by each island's priority squared
+    weighted_world = sum(e["world_area"] * e["prio"] * e["prio"] for e in entries)
+    rho = (avail * avail * utilization) / weighted_world
     widths, heights = [], []
     for e in entries:
-        target = rho * e["world_area"]
+        target = rho * e["prio"] * e["prio"] * e["world_area"]
         e["f"] = math.sqrt(target / e["uv_area"])
         (b0x, b0y, b1x, b1y) = e["bbox"]
         widths.append(max((b1x - b0x) * e["f"], 1e-6))
@@ -2139,9 +2759,22 @@ def _island_overlap_exact(objects, islands, resolution):
     return pairs, overlapping_texels
 
 
-def _uv_diagnostics(objects, resolution=1024):
+def _uv_diagnostics(objects, resolution=1024, priorities=None):
     """Mechanical UV evidence (owner T3 brief): zero overlapping islands,
-    all UVs inside 0-1, texel-density variance within a stated bound."""
+    all UVs inside 0-1, texel-density variance within a stated bound.
+
+    `priorities` (object name -> multiplier, see _pack_uv_atlas) splits the
+    density story in two: the RAW ratio evidences the intended spread, and
+    `ratio_priority_weighted` (each island's density divided by its part's
+    priority) is the uniformity metric that must stay ~1.0 — a ratio alone
+    must never be read as starvation when the spread was authored."""
+    prio_of = {}
+    if priorities:
+        for k, v in priorities.items():
+            try:
+                prio_of[k] = max(float(v), 1e-3)
+            except (TypeError, ValueError):
+                continue
     islands = _uv_islands_report(objects, resolution=resolution)
     if not islands:
         return {"islands_total": 0, "verified": False,
@@ -2174,6 +2807,43 @@ def _uv_diagnostics(objects, resolution=1024):
 
     densities = [i["texels_per_m"] for i in islands if i["texels_per_m"] > 0]
     density_ratio = (max(densities) / min(densities)) if len(densities) >= 2 and min(densities) > 0 else 1.0
+    # Uniformity AFTER the authored priorities: each island's density over
+    # its part's multiplier. With all-1.0 priorities this equals the raw
+    # ratio (the historic metric); with a 4x label it stays ~1.0 while the
+    # raw ratio honestly reports the 4x spread.
+    weighted = [i["texels_per_m"] / prio_of.get(i["object"], 1.0)
+                for i in islands if i["texels_per_m"] > 0]
+    weighted_ratio = (max(weighted) / min(weighted)) if len(weighted) >= 2 and min(weighted) > 0 else 1.0
+
+    # Per-object rollup (standing diagnostic): the whole-model density figure
+    # can look healthy while the single largest visible surface starves, and
+    # an object's atlas share only means something next to its share of world
+    # area (hidden geometry — internal caps, coincident faces — inflates the
+    # denominator and eats the atlas budget). Worst texel density first so
+    # the starving surface is the first entry read.
+    total_uv_area = sum(i["uv_area"] for i in islands)
+    total_world_area = sum(i["world_area_m2"] for i in islands)
+    per_object = {}
+    for isl in islands:
+        e = per_object.setdefault(isl["object"], {
+            "islands": 0, "uv_area": 0.0, "world_area_m2": 0.0,
+            "texel_priority": prio_of.get(isl["object"], 1.0),
+            "texels_per_m_island_min": None, "texels_per_m_island_max": 0.0})
+        e["islands"] += 1
+        e["uv_area"] += isl["uv_area"]
+        e["world_area_m2"] += isl["world_area_m2"]
+        d = isl["texels_per_m"]
+        if e["texels_per_m_island_min"] is None or d < e["texels_per_m_island_min"]:
+            e["texels_per_m_island_min"] = d
+        e["texels_per_m_island_max"] = max(e["texels_per_m_island_max"], d)
+    for e in per_object.values():
+        e["atlas_share"] = e["uv_area"] / total_uv_area if total_uv_area > 0 else 0.0
+        e["world_area_share"] = (e["world_area_m2"] / total_world_area
+                                 if total_world_area > 0 else 0.0)
+        e["texels_per_m"] = (resolution * math.sqrt(e["uv_area"] / e["world_area_m2"])
+                             if e["world_area_m2"] > 1e-12 else 0.0)
+    per_object = dict(sorted(per_object.items(),
+                             key=lambda kv: kv[1]["texels_per_m"]))
 
     return {
         "islands_total": len(islands),
@@ -2188,7 +2858,9 @@ def _uv_diagnostics(objects, resolution=1024):
             "min": min(densities) if densities else 0.0,
             "max": max(densities) if densities else 0.0,
             "ratio": density_ratio,
+            "ratio_priority_weighted": weighted_ratio,
         },
+        "texel_density_per_object": per_object,
         "islands": islands,
         "verified": bool(in_bounds and not overlaps),
     }
@@ -2237,8 +2909,20 @@ def op_prepare_delivery_scene(params):
             }
 
     resolution = int(params.get("resolution", 1024))  # density-reporting resolution
-    atlas = _pack_uv_atlas(obj_list, margin=float(params.get("uv_margin", 0.01)))
-    diag = _uv_diagnostics(obj_list, resolution=resolution)
+    # Phase 8 item 1: per-part texel priorities authored on the spec ride in
+    # through the build params (resolver passthrough) and redistribute the
+    # atlas budget — the packer renormalises, so total atlas use is unchanged.
+    priorities = {}
+    spec_parts = (build_params.get("spec") or {}).get("parts") or []
+    for p in spec_parts:
+        if isinstance(p, dict) and p.get("texel_priority") is not None:
+            try:
+                priorities[p["name"]] = float(p["texel_priority"])
+            except (TypeError, ValueError):
+                continue
+    atlas = _pack_uv_atlas(obj_list, margin=float(params.get("uv_margin", 0.01)),
+                           priorities=priorities)
+    diag = _uv_diagnostics(obj_list, resolution=resolution, priorities=priorities)
 
     out_blend = params.get("out_blend")
     if out_blend:
@@ -2250,6 +2934,8 @@ def op_prepare_delivery_scene(params):
         "success": True,
         "part_names": result.get("part_names", []),
         "warnings": result.get("warnings", []),
+        "weld": result.get("weld", {}),
+        "retopology": result.get("retopology", {}),
         "triangulated_as_last_resort": triangulated,
         "topology": {"triangles": tris, "quads": quads, "ngons": ngons,
                      "triangle_equivalent": tri_eq, "faces_total": faces, "vertices": verts},
@@ -2581,7 +3267,14 @@ def op_bake_maps(params):
         os.makedirs(out_dir, exist_ok=True)
     maps = params.get("maps") or list(_BAKE_MAP_SPECS.keys())
     resolution = int(params.get("resolution", 1024))
-    margin_px = int(params.get("margin", 16))
+    # Bake margin must stay BELOW the atlas packer's island gap
+    # (uv_margin 0.01 UV = 0.01 * resolution px) or island-border values
+    # bleed across islands. On the mattress the internal coincident band
+    # caps bake black; a 16 px margin over the ~10 px gaps at 1024 let
+    # that black overwrite most of the 5-8-texel wall islands (the
+    # black-and-white blotch defect). resolution // 128 keeps the bleed
+    # under half the gap at every power-of-two size.
+    margin_px = int(params.get("margin", max(4, resolution // 128)))
     samples = int(params.get("samples", 16))
     hp_levels = int(params.get("hp_levels", 2))
     normal_g = str(params.get("normal_g", "POS"))
@@ -2625,7 +3318,17 @@ def op_bake_maps(params):
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
     scene.cycles.samples = samples
-    scene.cycles.device = "CPU"
+    device_info = _configure_cycles_device(scene, params.get("device", "auto"))
+    if device_info.get("fallback_reason"):
+        warnings.append(device_info["fallback_reason"])
+    # Persistent data keeps the Cycles session (BVH) alive across the MANY
+    # bpy.ops.object.bake calls this op makes (~20: per-object AO, caged
+    # normal, per-map self-bakes). Without it every call rebuilds the
+    # session — cheap on CPU, expensive enough on OptiX/CUDA to make a 4K
+    # GPU bake SLOWER than CPU (measured: 590 s vs 531 s at 4K before this
+    # flag; see output/bakeoff/bake_device_bench.json). One process per op
+    # means the session dies with the process — no cross-op contamination.
+    scene.cycles.use_persistent_data = bool(params.get("persistent_data", False))
 
     bounds = get_mesh_bounds(lp_objs)
     max_dim = max(bounds["dimensions"]) if bounds else 1.0
@@ -2720,7 +3423,11 @@ def op_bake_maps(params):
             min_dim = min(bb[1][i] - bb[0][i] for i in range(3)) if bb else bevel_width
             part_bevel = part_detail.get("bevel_width")
             width = max(min(part_bevel if part_bevel else bevel_width, 0.05 * min_dim), 1e-5)
-            part_levels = int(part_detail.get("subdivision_levels") or hp_levels)
+            # explicit 0 is meaningful (bevel-only HP — real LP geometry must
+            # not be subsurf-smoothed away in the bake); only an absent key
+            # falls back to the scene default
+            raw_levels = part_detail.get("subdivision_levels")
+            part_levels = hp_levels if raw_levels is None else int(raw_levels)
             select_only([obj])
             bpy.ops.object.duplicate()
             hp = bpy.context.active_object
@@ -2733,10 +3440,13 @@ def op_bake_maps(params):
             select_only([hp])
             bpy.ops.object.shade_smooth()
             bpy.ops.object.modifier_apply(modifier=bev.name)
-            sub = hp.modifiers.new(name="ThreedHPSubdiv", type="SUBSURF")
-            sub.levels = part_levels
-            sub.render_levels = part_levels
-            bpy.ops.object.modifier_apply(modifier=sub.name)
+            if part_levels > 0:
+                # levels=0 leaves the modifier "disabled" — modifier_apply
+                # then raises; a bevel-only HP simply skips subsurf
+                sub = hp.modifiers.new(name="ThreedHPSubdiv", type="SUBSURF")
+                sub.levels = part_levels
+                sub.render_levels = part_levels
+                bpy.ops.object.modifier_apply(modifier=sub.name)
             _displace_along_normals(hp, max(0.002 * min_dim, 1e-5))
             if part_detail.get("displacement"):
                 _apply_pattern_displacement(hp, part_detail["displacement"])
@@ -2890,6 +3600,7 @@ def op_bake_maps(params):
         "ray_distance_m": ray_distance,
         "resolution": resolution,
         "samples": samples,
+        "device": device_info,
     }
 
 
@@ -2964,6 +3675,7 @@ DISPATCH = {
     "convert": op_convert,
     "decimate": op_decimate,
     "generate_uvs": op_generate_uvs,
+    "uv_report": op_uv_report,
     "scale_to_exact_bounds": op_scale_to_exact_bounds,
     "center_origin": op_center_origin,
     "apply_material": op_apply_material,

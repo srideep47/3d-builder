@@ -19,11 +19,13 @@ from typing import Any
 from ..ai.aptos import AptosGLMProvider, extract_json_from_text, vision_user_content
 from ..ai.schemas import ChatMessage
 from ..blender.runner import BlenderRunner
+from ..client.units import to_metres
 from ..run_store import RunManifest, RunStore
 from ..spec.resolver import resolve_spec_to_build_params
 from ..spec.schema import GenerationMethod, ObjectSpec, ShapeType
 from ..spec.validation import validate_spec_structure
 from .prompts import ANALYST_SYSTEM_PROMPT, CORRECTOR_SYSTEM_PROMPT
+from .tools import advisory_visual_verdict
 from .verifier import VerificationReport, Verifier
 
 
@@ -32,6 +34,71 @@ def _safe_filename(name: str) -> str:
     keep = [c if (c.isalnum() or c in "-_") else "_" for c in name.strip()]
     stem = "".join(keep).strip("_") or "part"
     return stem[:80]
+
+
+# Phase 5 owner-texture library: the directory the owner drops scanned
+# surfaces into (master order Phase 4). Auto-detected so callers change
+# nothing; an explicit AgentLoop(owner_texture_root=...) wins.
+_DEFAULT_OWNER_TEXTURE_ROOT = Path("input/textures/owner")
+
+
+def _iteration_cap_report(
+    max_iterations: int,
+    iterations_run: int,
+    verification: VerificationReport | None,
+    last_error: str | None,
+) -> dict[str, Any]:
+    """Phase 5 closed-loop contract: on iteration-cap exhaustion, report
+    exactly what failed with the evidence. Never claim a success you cannot
+    evidence — the manifest carries this verbatim."""
+    report: dict[str, Any] = {
+        "max_iterations": max_iterations,
+        "iterations_run": iterations_run,
+    }
+    if verification is not None:
+        dim = verification.dimension_gate
+        mesh = verification.mesh_gate
+        report["dimension_gate"] = {
+            "passed": dim.passed,
+            "measurements_checked": dim.measurements_checked,
+            "passed_count": dim.passed_count,
+            "failed_count": dim.failed_count,
+            "max_delta_m": dim.max_delta_m,
+            "failed_details": [d for d in dim.details if not d.get("passed")],
+            "ground_contact_passed": dim.ground_contact_passed,
+            "ground_contact_failures": dim.ground_contact_failures,
+        }
+        report["mesh_gate"] = {
+            "passed": mesh.passed,
+            "faces_count": mesh.faces_count,
+            "warnings": list(mesh.warnings),
+            "errors": list(mesh.errors),
+        }
+        failures = []
+        if not dim.passed:
+            failures.append(
+                f"dimension gate FAILED ({dim.passed_count}/"
+                f"{dim.measurements_checked} measurements passed, max delta "
+                f"{dim.max_delta_m * 1000.0:.2f} mm)"
+            )
+        if not mesh.passed:
+            failures.append(
+                f"mesh gate FAILED ({mesh.faces_count} faces; warnings: "
+                f"{'; '.join(mesh.warnings) or 'none'})"
+            )
+        report["message"] = (
+            f"Iteration cap ({max_iterations}) reached without passing gates: "
+            + "; ".join(failures)
+            + ". Stopped per the closed-loop contract; no success is claimed."
+        )
+    else:
+        report["last_error"] = last_error
+        report["message"] = (
+            f"Iteration cap ({max_iterations}) reached without a verified "
+            f"build: {last_error or 'unknown error'}. Stopped per the "
+            "closed-loop contract; no success is claimed."
+        )
+    return report
 
 
 @dataclass
@@ -55,14 +122,29 @@ class AgentLoop:
         verifier: Verifier | None = None,
         run_store: RunStore | None = None,
         max_iterations: int | None = None,
+        owner_texture_root: str | Path | None = None,
     ):
         self.provider = provider or AptosGLMProvider()
         self.runner = runner or BlenderRunner()
         self.verifier = verifier or Verifier()
         self.run_store = run_store or RunStore()
+        # Set by _correct_spec when the corrector gives up; read at the
+        # break sites so the manifest records the reason.
+        self.last_correction_failure: str | None = None
         agent_cfg = self.provider.config.get("agent", {}) or {}
-        self.max_iterations = max_iterations or int(agent_cfg.get("max_iterations", 5))
+        # Phase 5 master order: "Hard iteration cap, start at 8."
+        self.max_iterations = max_iterations or int(agent_cfg.get("max_iterations", 8))
         self.wall_clock_budget_s = float(agent_cfg.get("wall_clock_budget_s", 900))
+        # Phase 5: owner-supplied texture library for brain selection —
+        # explicit root wins, else auto-detect the default drop directory.
+        if owner_texture_root is not None:
+            self.owner_texture_root = Path(owner_texture_root)
+        else:
+            self.owner_texture_root = (
+                _DEFAULT_OWNER_TEXTURE_ROOT
+                if _DEFAULT_OWNER_TEXTURE_ROOT.is_dir()
+                else None
+            )
         # img3d (neural image-to-3D) provider — resolved lazily on first use so
         # builds without organic parts never touch the service.
         self._img3d_provider = None
@@ -102,10 +184,50 @@ class AgentLoop:
         """Deterministic routing fix: 'organic' shapes cannot be built
         parametrically — if the analyst/corrector left method as 'parametric'
         on one, route it to image_to_3d (the harness would otherwise fail with
-        'Unknown shape organic')."""
+        'Unknown shape organic'). A part that already declares a file-backed
+        source (imported/scanned) KEEPS it: an organic mesh that exists as a
+        file is legitimately imported — clobbering it would retarget the part
+        at a neural generation it never asked for (mesh-source contract)."""
         for p in spec.parts:
-            if p.shape == ShapeType.ORGANIC and p.method != GenerationMethod.IMAGE_TO_3D:
+            if p.shape == ShapeType.ORGANIC and p.method in (
+                GenerationMethod.PARAMETRIC,
+                GenerationMethod.CUSTOM_SCRIPT,
+            ):
                 p.method = GenerationMethod.IMAGE_TO_3D
+
+    def _validate_imported_parts(self, spec: ObjectSpec, emit=None) -> None:
+        """Mesh-source contract, loop side: imported/scanned parts carry
+        authored mesh files — nothing generates them, so a missing file is
+        unsatisfiable (unlike neural parts, where the service materializes
+        the mesh). Resolve each path to ABSOLUTE (the harness subprocess must
+        not depend on the caller's CWD) and fire a loud event when the file
+        is absent; the build then skips the part (harness warning) and the
+        gates fail honestly downstream."""
+        imported_parts = [
+            p for p in spec.parts
+            if p.method in (GenerationMethod.IMPORTED, GenerationMethod.SCANNED)
+        ]
+        for part in imported_parts:
+            if not part.mesh_path:
+                continue  # schema already refuses this; nothing to resolve
+            p = Path(part.mesh_path)
+            if p.exists():
+                resolved = str(p.resolve())
+                if resolved != part.mesh_path:
+                    part.mesh_path = resolved
+                continue
+            if emit is not None:
+                try:
+                    emit(
+                        "mesh_source_error",
+                        part=part.name,
+                        method=part.method.value,
+                        mesh_path=str(p),
+                        error="mesh file not found — the spec references a file "
+                              "that does not exist on this machine",
+                    )
+                except Exception:
+                    pass
 
     def _resolve_part_image(self, spec: ObjectSpec, part, image_paths: list[Path]) -> Path | None:
         """Best reference image for an image_to_3d part: its declared crop,
@@ -215,31 +337,156 @@ class AgentLoop:
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
+    def _owner_texture_section(self) -> str | None:
+        """The owner-supplied texture library as a selection menu for the
+        analyst (master order Phase 4/5): index the drop directory
+        (deterministic, writes index.json) and list every scanned surface
+        with its exact texture_dir path. None when no library exists — the
+        analyst then uses material presets exactly as before. The brain may
+        only pick from this list or the presets: never a diffusion-generated
+        texture, never an invented path."""
+        root = self.owner_texture_root
+        if root is None or not root.is_dir():
+            return None
+        try:
+            from ..textures.owner_index import index_owner_textures
+
+            index = index_owner_textures(Path(root))
+        except Exception:
+            return None
+        surfaces = index.get("surfaces") or []
+        if not surfaces:
+            return None
+        lines = ["OWNER TEXTURE LIBRARY (scanned surfaces — preferred over presets):"]
+        for s in surfaces:
+            maps = ", ".join(sorted((s.get("maps") or {}).keys()))
+            res = s.get("min_resolution_px")
+            lines.append(
+                f'- "{s["name"]}": texture_dir="{s["path"]}" '
+                f"(maps: {maps or 'none'}; min resolution: {res if res is not None else '?'} px)"
+            )
+        lines.append(
+            "Selection contract: when a part's material matches a scanned "
+            'surface, set that part material\'s "texture_dir" to the exact '
+            "listed path (verbatim) alongside its preset. Pick the closest "
+            "surface by look, not by name. NEVER invent a texture_dir that "
+            "was not listed and NEVER use a diffusion-generated texture — "
+            "only these scans or the material presets."
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _measured_geometry_table(measure_res: dict | None) -> str:
+        """Compact per-part measured geometry for the corrector.
+
+        Gate deltas alone leave part repositioning to guesswork: the
+        corrector knows the dome is 65 mm too tall but not where the dome
+        part actually sits. The measured centers and extents make the fix
+        computable (Phase 6: the mailbox dome)."""
+        if not measure_res:
+            return ""
+        lines = ["", "Measured geometry of the last build (meters):"]
+        overall = measure_res.get("overall") or {}
+        if overall.get("dimensions") is not None:
+            dims = [round(float(v), 4) for v in overall["dimensions"]]
+            lines.append(f"  overall: dims {dims}")
+        for name, p in sorted((measure_res.get("parts") or {}).items()):
+            dims = [round(float(v), 4) for v in p.get("dimensions") or []]
+            center = [round(float(v), 4) for v in p.get("center") or []]
+            lines.append(
+                f"  {name}: dims {dims} center {center} "
+                f"bottom_z {round(float(p.get('bottom_z', 0.0)), 4)} "
+                f"top_z {round(float(p.get('top_z', 0.0)), 4)}"
+            )
+        if len(lines) <= 1:
+            return ""
+        return "\n".join(lines)
+
     def _correct_spec(self, current_spec: ObjectSpec, instruction: str) -> ObjectSpec | None:
-        """Ask the corrector for a fixed spec. Returns a validated spec or None."""
+        """Ask the corrector for a fixed spec. Returns a validated spec or None.
+
+        A corrector response that fails JSON extraction or spec validation is
+        a transient output failure, not a "cannot fix" verdict: one retry
+        with the reason quoted back precedes giving up. The final failure
+        reason is left in self.last_correction_failure so the run record can
+        say WHY the corrector stopped — a silent give-up is unreportable
+        (Phase 6: the mailbox run died at iteration 2 with no trace)."""
+        self.last_correction_failure = None
         user_prompt = (
             f"{instruction}\n\n"
             f"Current ObjectSpec:\n{current_spec.model_dump_json(indent=2)}\n\n"
             "Return the complete corrected ObjectSpec JSON and nothing else."
         )
-        _, parsed = self.provider.complete_json(
-            system_prompt=CORRECTOR_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            role="corrector",
-        )
-        if not parsed:
-            return None
-        try:
-            return ObjectSpec.model_validate(parsed)
-        except Exception:
-            return None
+        failure = ""
+        for _ in range(2):
+            prompt = user_prompt
+            if failure:
+                prompt += (
+                    f"\n\nYour previous response was rejected: {failure} "
+                    "Return ONLY the complete corrected ObjectSpec JSON."
+                )
+            content, parsed = self.provider.complete_json(
+                system_prompt=CORRECTOR_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                role="corrector",
+            )
+            if not parsed:
+                failure = (
+                    "corrector response did not contain parseable JSON "
+                    f"(content length {len(content or '')})"
+                )
+            else:
+                try:
+                    return ObjectSpec.model_validate(parsed)
+                except Exception as e:
+                    failure = f"corrector spec failed validation: {str(e)[:300]}"
+            self.last_correction_failure = failure
+        return None
 
-    def _analyst_spec(self, prompt: str, measurements_text: str, images: list[Path]) -> tuple[ObjectSpec | None, str]:
+    def _job_card_section(self, job_card) -> str:
+        """Delivery contract from the client job card (Phase 7 cold-path fix).
+
+        The internal dimension gate verifies the analyst's own declared
+        bindings, so without the card's axis convention a correctly-sized
+        model rotated 90° about Z passes the whole loop and only fails at
+        package time. Stating the binding makes the analyst orient the spec
+        correctly; the card-axis gate in verify_run catches any remainder."""
+        attr_by_axis = {
+            "x": "overall.width_x", "y": "overall.depth_y", "z": "overall.height_z",
+        }
+        lines = [
+            "CLIENT JOB CARD CONTRACT (delivery-critical):",
+            f"- Job {job_card.job_code}: the client measures the finished "
+            "model's OVERALL extents through the job card's axis map:",
+        ]
+        for dim_name in ("length", "width", "height"):
+            axis = str(getattr(job_card.axis_map, dim_name)).lower()
+            value_m = to_metres(getattr(job_card.dims, dim_name), job_card.dims.unit)
+            lines.append(
+                f"- {dim_name.upper()} = {value_m:.4f} m is the overall extent "
+                f"along the {axis.upper()} axis (bind it with applies_to "
+                f"'{attr_by_axis[axis]}')."
+            )
+        lines.append(
+            "- A model that matches every stated dimension but is rotated "
+            "relative to this axis convention FAILS client delivery — orient "
+            "the parts so the overall extents land on the card's axes."
+        )
+        return "\n".join(lines)
+
+    def _analyst_spec(
+        self, prompt: str, measurements_text: str, images: list[Path], job_card=None
+    ) -> tuple[ObjectSpec | None, str]:
         """Ask the analyst for an initial ObjectSpec. Sends reference images as
         vision content when the endpoint supports it."""
         user_text = f"User Request:\n{prompt}\n"
         if measurements_text:
             user_text += f"\nExact Measurements Required:\n{measurements_text}\n"
+        if job_card is not None:
+            user_text += f"\n{self._job_card_section(job_card)}\n"
+        owner_textures = self._owner_texture_section()
+        if owner_textures:
+            user_text += f"\n{owner_textures}\n"
         if images:
             paths = ", ".join(str(p) for p in images)
             user_text += (
@@ -324,13 +571,18 @@ class AgentLoop:
         run_dir: str | Path | None = None,
         progress=None,
         cancel=None,
+        job_card=None,
+        route_decision: dict | None = None,
     ) -> AgentRunResult:
         """Execute the full build-measure-verify loop.
 
         progress: optional callable(dict) receiving live stage events
           ({"event": "analyst_done", ...}) — used by the web UI.
         cancel: optional callable() -> bool, checked between stages.
-        run_dir: reuse an existing run directory instead of creating one."""
+        run_dir: reuse an existing run directory instead of creating one.
+        route_decision: §4.0.5 router output — recorded verbatim in the
+          manifest (metrics.route) and emitted as a route_decided event, so
+          a disputed asset always shows which path built it and why."""
         started = time.time()
         if run_dir is not None:
             run_dir = Path(run_dir)
@@ -363,7 +615,11 @@ class AgentLoop:
             prompt=prompt,
             measurements=measurements_text,
             images=[str(p) for p in image_paths],
+            job_code=job_card.job_code if job_card is not None else None,
         )
+        if route_decision is not None:
+            emit("route_decided", route=route_decision.get("route"),
+                 reason=route_decision.get("reason"), forced=route_decision.get("forced", False))
 
         # Step 1: obtain the initial ObjectSpec.
         if spec_override:
@@ -371,7 +627,7 @@ class AgentLoop:
             emit("analyst_done", source="user_spec", spec=json.loads(current_spec.model_dump_json()))
         else:
             emit("analyst_started")
-            spec_obj, raw = self._analyst_spec(prompt, measurements_text, image_paths)
+            spec_obj, raw = self._analyst_spec(prompt, measurements_text, image_paths, job_card=job_card)
             if spec_obj is None:
                 emit("analyst_error", error=raw[:2000])
                 return self._finish(
@@ -386,6 +642,7 @@ class AgentLoop:
                     started=started,
                     emit=emit,
                     user_cancelled=cancelled(),
+                    route_decision=route_decision,
                 )
             current_spec = spec_obj
             emit(
@@ -396,8 +653,10 @@ class AgentLoop:
 
         # Neural parts: generate meshes via the local img3d service before the
         # build loop (parametric parts need nothing here — zero overhead).
+        # Imported/scanned parts: resolve + loud-check their authored files.
         self._normalize_spec_methods(current_spec)
         self._prepare_neural_parts(current_spec, run_dir, image_paths, emit, cancelled)
+        self._validate_imported_parts(current_spec, emit)
 
         # Step 2: iterative build-measure-verify loop.
         iteration = 0
@@ -431,13 +690,18 @@ class AgentLoop:
                     emit("correction_done", fixed=True)
 
             # The corrector rewrites the whole spec; restore neural mesh_path
-            # from this run's cache before building.
+            # from this run's cache before building, and re-resolve imported
+            # part paths (the rewrite may re-emit them).
             self._normalize_spec_methods(current_spec)
             self._reattach_neural_meshes(current_spec, run_dir)
+            self._validate_imported_parts(current_spec, emit)
 
-            build_params = resolve_spec_to_build_params(current_spec, output_glb_path=str(step_glb.resolve()))
-            emit("build_started", index=iteration, parts=[p.name for p in current_spec.parts])
             try:
+                # Spec-to-params resolution is part of the build: a spec that
+                # parses but crashes the resolver is a build error the
+                # corrector can fix, never a reason to kill the run.
+                build_params = resolve_spec_to_build_params(current_spec, output_glb_path=str(step_glb.resolve()))
+                emit("build_started", index=iteration, parts=[p.name for p in current_spec.parts])
                 self.runner.execute_op("build_from_spec", build_params)
             except Exception as e:
                 last_error = str(e)
@@ -446,12 +710,16 @@ class AgentLoop:
                     break
                 fixed = self._correct_spec(
                     current_spec,
-                    f"Blender build failed with this error:\\n{last_error[:1500]}",
+                    f"Build failed with this error:\\n{last_error[:1500]}",
                 )
                 if fixed:
                     current_spec = fixed
                     emit("correction_done", fixed=True, after="build_error")
                     continue
+                if self.last_correction_failure:
+                    last_error += (
+                        "\nCorrector gave up: " + self.last_correction_failure
+                    )
                 break
             emit("build_done", index=iteration, step_glb=str(step_glb))
 
@@ -475,15 +743,23 @@ class AgentLoop:
             )
 
             try:
-                render_res = self.runner.execute_op(
-                    "render_views",
-                    {
-                        "model_path": step_path,
-                        "views": ["front", "side", "top", "iso"],
-                        "output_dir": str(renders_dir.resolve()),
-                        "prefix": f"step_{iteration}",
-                    },
-                )
+                render_params: dict[str, Any] = {
+                    "model_path": step_path,
+                    "views": ["front", "side", "top", "iso"],
+                    "output_dir": str(renders_dir.resolve()),
+                    "prefix": f"step_{iteration}",
+                }
+                # Phase 5: render the spec's review close-ups alongside the
+                # overviews so the visual gate sees label/border detail at
+                # full resolution (never downscaled — vlm.py policy).
+                closeups = [
+                    {"name": c.name, "part": c.part, "direction": c.direction,
+                     "pad": c.pad, "frame": c.frame}
+                    for c in (getattr(current_spec, "review_closeups", None) or [])
+                ]
+                if closeups:
+                    render_params["closeups"] = closeups
+                render_res = self.runner.execute_op("render_views", render_params)
                 rendered_views = render_res.get("views", rendered_views)
                 emit("render_done", index=iteration, views=rendered_views)
             except Exception as e:
@@ -494,6 +770,7 @@ class AgentLoop:
                 spec=current_spec,
                 measurement_data=measure_res,
                 glb_path=step_glb,
+                job_card=job_card,
             )
             emit(
                 "verification",
@@ -524,14 +801,42 @@ class AgentLoop:
             emit("correction_started", reason="gate failures", feedback=latest_verification.feedback_for_agent[:1500])
             fixed = self._correct_spec(
                 current_spec,
-                f"Verification results for step {iteration}:\\n{latest_verification.feedback_for_agent}",
+                f"Verification results for step {iteration}:\\n{latest_verification.feedback_for_agent}"
+                + self._measured_geometry_table(measure_res),
             )
             if fixed:
                 current_spec = fixed
                 emit("correction_done", fixed=True)
             else:
                 last_error = latest_verification.feedback_for_agent
+                if self.last_correction_failure:
+                    last_error += (
+                        "\nCorrector gave up: " + self.last_correction_failure
+                    )
                 break
+
+        # Phase 5 closed loop: a run that exhausts the iteration cap without
+        # passing gates must say so explicitly. Without this, a cap-exhausted
+        # run whose corrector "fixed" the spec on the final iteration would
+        # exit the while loop with last_error=None and report
+        # completed_with_warnings + unresolved_error: null — a silent,
+        # unevidenced near-success. The master order: "On cap: stop, report
+        # exactly what failed with the evidence."
+        passed = bool(latest_verification and latest_verification.passed)
+        iteration_cap_hit = (
+            not passed
+            and iteration >= self.max_iterations
+            and not budget_exhausted
+            and not cancelled()
+        )
+        cap_report = None
+        if iteration_cap_hit:
+            cap_report = _iteration_cap_report(
+                self.max_iterations, iteration, latest_verification, last_error
+            )
+            if not last_error:
+                last_error = cap_report["message"]
+            emit("iteration_cap_hit", **cap_report)
 
         # Keep the last good artifact even when gates did not pass.
         if not final_glb_path.exists():
@@ -555,12 +860,18 @@ class AgentLoop:
             emit=emit,
             user_cancelled=cancelled(),
             visual_verdict=visual_verdict,
+            iteration_cap_hit=iteration_cap_hit,
+            cap_report=cap_report,
+            route_decision=route_decision,
         )
 
     def _run_visual_gate(self, rendered_views, image_paths, spec, emit) -> dict | None:
         """Advisory visual gate (PROJECT_PLAN §13.1.2): compare the studio
         renders against the reference images with the local VLM; the verdict
-        is recorded in the manifest but never blocks the run."""
+        is recorded in the manifest but never blocks the run.
+
+        Escalation lives in tools.advisory_visual_verdict (docs/VISION_CONFIG.md
+        §3, shared with the review tool so the policy cannot drift)."""
         if not rendered_views or not image_paths:
             return None
         vlm = self._get_vlm()
@@ -571,7 +882,7 @@ class AgentLoop:
             return None
         try:
             summary = f"{spec.name}: {len(spec.parts)} parts" if spec is not None else ""
-            verdict = vlm.visual_verdict(rendered_views, refs, model_summary=summary)
+            verdict = advisory_visual_verdict(vlm, rendered_views, refs, model_summary=summary)
         except Exception as e:
             verdict = {"available": True, "parsed": False, "error": str(e)[:400]}
         if emit is not None:
@@ -596,6 +907,9 @@ class AgentLoop:
         emit=None,
         user_cancelled: bool = False,
         visual_verdict: dict | None = None,
+        iteration_cap_hit: bool = False,
+        cap_report: dict | None = None,
+        route_decision: dict | None = None,
     ) -> AgentRunResult:
         passed = bool(verification and verification.passed)
         self.run_store.save_spec(run_dir, spec)
@@ -603,6 +917,8 @@ class AgentLoop:
         status = "completed" if passed else "completed_with_warnings"
         if budget_exhausted and not passed:
             status = "budget_exhausted"
+        if iteration_cap_hit and not passed:
+            status = "iteration_cap_exhausted"
         if user_cancelled and not passed:
             status = "cancelled"
 
@@ -625,6 +941,10 @@ class AgentLoop:
                 "mesh_warnings": verification.mesh_gate.warnings if verification else [],
                 "unresolved_error": error,
                 "visual_verdict": visual_verdict,
+                "iteration_cap_hit": iteration_cap_hit,
+                "cap_report": cap_report,
+                # §4.0.5: which path built this asset and why — every run
+                "route": route_decision,
             },
             status=status,
         )
@@ -644,6 +964,7 @@ class AgentLoop:
                     tri_count=manifest.tri_count,
                     error=error,
                     wall_clock_s=manifest.metrics["wall_clock_s"],
+                    route=route_decision,
                 )
             except Exception:
                 pass

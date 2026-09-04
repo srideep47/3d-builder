@@ -20,6 +20,7 @@ from .base import GenerateOutput, GenerateParams, NeuralBackend
 
 class MockBackend(NeuralBackend):
     name = "mock"
+    uses_gpu = False  # never queue behind (or hold up) real GPU tenants
 
     def __init__(self, models_dir=None):
         self.models_dir = models_dir
@@ -32,13 +33,15 @@ class MockBackend(NeuralBackend):
 
     def generate(self, params: GenerateParams) -> GenerateOutput:
         started = time.perf_counter()
+        assert params.output_dir is not None
         params.output_dir.mkdir(parents=True, exist_ok=True)
+        front = params.resolve_views()["front"]
 
-        # Seed from image content so the same reference always yields the
-        # same shape (deterministic runs, cache-friendly benchmarks).
+        # Seed from the front image content so the same reference always
+        # yields the same shape (deterministic runs, cache-friendly benchmarks).
         seed = params.seed
         if seed is None:
-            digest = hashlib.sha256(params.image_path.read_bytes()).digest()
+            digest = hashlib.sha256(front.read_bytes()).digest()
             seed = int.from_bytes(digest[:4], "little")
         rng = np.random.default_rng(seed)
 
@@ -67,7 +70,7 @@ class MockBackend(NeuralBackend):
         except Exception:
             pass  # fast-simplification optional; mock meshes are already low-poly
 
-        out_path = params.output_dir / f"{params.image_path.stem}_mock.glb"
+        out_path = params.output_dir / f"{front.stem}_mock.glb"
         blob.export(out_path)
 
         return GenerateOutput(

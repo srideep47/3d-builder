@@ -1,0 +1,17 @@
+# RIGTUNE0001 — review-rig physics fixture (Phase 8 item 2).
+# NOT a product job: these dimensions are AUTHORED for the fixture so the
+# crown quilt has realistic flat-mattress proportions (17 cells over 2 m =
+# ~118 mm puffs, gentle pillowtop dome). The MAYA product card stays
+# dims_placeholder: true (rule 9) — nothing here infers anything about it.
+job_code: RIGTUNE0001
+product_class: mattress
+dims:
+  length: 2000
+  width: 1200
+  height: 300
+  unit: MM
+dims_placeholder: false
+complexity: simple
+orientation: floor
+part_scope: "mattress only (fixture)"
+reference_dir: input/references/MAYA00053153

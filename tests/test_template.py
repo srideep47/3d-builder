@@ -49,12 +49,13 @@ def _part(spec, name):
 
 
 def test_mattress_template_loads_and_validates(mattress):
-    # §5.2 structure: crown + air-mesh + 3 velvet + 2 knit ribs + base
+    # §5.2 structure (round-4 correction, reviewer's re-read): crown +
+    # air-mesh + knit rib + ONE velvet mass (two faint seams inside) +
+    # knit rib + base — NO white ribs between velvet bands
     assert mattress.product_class == "mattress"
-    assert len(mattress.bands) == 8
+    assert len(mattress.bands) == 6
     assert [b.name for b in mattress.bands] == [
-        "crown", "air_mesh", "velvet_1", "knit_1",
-        "velvet_2", "knit_2", "velvet_3", "base",
+        "crown", "air_mesh", "knit_top", "velvet", "knit_bottom", "base",
     ]
     assert len(mattress.tape_edges) == 3  # §5.2 bands 2/4/6
     assert mattress.crown is not None and mattress.crown.quilt is not None
@@ -135,8 +136,9 @@ def test_bands_stack_to_full_height(compiled):
     ez = job.expected_bounds_m()["z"]
     band_parts = [p for p in compiled.parts
                   if p.name != "decal_patch"
-                  and not p.name.startswith("tape_")]
-    assert len(band_parts) == 8
+                  and not p.name.startswith("tape_")
+                  and not p.name.startswith("handle_")]
+    assert len(band_parts) == 6
     assert sum(p.dimensions[2] for p in band_parts) == pytest.approx(ez, abs=1e-6)
     # and they stack: sorted by z-base, bases chain exactly
     ordered = sorted(band_parts, key=lambda p: p.position[2])
@@ -156,22 +158,32 @@ def test_crown_compiles_to_script_dome(compiled):
 
 
 def test_crown_quilt_references_cell_size(compiled, mattress):
-    """Quilt amplitude is a fraction of one quilt CELL (footprint / cells),
-    not of the mattress height — scale-invariant puff depth. Cells are
-    square in metres: frequency_y follows the footprint aspect."""
+    """Round-3 rework: the quilt is REAL LP geometry baked into the crown
+    script. The puff AMPLITUDE is a fraction of one quilt CELL (footprint /
+    cells), not of the mattress height — scale-invariant puff depth — and
+    the profile is lowered by exactly that amplitude so peaks land on the
+    nominal band top (bounds contract). Cross-cell count follows the
+    footprint aspect (whole cells, square in metres). The HP must not
+    subsurf-smooth the puffs away: subdivision_levels=0 (bevel-only)."""
     job = load_job(JOB)
     bounds = job.expected_bounds_m()
-    ex, ey, ez = bounds["x"], bounds["y"], bounds["z"]
+    ex, ey = bounds["x"], bounds["y"]
     q = mattress.crown.quilt
-    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * ez
-    cell = (ex - 2 * p_max) / q.cells_across
+    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * min(bounds.values())
+    a_body = ex / 2 - p_max
+    b_body = ey / 2 - p_max
+    amp = q.amplitude_fraction * (2 * a_body / q.cells_across)
     crown = _part(compiled, "crown")
+    # bevel-only HP: explicit zero, not the absent-key default
     assert crown.detail is not None
-    assert crown.detail.displacement.amplitude == pytest.approx(
-        q.amplitude_fraction * cell)
-    assert crown.detail.displacement.frequency_y == pytest.approx(
-        crown.detail.displacement.frequency * ey / ex)
-    assert crown.detail.displacement.restrict == "up"  # LP bounds never move
+    assert crown.detail.subdivision_levels == 0
+    assert crown.detail.displacement is None
+    # tokens substituted into the script: amplitude, lowered profile, cells
+    assert crown.code and "__AMP__" not in crown.code
+    assert f"AMP = {amp!r}" in crown.code
+    assert f"H = {crown.dimensions[2] - amp!r}" in crown.code
+    assert f"CX = {q.cells_across}" in crown.code
+    assert f"CY = {round(q.cells_across * b_body / a_body)}" in crown.code
 
 
 def test_bands_inset_by_tape_protrusion(compiled, mattress):
@@ -179,8 +191,8 @@ def test_bands_inset_by_tape_protrusion(compiled, mattress):
     tapes' outer faces land exactly on the nominal L/W silhouette."""
     job = load_job(JOB)
     bounds = job.expected_bounds_m()
-    ex, ey, ez = bounds["x"], bounds["y"], bounds["z"]
-    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * ez
+    ex, ey = bounds["x"], bounds["y"]
+    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * min(bounds.values())
     body = _part(compiled, "air_mesh")
     assert body.dimensions[0] == pytest.approx(ex - 2 * p_max)
     assert body.dimensions[1] == pytest.approx(ey - 2 * p_max)
@@ -189,38 +201,61 @@ def test_bands_inset_by_tape_protrusion(compiled, mattress):
     assert max(xs) == pytest.approx(ex / 2 - p_max)
 
 
-def test_tapes_sweep_the_inset_wall(compiled, mattress):
+def test_tapes_sweep_flush_on_the_inset_wall(compiled, mattress):
+    """§5.2: thin binding tape that WRAPS AND HUGS the perimeter edge — a
+    [protrusion x width] section seated flush on the wall (path offset half
+    a protrusion along the normals), standing proud by one protrusion.
+    This is the DEFECT 1 regression pin: the old [2*protrusion x thickness]
+    section of H rode the wall half-buried and rendered as 58 mm collars."""
     job = load_job(JOB)
     bounds = job.expected_bounds_m()
-    ex, ez = bounds["x"], bounds["z"]
-    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * ez
+    ex = bounds["x"]
+    scale = min(bounds.values())
+    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * scale
     tape = _part(compiled, "tape_1")
     assert tape.shape == "sweep"
     assert tape.path_closed is True
-    protrusion = mattress.tape_edges[0].protrusion_fraction * ez
-    thickness = mattress.tape_edges[0].thickness_fraction * ez
-    assert tape.dimensions == pytest.approx([2 * protrusion, thickness])
-    # the sweep path rides the inset band wall
+    protrusion = mattress.tape_edges[0].protrusion_fraction * scale
+    width = mattress.tape_edges[0].width_fraction * scale
+    assert tape.dimensions == pytest.approx([protrusion, width])
+    # the path rides half a protrusion off the wall so the section's inner
+    # face seats ON it — never buried, never floating
     xs = [p[0] for p in tape.path_points]
-    assert max(xs) == pytest.approx(ex / 2 - p_max)
+    assert max(xs) == pytest.approx(ex / 2 - p_max + protrusion / 2)
     # closed path: no repeated endpoint (the cyclic spline handles the seam)
     assert tape.path_points[0] != tape.path_points[-1]
+
+
+def test_tape_fractions_are_of_the_cross_section_scale(mattress):
+    """Tape size follows min(L, W, H), not H: the same template must give a
+    ~13 mm strip on the tall 12x12x65 in placeholder AND a ~11 mm strip on
+    a queen — a tape is a detail of the side face, not of the height."""
+    for job_dims, expected_width in (((0.3048, 0.3048, 1.651), 0.023 * 0.3048),
+                                     ((2.032, 1.524, 0.254), 0.023 * 0.254)):
+        spec, _warnings = compile_spec(mattress, _job(*job_dims, code="SC"))
+        tape = {p.name: p for p in spec.parts}["tape_1"]
+        assert tape.dimensions[1] == pytest.approx(expected_width), job_dims
 
 
 def test_tape_protrusion_larger_than_footprint_raises(mattress):
     """A template whose tape protrusion swallows the footprint must fail
     loudly at compile time, not produce inverted geometry."""
-    job = _job(0.04, 0.04, 2.0)  # tall+narrow: 0.035*2.0 > 0.04/2
+    data = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    for t in data["tape_edges"]:
+        t["protrusion_fraction"] = 0.6  # > half of min(L, W, H) for any job
+    tpl = TemplateSpec.model_validate(data)
+    job = _job(0.04, 0.04, 2.0)
     with pytest.raises(ValueError, match="protrusion"):
-        compile_spec(mattress, job)
+        compile_spec(tpl, job)
 
 
 def test_decal_sits_on_wall_recessed_behind_tape(compiled, mattress):
     """The label is proud of the band wall (a sewn patch) but recessed
     behind the tape plane — it can never widen the overall silhouette."""
     job = load_job(JOB)
-    ey, ez = job.expected_bounds_m()["y"], job.expected_bounds_m()["z"]
-    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * ez
+    bounds = job.expected_bounds_m()
+    ey = bounds["y"]
+    p_max = max(t.protrusion_fraction for t in mattress.tape_edges) * min(bounds.values())
     wall_y = -(ey / 2 - p_max)
     decal = _part(compiled, "decal_patch")
     w, t_patch, h = decal.dimensions
@@ -269,3 +304,93 @@ def test_no_warnings_on_sane_dims(mattress):
 
 def test_tri_budget_flows_into_spec(compiled, mattress):
     assert compiled.tri_budget == mattress.tri_budget
+
+
+# ── round 4: seam rings + review close-ups ──────────────────────────────────
+
+
+def test_velvet_seams_compile_to_metre_ring_spec(compiled, mattress):
+    """Round-4 band correction: the velvet border is ONE part carrying two
+    faint pressed seam rings (stitch lines, not colour changes). The
+    template's band-relative fractions must land as metre z/depth on the
+    part, derived from the band height and min(L, W, H)."""
+    job = load_job(JOB)
+    ez = job.expected_bounds_m()["z"]
+    scale = min(job.expected_bounds_m().values())
+    velvet = _part(compiled, "velvet")
+    band = next(b for b in mattress.bands if b.name == "velvet")
+    h = band.height_fraction * ez
+    assert velvet.seam_rings is not None and len(velvet.seam_rings) == 2
+    for seam, spec_ring in zip(band.seams, velvet.seam_rings):
+        assert spec_ring.z == pytest.approx(seam.height_fraction * h)
+        assert spec_ring.depth == pytest.approx(seam.depth_fraction * scale)
+    # the one-mass contract: no other band carries seams
+    others = [p for p in compiled.parts if p.seam_rings and p.name != "velvet"]
+    assert others == []
+
+
+def test_review_closeups_flow_into_spec(mattress):
+    """Round 4: the label/border close-ups are template product knowledge,
+    threaded verbatim into the ObjectSpec for the render op — the finishing
+    layer never decides WHAT to frame."""
+    spec, _warnings = compile_spec(mattress, _job(2.032, 1.524, 0.254, code="Q4"))
+    assert spec.review_closeups is not None
+    by_name = {c.name: c for c in spec.review_closeups}
+    assert set(by_name) == {"label", "border"}
+    assert by_name["label"].part == "decal_patch"
+    assert by_name["label"].frame == "part"
+    assert by_name["border"].frame == "model_height"
+    assert by_name["border"].direction == "front"
+
+
+def test_closeup_part_must_exist_in_template():
+    data = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    data["review_closeups"] = [{"name": "x", "part": "not_a_part"}]
+    with pytest.raises(ValueError, match="not a part"):
+        TemplateSpec.model_validate(data)
+
+
+# ── contrast probes (Phase 8 item 2 — the §H absolute-floor fix) ─────────────
+
+
+def test_contrast_probes_flow_into_spec(mattress):
+    """The absolute-contrast probe (view, region, cycles, floor) is
+    template product knowledge threaded verbatim into the ObjectSpec —
+    the finishing layer only measures and records. Pinned alongside it:
+    the cycles are scale-invariant (0.575 x cells_across at the fixed view
+    framing), so ONE probe definition covers every job-card size."""
+    spec, _warnings = compile_spec(mattress, _job(2.032, 1.524, 0.254, code="Q4"))
+    assert spec.contrast_probes is not None
+    (p,) = spec.contrast_probes
+    assert (p.name, p.view, p.axes) == ("crown_quilt", "top", "both")
+    assert p.region == [0.25, 0.25, 0.75, 0.75]
+    assert p.cycles == [10.0, 10.0]  # 0.575 x 17 cells across ~= 9.8
+    assert p.band == [0.6, 1.4]
+    assert p.min_amplitude == 6.0    # grey levels — never a ratio
+
+
+@pytest.mark.parametrize("bad_region", [
+    [0.5, 0.5, 0.2, 0.8],   # x0 >= x1
+    [-0.1, 0.0, 0.5, 0.5],  # out of range
+    [0.0, 0.0, 1.0],        # wrong arity
+])
+def test_probe_region_must_be_sane(bad_region):
+    from src.spec.schema import ContrastProbeSpec
+    with pytest.raises(ValueError, match="region"):
+        ContrastProbeSpec(name="x", region=bad_region, cycles=[10, 10])
+
+
+def test_probe_cycles_must_be_positive_pair():
+    from src.spec.schema import ContrastProbeSpec
+    with pytest.raises(ValueError, match="cycles"):
+        ContrastProbeSpec(name="x", region=[0.0, 0.0, 1.0, 1.0], cycles=[10, 0])
+
+
+def test_decal_is_centred_on_the_velvet_mass(compiled, mattress):
+    """Round 4: with the single velvet mass at z 0.21..0.48 of H, the label
+    is re-centred on it (0.345 of H) — the patch overhangs the ribs like a
+    sewn patch, and still clears both tapes it spans between."""
+    job = load_job(JOB)
+    ez = job.expected_bounds_m()["z"]
+    decal = _part(compiled, "decal_patch")
+    assert decal.position[2] == pytest.approx(0.345 * ez)

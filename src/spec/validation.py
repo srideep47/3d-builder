@@ -22,6 +22,12 @@ _AXIS_BY_ATTR = {
     "size_z": 2,
 }
 
+# Every attribute evaluate_dimension_gate can actually measure (Phase 6:
+# the live analyst authored applies_to values like "<part>.position_z" that
+# parse fine but can NEVER be measured — the run then spun its corrector on
+# fake "Delta 0mm" feedback. The structure check catches this pre-build).
+_MEASURABLE_ATTRS = set(_AXIS_BY_ATTR) | {"top_z", "max_z", "bottom_z", "min_z"}
+
 
 @dataclass
 class DimensionGateResult:
@@ -68,6 +74,35 @@ def validate_spec_structure(spec: ObjectSpec) -> list[str]:
     for m in spec.measurements:
         if m.target_value <= 0:
             errors.append(f"Measurement '{m.name}' has target value <= 0: {m.target_value}")
+
+        # applies_to grammar (Phase 6): a syntactically valid but
+        # unmeasurable target ("<part>.position_z", a misspelled part name)
+        # is a structural error — the gate can never evaluate it, and the
+        # corrector would chase a fake delta forever.
+        applies = (m.applies_to or "").strip()
+        tokens = applies.split(".")
+        known_parts = {p.lower() for p in part_names}
+        if not applies or not all(t.strip() for t in tokens) or len(tokens) > 2:
+            errors.append(
+                f"Measurement '{m.name}' has malformed applies_to '{applies}' — use "
+                "'overall.<attr>', '<part_name>.<attr>', 'overall', or a bare '<part_name>'"
+            )
+        else:
+            scope = tokens[0].strip().lower()
+            if scope != "overall" and scope not in known_parts:
+                errors.append(
+                    f"Measurement '{m.name}' targets unknown part '{tokens[0].strip()}' "
+                    f"(applies_to '{applies}') — no spec part has that name"
+                )
+            if len(tokens) == 2:
+                attr = tokens[1].strip().lower()
+                if attr not in _MEASURABLE_ATTRS:
+                    errors.append(
+                        f"Measurement '{m.name}' uses attribute '{tokens[1].strip()}' "
+                        f"(applies_to '{applies}') which the measure gate cannot measure. "
+                        "Allowed: width_x/depth_y/height_z (+width/depth/height aliases) "
+                        "or top_z/bottom_z"
+                    )
 
     return errors
 

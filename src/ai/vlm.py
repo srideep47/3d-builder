@@ -19,6 +19,19 @@ the Gemini provider also falls back to ``GEMINI_API_KEY``, which holds the
 same value). Gemini models must be PINNED versions (``gemini-3.6-flash``),
 never ``-latest`` aliases.
 
+Two model tiers (``docs/VISION_CONFIG.md`` §3): the default ``model``
+serves every iteration; ``escalation_model`` (optional, same config block)
+serves the ONE escalated verdict before packaging and whenever the default
+disagrees with the measured gates. Both ids come from config — never
+hardcoded.
+
+429 handling is the §7 branch, implemented reactively in every chat POST:
+``RATE_LIMIT_EXCEEDED`` → exponential backoff with jitter (2 s → 60 s,
+bounded); ``QUOTA_EXCEEDED`` / ``RESOURCE_EXHAUSTED`` → stop retrying and
+take the verdict from the local Qwen fallback (``vision.local_fallback``)
+when one is configured. Oversized overview renders and reference photos are
+downscaled to 768×768 before sending; close-ups are never downscaled.
+
 Everything fails soft: an absent, misconfigured, or unreachable provider
 leaves the pipeline fully functional.
 """
@@ -27,15 +40,19 @@ from __future__ import annotations
 
 import abc
 import base64
+import io
 import json
 import os
+import random
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import httpx
 import yaml
+from PIL import Image
 
 from .aptos import DEFAULT_AI_CONFIG, extract_json_from_text
 
@@ -51,13 +68,118 @@ DEFAULT_API_KEY_ENV = "THREED_VLM_API_KEY"
 GEMINI_API_KEY_ENV = "GEMINI_API_KEY"  # holds the same value (owner setup)
 GEMINI_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com"
 
+# Phase 5 image-size policy (master order / VISION_CONFIG): overview views
+# and reference photos are downscaled to at most 768×768 (aspect preserved);
+# close-up renders are NEVER downscaled — fine detail is their entire
+# purpose, and blanket downscaling once hid a label defect completely.
+OVERVIEW_MAX_DIM = 768
+OVERVIEW_KEYS = ("front", "side", "top", "iso")
 
-def _image_b64(path: Path) -> tuple[str, str]:
-    """(mime_subtype, base64 payload) for an image file."""
+# VISION_CONFIG §7 — the 429 branch, applied reactively (there is no
+# pre-flight quota endpoint):
+#   RATE_LIMIT_EXCEEDED        → exponential backoff with jitter, 2 s → 60 s,
+#                                bounded retries (never loop forever);
+#   QUOTA_EXCEEDED /
+#   RESOURCE_EXHAUSTED         → stop retrying; the verdict is taken from
+#                                the local Qwen fallback when one is
+#                                configured (vision.local_fallback).
+RATE_LIMIT_INITIAL_S = 2.0
+RATE_LIMIT_CAP_S = 60.0
+RATE_LIMIT_MAX_RETRIES = 5
+
+_sleep = time.sleep  # tests swap this to observe backoff delays
+
+
+class QuotaExhaustedError(RuntimeError):
+    """429 QUOTA_EXCEEDED / RESOURCE_EXHAUSTED — §7 branch 2: do NOT retry;
+    callers may take the verdict from the local Qwen fallback."""
+
+
+class RateLimitExhaustedError(RuntimeError):
+    """429 RATE_LIMIT_EXCEEDED persisted past the bounded backoff — give up
+    honestly (fail soft). NOT the quota branch, so no local fallback."""
+
+
+def _reject_floating_alias(model: str, role: str) -> None:
+    """Gemini models must be PINNED versions — ``-latest`` aliases are
+    rejected at construction so a silent model drift cannot pass review."""
+    if str(model).endswith("-latest"):
+        raise ValueError(
+            f"gemini {role} model {model!r} is a floating alias — pin a "
+            "specific version (e.g. gemini-3.6-flash) so results are "
+            "reproducible"
+        )
+
+
+def _image_b64(path: Path, max_dim: int | None = None) -> tuple[str, str]:
+    """(mime_subtype, base64 payload) for an image file.
+
+    With ``max_dim``, images LARGER than max_dim are downscaled (aspect
+    preserved, LANCZOS) before encoding — the Phase 5 image-size policy.
+    Images at or below max_dim, and anything PIL cannot read, pass through
+    untouched."""
     ext = path.suffix.lower().lstrip(".") or "png"
     mime = _IMAGE_MIME.get(ext, "png")
-    b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+    data = path.read_bytes()
+    if max_dim is not None:
+        try:
+            img = Image.open(io.BytesIO(data))
+            if max(img.size) > max_dim:
+                img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+                buf = io.BytesIO()
+                if mime == "jpeg":
+                    img.convert("RGB").save(buf, format="JPEG", quality=90)
+                else:
+                    img.save(buf, format="PNG")
+                data = buf.getvalue()
+        except Exception:
+            pass  # not a PIL-readable image — send the raw bytes
+    b64 = base64.b64encode(data).decode("ascii")
     return mime, b64
+
+
+def _classify_429(resp: httpx.Response) -> str:
+    """'quota' | 'rate_limit' from the reason code in ``error.details``
+    (§7). Priority: the specific ``RATE_LIMIT_EXCEEDED`` reason wins — real
+    Gemini rate-limit bodies also carry ``status: "RESOURCE_EXHAUSTED"``,
+    which alone (or with ``QUOTA_EXCEEDED``) is the quota branch. A bare 429
+    with no recognizable reason is treated as a rate limit — the
+    conservative retry branch."""
+    try:
+        body = resp.text[:2000]
+    except Exception:
+        body = ""
+    if "RATE_LIMIT_EXCEEDED" in body:
+        return "rate_limit"
+    if "QUOTA_EXCEEDED" in body or "RESOURCE_EXHAUSTED" in body:
+        return "quota"
+    return "rate_limit"
+
+
+def _post_with_429_policy(post):
+    """Run ``post()`` (an httpx POST) under the §7 429 branch.
+
+    RATE_LIMIT_EXCEEDED → sleep (exponential 2 s → 60 s, +jitter) and retry,
+    at most RATE_LIMIT_MAX_RETRIES times. Quota reasons → raise
+    QuotaExhaustedError immediately (no retry). Any other status is returned
+    untouched for the caller's raise_for_status."""
+    resp = post()
+    attempt = 0
+    while resp.status_code == 429:
+        if _classify_429(resp) == "quota":
+            raise QuotaExhaustedError(
+                f"vision quota exhausted (429): {resp.text[:200]}"
+            )
+        if attempt >= RATE_LIMIT_MAX_RETRIES:
+            raise RateLimitExhaustedError(
+                f"vision rate limit persisted after {RATE_LIMIT_MAX_RETRIES} "
+                f"backoff retries (429): {resp.text[:200]}"
+            )
+        delay = min(RATE_LIMIT_CAP_S, RATE_LIMIT_INITIAL_S * (2 ** attempt))
+        _sleep(delay + random.uniform(0.0, 1.0))  # jitter
+        attempt += 1
+        resp = post()
+    return resp
 
 
 class VisionProvider(abc.ABC):
@@ -97,8 +219,14 @@ class VisionProvider(abc.ABC):
         system: str | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.2,
+        model: str | None = None,
+        image_max_dims: list[int | None] | None = None,
     ) -> str:
-        """One vision chat round. Raises on HTTP errors; callers fail soft."""
+        """One vision chat round. ``model`` overrides the provider's default
+        (the escalation tier); None means the default. ``image_max_dims``
+        (parallel to image_paths) downscales oversized images before sending
+        — the Phase 5 image-size policy (None entries = never downscale).
+        Raises on HTTP errors; callers fail soft."""
 
     # ── Integration point 1: reference analysis for the analyst ────────────
 
@@ -115,7 +243,15 @@ class VisionProvider(abc.ABC):
     )
 
     def describe_reference_images(self, image_paths: list[str | Path]) -> str:
-        return self.chat_vision(self.DESCRIBE_PROMPT, image_paths, max_tokens=1600)
+        # 4096, not 1600: on a real 12-photo reference set the describe call
+        # truncated mid-sentence at 1600 (gemini-3.6-flash is a thinking
+        # model — thoughtsTokenCount eats the budget before content, the
+        # same lesson as GLM-5.3's reasoning tokens; HANDOFF_GLM §3 run).
+        # Reference photos go to the VLM at most 768px (Phase 5 policy).
+        return self.chat_vision(
+            self.DESCRIBE_PROMPT, image_paths, max_tokens=4096,
+            image_max_dims=[OVERVIEW_MAX_DIM] * len(image_paths),
+        )
 
     # ── Integration point 2: advisory visual gate ──────────────────────────
 
@@ -135,16 +271,38 @@ class VisionProvider(abc.ABC):
         render_paths: dict[str, str],
         reference_paths: list[str | Path],
         model_summary: str = "",
+        escalate: bool = False,
     ) -> dict[str, Any]:
         """Compare renders against references. Returns a verdict dict:
-        {available, matches_reference, score, issues, summary}."""
+        {available, matches_reference, score, issues, summary, model,
+        escalated} — plus ``quota_fallback``/``quota_exhausted`` (§7 branch 2)
+        and ``image_policy`` (which images were downscaled).
+
+        ``escalate=True`` routes the ONE escalated call to the configured
+        escalation model (``docs/VISION_CONFIG.md`` §3: before packaging,
+        and whenever the default model disagrees with the measured gates).
+        With no escalation model configured the default serves the call and
+        ``escalated`` records False — an honest no-op, never a crash.
+
+        Image-size policy (Phase 5): overview keys (front/side/top/iso) and
+        reference photos are sent at most 768×768; every other render key is
+        a close-up and is sent at NATIVE resolution — never downscaled."""
         if not self.is_available():
             return {"available": False, "reason": "vision provider not available"}
         try:
-            all_paths = [str(p) for p in reference_paths] + [
-                render_paths[k]
-                for k in ("front", "side", "top", "iso")
-                if render_paths.get(k)
+            images: list[tuple[str, Path]] = [
+                ("reference", Path(p)) for p in reference_paths
+            ]
+            for k in OVERVIEW_KEYS:
+                if render_paths.get(k):
+                    images.append((k, Path(render_paths[k])))
+            for k, p in render_paths.items():
+                if k not in OVERVIEW_KEYS and p:
+                    images.append((k, Path(p)))  # close-up: never downscaled
+            all_paths = [p for _, p in images]
+            max_dims = [
+                None if k not in OVERVIEW_KEYS and k != "reference" else OVERVIEW_MAX_DIM
+                for k, _ in images
             ]
             text = (
                 self.VERDICT_PROMPT
@@ -153,20 +311,77 @@ class VisionProvider(abc.ABC):
             )
             if model_summary:
                 text += f"\nGenerated model summary: {model_summary}"
-            raw = self.chat_vision(text, all_paths, max_tokens=1200)
+            model = (self.escalation_model if escalate else None) or None
+            raw, fallback_model = self._chat_vision_quota_fallback(
+                text, all_paths, max_tokens=3072, model=model,
+                image_max_dims=max_dims,
+            )
             parsed = extract_json_from_text(raw) or self._loose_verdict(raw)
             if not parsed:
-                return {"available": True, "parsed": False, "raw": raw[:800]}
-            return {
+                return {
+                    "available": True, "parsed": False, "raw": raw[:800],
+                    "model": fallback_model or model or self.model,
+                    "escalated": False,
+                }
+            verdict = {
                 "available": True,
                 "parsed": True,
                 "matches_reference": bool(parsed.get("matches_reference")),
                 "score": parsed.get("score"),
                 "issues": parsed.get("issues") or [],
                 "summary": parsed.get("summary"),
+                "model": fallback_model or model or self.model,
+                "escalated": bool(model and model != self.model),
+                "image_policy": {
+                    "overview_and_reference_max_dim": OVERVIEW_MAX_DIM,
+                    "closeups_untouched": True,
+                },
+            }
+            if fallback_model:
+                verdict["quota_fallback"] = True
+            return verdict
+        except QuotaExhaustedError as e:
+            return {
+                "available": True, "parsed": False,
+                "error": str(e)[:400], "quota_exhausted": True,
             }
         except Exception as e:
             return {"available": True, "parsed": False, "error": str(e)[:400]}
+
+    def _chat_vision_quota_fallback(
+        self,
+        text: str,
+        image_paths: list[str | Path],
+        *,
+        max_tokens: int,
+        model: str | None = None,
+        image_max_dims: list[int | None] | None = None,
+    ) -> tuple[str, str | None]:
+        """chat_vision with the §7 quota branch: a quota-exhausted primary
+        (QUOTA_EXCEEDED / RESOURCE_EXHAUSTED) is NOT retried — the local
+        Qwen fallback serves the call when one is configured, and its model
+        id is returned for honest recording (``quota_fallback`` in the
+        verdict). Rate-limit errors are already handled inside chat_vision's
+        bounded backoff; anything else propagates."""
+        try:
+            return (
+                self.chat_vision(
+                    text, image_paths, max_tokens=max_tokens, model=model,
+                    image_max_dims=image_max_dims,
+                ),
+                None,
+            )
+        except QuotaExhaustedError:
+            fb = get_quota_fallback_provider(self)
+            if fb is None or not fb.is_available():
+                raise
+            return (
+                fb.chat_vision(
+                    text, image_paths, max_tokens=max_tokens,
+                    image_max_dims=image_max_dims,
+                ),
+                fb.model,
+            )
 
     @staticmethod
     def _loose_verdict(raw: str) -> dict | None:
@@ -188,11 +403,15 @@ class OpenAICompatibleVisionProvider(VisionProvider):
         model: str | None = None,
         api_key: str | None = None,
         timeout_sec: float | None = None,
+        escalation_model: str | None = None,
     ):
         cfg = self._load_vision_config()
         vlm_cfg = cfg.get("vlm", {}) or {}
         self.base_url = (base_url or vlm_cfg.get("base_url") or "").rstrip("/")
         self.model = model or vlm_cfg.get("model") or ""
+        self.escalation_model = (
+            escalation_model or vlm_cfg.get("escalation_model") or None
+        )
         self.api_key = api_key or vlm_cfg.get("_api_key")  # resolved below
         self.timeout_sec = float(timeout_sec or vlm_cfg.get("timeout_sec", 120))
         if not self.api_key:
@@ -232,12 +451,15 @@ class OpenAICompatibleVisionProvider(VisionProvider):
         system: str | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.2,
+        model: str | None = None,
+        image_max_dims: list[int | None] | None = None,
     ) -> str:
         if not self.is_available():
             raise RuntimeError("local VLM not available")
+        dims = list(image_max_dims or [None] * len(image_paths))
         content: list[dict[str, Any]] = [{"type": "text", "text": text}]
-        for p in image_paths:
-            mime, b64 = _image_b64(Path(p))
+        for p, md in zip(image_paths, dims):
+            mime, b64 = _image_b64(Path(p), md)
             content.append({
                 "type": "image_url",
                 "image_url": {"url": f"data:image/{mime};base64,{b64}"},
@@ -247,17 +469,20 @@ class OpenAICompatibleVisionProvider(VisionProvider):
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": content})
 
-        resp = httpx.post(
-            f"{self.base_url}/chat/completions",
-            headers=self._headers(),
-            json={
-                "model": self.model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            },
-            timeout=self.timeout_sec,
-        )
+        def post():
+            return httpx.post(
+                f"{self.base_url}/chat/completions",
+                headers=self._headers(),
+                json={
+                    "model": model or self.model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+                timeout=self.timeout_sec,
+            )
+
+        resp = _post_with_429_policy(post)
         resp.raise_for_status()
         data = resp.json()
         return (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
@@ -285,16 +510,19 @@ class GeminiVisionProvider(VisionProvider):
         api_key: str | None = None,
         base_url: str | None = None,
         timeout_sec: float | None = None,
+        escalation_model: str | None = None,
     ):
         cfg = self._load_vision_config()
         vlm_cfg = cfg.get("vlm", {}) or {}
         self.model = model or vlm_cfg.get("model") or ""
-        if self.model.endswith("-latest"):
-            raise ValueError(
-                f"gemini model {self.model!r} is a floating alias — pin a "
-                "specific version (e.g. gemini-3.6-flash) so results are "
-                "reproducible"
-            )
+        _reject_floating_alias(self.model, "default")
+        # Escalation tier (VISION_CONFIG §3): one call before packaging and
+        # whenever the default model disagrees with the measured gates.
+        self.escalation_model = (
+            escalation_model or vlm_cfg.get("escalation_model") or None
+        )
+        if self.escalation_model:
+            _reject_floating_alias(self.escalation_model, "escalation")
         self.base_url = (
             base_url or vlm_cfg.get("base_url") or GEMINI_DEFAULT_BASE_URL
         ).rstrip("/")
@@ -333,12 +561,15 @@ class GeminiVisionProvider(VisionProvider):
         system: str | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.2,
+        model: str | None = None,
+        image_max_dims: list[int | None] | None = None,
     ) -> str:
         if not self.is_available():
             raise RuntimeError("gemini vision provider not available")
+        dims = list(image_max_dims or [None] * len(image_paths))
         parts: list[dict[str, Any]] = [{"text": text}]
-        for p in image_paths:
-            mime, b64 = _image_b64(Path(p))
+        for p, md in zip(image_paths, dims):
+            mime, b64 = _image_b64(Path(p), md)
             parts.append({"inline_data": {"mime_type": f"image/{mime}", "data": b64}})
         body: dict[str, Any] = {
             "contents": [{"role": "user", "parts": parts}],
@@ -350,12 +581,15 @@ class GeminiVisionProvider(VisionProvider):
         if system:
             body["systemInstruction"] = {"parts": [{"text": system}]}
 
-        resp = httpx.post(
-            f"{self.base_url}/v1beta/models/{self.model}:generateContent",
-            headers=self._headers(),
-            json=body,
-            timeout=self.timeout_sec,
-        )
+        def post():
+            return httpx.post(
+                f"{self.base_url}/v1beta/models/{model or self.model}:generateContent",
+                headers=self._headers(),
+                json=body,
+                timeout=self.timeout_sec,
+            )
+
+        resp = _post_with_429_policy(post)
         resp.raise_for_status()
         data = resp.json()
         # shape: candidates[0].content.parts[*].text (joined across parts)
@@ -366,6 +600,31 @@ class GeminiVisionProvider(VisionProvider):
         return "".join(
             p.get("text") or "" for p in (content.get("parts") or [])
         )
+
+
+def get_quota_fallback_provider(
+    primary: VisionProvider,
+) -> VisionProvider | None:
+    """§7 branch 2: when the primary (Gemini) is quota-exhausted, the
+    verdict comes from the local Qwen provider instead — configured under
+    ``vision.local_fallback`` (base_url + model of the OpenAI-compatible
+    vLLM server). None when not configured or when the primary already IS
+    the local tier (no second fallback). Loading/unloading the local model
+    and returning the GPU to Blender is a server-side ops action
+    (VISION_CONFIG §7); this code only routes the call and records the
+    fallback honestly. Never raises."""
+    if isinstance(primary, OpenAICompatibleVisionProvider):
+        return None
+    try:
+        cfg = VisionProvider._load_vision_config().get("local_fallback") or {}
+        if not (cfg.get("base_url") and cfg.get("model")):
+            return None
+        provider = OpenAICompatibleVisionProvider(
+            base_url=str(cfg["base_url"]), model=str(cfg["model"])
+        )
+        return provider if provider.is_configured() else None
+    except Exception:
+        return None
 
 
 def get_vision_provider() -> VisionProvider | None:

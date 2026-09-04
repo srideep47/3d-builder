@@ -1,0 +1,29 @@
+job_code: MAYA0001012
+dims:
+  length: 4.0
+  width: 6.0
+  height: 2.0
+  unit: in
+complexity: simple
+orientation: floor
+product_class: None
+part_scope: ''
+reference_dir: D:\Work\LegionStudios\3d-builder\input\reference
+axis_map:
+  length: x
+  width: y
+  height: z
+dim_tolerance: null
+dims_placeholder: false
+polycount_ceiling: 50000
+polycount_semantics: null
+file_size_caps: null
+required_formats: null
+texture_resolution: null
+fbx_axis_up: null
+fbx_axis_forward: null
+intake_evidence:
+  dims: 4 x 6 x 2 in — owner-supplied via the intake form (explicit, not placeholders;
+    rule 9 satisfied)
+  polycount_ceiling: 50,000 from 'polycount ceiling 50000' (semantics unstated → triangle_equivalent
+    default)

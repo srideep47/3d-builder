@@ -4,6 +4,10 @@ base_url: "https://host0.inference.aptoslabs.com/v1"
 model_id: "zai-org/GLM-5.3"
 api_key_env: THREED_API_KEY
 timeout_sec: 300
+# SDK-level retries for transient 429/5xx/connection failures (exponential
+# backoff inside the OpenAI client). Batch throughput (Phase 7) runs several
+# agent loops against the one endpoint concurrently.
+max_retries: 4
 temperature: 0.1
 max_tokens: 16384
 
@@ -26,7 +30,10 @@ roles:
     temperature: 0.1
 
 agent:
-  max_iterations: 5
+  # Phase 5 master order: "Hard iteration cap, start at 8. On cap: stop,
+  # report exactly what failed with the evidence." A cap-exhausted run gets
+  # manifest status "iteration_cap_exhausted" + metrics.cap_report.
+  max_iterations: 8
   wall_clock_budget_s: 900
   tool_choice: "auto"
   fallback_json_protocol: true
@@ -45,11 +52,26 @@ agent:
 vision:
   mode: auto
   vlm:
-    provider: local  # local (OpenAI-compatible vLLM/Qwen-VL) | gemini (Google v1beta)
+    # Gemini is the active eye on Scout (4 GB VRAM fits no local model;
+    # HANDOFF_GLM §3 — switch the gate on and use it as the feedback loop).
+    # The local Qwen-VL path stays available for Forge: flip provider back
+    # to "local" and set base_url + model there.
+    provider: gemini  # local (OpenAI-compatible vLLM/Qwen-VL) | gemini (Google v1beta)
     base_url: null   # local: e.g. http://127.0.0.1:8001/v1 (includes /v1);
                      # gemini: host root, default https://generativelanguage.googleapis.com
-    model: null      # local: e.g. Qwen/Qwen2.5-VL-7B-Instruct
-                     # gemini: PINNED version only, e.g. gemini-3.6-flash (-latest is rejected)
+    model: gemini-3.5-flash-lite  # local: e.g. Qwen/Qwen2.5-VL-7B-Instruct
+                     # gemini: PINNED version only (-latest is rejected)
+    escalation_model: gemini-3.6-flash  # VISION_CONFIG §3: ONE escalated
+                     # verdict before packaging / on gate disagreement;
+                     # pinned version, same rules as `model`
     api_key_env: THREED_VLM_API_KEY  # key comes from the ENV only, never this file;
                      # gemini also falls back to GEMINI_API_KEY (same value)
     timeout_sec: 120
+  # VISION_CONFIG §7 branch 2: when Gemini answers 429 QUOTA_EXCEEDED /
+  # RESOURCE_EXHAUSTED the call is NOT retried — the verdict comes from this
+  # local Qwen provider instead (vLLM on Forge; loading/unloading it and
+  # returning the GPU to Blender is a server-side ops action). null = no
+  # fallback configured; the run then records quota_exhausted honestly.
+  local_fallback:
+    base_url: null   # e.g. http://127.0.0.1:8001/v1 (OpenAI-compatible)
+    model: null      # e.g. Qwen/Qwen2.5-VL-27B-Instruct

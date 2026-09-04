@@ -34,11 +34,14 @@ def build(
     image: Optional[list[str]] = typer.Option(None, "--image", "-i", help="Reference image path(s) analyzed by the AI analyst"),
     material: Optional[str] = typer.Option(None, "--material", "-mat", help="PBR Material preset (e.g. 'oak_wood', 'brushed_steel')"),
     name: str = typer.Option("build", "--name", "-n", help="Run name prefix"),
+    job: Optional[str] = typer.Option(None, "--job", "-j", help="Client job card YAML; threads the card's axis convention into the analyst prompt and verification"),
 ):
     """Build a 3D model using AI agent or deterministic CAD spec."""
     if not prompt and not spec:
         console.print("[bold red]Error:[/] You must provide either --prompt or --spec.", style="red")
         raise typer.Exit(1)
+
+    job_card = _load_job_or_exit(job) if job else None
 
     image_paths: list[str] = []
     for img in image or []:
@@ -64,19 +67,24 @@ def build(
     with console.status("[bold green]Generating 3D model and enforcing quality gates...[/]"):
         if spec:
             console.print(f"[bold cyan]Building from spec:[/] {spec}")
-            result = pipeline.generate_from_spec(spec, run_name=name)
+            if job_card is not None:
+                console.print(f"[bold cyan]Job card:[/] {job_card.job_code} (card-axis gate active)")
+            result = pipeline.generate_from_spec(spec, run_name=name, job_card=job_card)
         else:
             console.print(f"[bold cyan]Building from prompt:[/] '{prompt}'")
             if image_paths:
                 console.print(f"[bold cyan]Reference images:[/] {len(image_paths)}")
             if measurements:
                 console.print(f"[bold cyan]Measurements:[/] '{measurements}'")
+            if job_card is not None:
+                console.print(f"[bold cyan]Job card:[/] {job_card.job_code} (axis contract + card-axis gate active)")
             result = pipeline.generate_from_prompt(
                 prompt=prompt,
                 measurements=measurements or "",
                 material_preset=material,
                 images=image_paths,
                 run_name=name,
+                job_card=job_card,
             )
 
     if result.success:
@@ -245,6 +253,54 @@ def img3d(
         raise typer.Exit(1)
 
 
+@app.command("img3d-views")
+def img3d_views(
+    front: str = typer.Option(..., "--front", help="Front view image (required)"),
+    back: str = typer.Option(None, "--back", help="Back view image"),
+    left: str = typer.Option(None, "--left", help="Left view image"),
+    right: str = typer.Option(None, "--right", help="Right view image"),
+    max_tris: int = typer.Option(50000, "--max-tris", help="Triangle budget for the exported mesh"),
+    seed: Optional[int] = typer.Option(None, "--seed", help="Generation seed"),
+    output_dir: Optional[str] = typer.Option(None, "--out", "-o", help="Output directory for the GLB"),
+):
+    """Generate a mesh from labelled views (front required) via the multi-view
+    neural backend (comfy_trellis2). No target size on purpose: conform owns
+    sizing and must see the raw aspect ratio."""
+    from .img3d import get_img3d_provider
+
+    views: dict[str, Path] = {}
+    for label, value in (("front", front), ("back", back), ("left", left), ("right", right)):
+        if value is None:
+            continue
+        p = Path(value)
+        if not p.exists():
+            console.print(f"[bold red]Error: {label} view not found:[/] {value}")
+            raise typer.Exit(1)
+        views[label] = p
+
+    provider = get_img3d_provider()
+    if provider is None:
+        console.print("[bold red]img3d is disabled.[/] Set img3d.enabled: true in config/hardware.yaml")
+        raise typer.Exit(1)
+    if not provider.is_available():
+        console.print(f"[bold red]img3d service unreachable at {provider.base_url}[/]")
+        console.print("[dim]Start it with: scripts/start-img3d.ps1 comfy_trellis2[/]")
+        raise typer.Exit(1)
+
+    out_dir = Path(output_dir) if output_dir else views["front"].parent / "img3d_output"
+    with console.status("[bold cyan]Generating mesh from views (neural service)...[/]"):
+        result = provider.generate_mesh_from_views(views, out_dir, max_tris=max_tris, seed=seed)
+
+    if result.success and result.output_glb_path:
+        console.print("[bold green]✓ Neural mesh generated:[/]")
+        console.print(f" - [bold cyan]GLB:[/] {result.output_glb_path}")
+        console.print(f" - [bold cyan]Triangles:[/] {result.tri_count}")
+        console.print(f" - [bold cyan]Duration:[/] {result.duration_sec:.1f}s")
+    else:
+        console.print(f"[bold red]img3d generation failed:[/] {result.error}")
+        raise typer.Exit(1)
+
+
 @app.command()
 def health():
     """Check AI provider endpoint and Blender installation status."""
@@ -360,7 +416,9 @@ def package(
     out_root: str = typer.Option("output/packages", "--out-root", help="Root directory for packages"),
     spec: str = typer.Option(None, "--spec", help="ObjectSpec JSON instead of a source GLB: run the full T3 finish chain (build → UV atlas → bake → decimate → live-quad FBX)"),
     template: str = typer.Option(None, "--template", help="Product-class template YAML instead of a spec: compiled with the job card's dimensions (T4)"),
-    resolution: int = typer.Option(1024, "--res", help="Texture resolution for --spec/--template bakes"),
+    resolution: Optional[int] = typer.Option(None, "--res", help="Texture resolution for --spec/--template bakes (default: the job card's texture_resolution, else 1024)"),
+    bake_timeout: float = typer.Option(300.0, "--bake-timeout", help="Bake subprocess timeout in seconds (4K bakes need ~16x the 1K time; 3600 is comfortable)"),
+    bake_device: str = typer.Option("auto", "--bake-device", help="Cycles compute device for bakes: auto (OptiX>CUDA>HIP>ONEAPI>METAL, CPU fallback), a specific type (optix/cuda/...), or cpu"),
 ):
     """Assemble the client delivery package (§4.1) + qa_report.json, then validate it.
 
@@ -413,7 +471,9 @@ def package(
             with console.status("[bold cyan]Finishing delivery (template → build → atlas → bake → decimate → export)...[/]"):
                 report = finish_delivery(job_card, object_spec, out_root=Path(out_root),
                                          runner=runner, log=console.print,
-                                         resolution=resolution)
+                                         resolution=resolution,
+                                         bake_timeout_sec=bake_timeout,
+                                         bake_device=bake_device)
         elif spec:
             from .client.package import finish_delivery
             from .spec.schema import ObjectSpec
@@ -430,7 +490,9 @@ def package(
             with console.status("[bold cyan]Finishing delivery (build → atlas → bake → decimate → export)...[/]"):
                 report = finish_delivery(job_card, object_spec, out_root=Path(out_root),
                                          runner=runner, log=console.print,
-                                         resolution=resolution)
+                                         resolution=resolution,
+                                         bake_timeout_sec=bake_timeout,
+                                         bake_device=bake_device)
         else:
             from .client.package import package_delivery
 
@@ -469,6 +531,12 @@ def package(
     if finish:
         uv = finish.get("uv_diagnostics") or {}
         td = (uv.get("texel_density_texels_per_m") or {})
+        ratio_line = f"texel ratio: {td.get('ratio')}"
+        priorities = [e.get("texel_priority", 1.0)
+                      for e in (uv.get("texel_density_per_object") or {}).values()]
+        if any(abs(p - 1.0) > 1e-9 for p in priorities):
+            # spread was authored — the weighted ratio is the uniformity metric
+            ratio_line += f" (priority-weighted: {td.get('ratio_priority_weighted')})"
         console.print(Panel(
             f"fbx source: {finish['fbx_source']}\n"
             f"LP: {finish['lp_tri_equivalent']} tri-eq (budget {finish['lp_budget']}, "
@@ -476,10 +544,39 @@ def package(
             f"HP: {finish['hp_tri_equivalent']} tri-eq\n"
             f"UV islands: {uv.get('islands_total')} | in bounds: {uv.get('in_bounds')} | "
             f"overlaps: {uv.get('overlapping_island_pairs')} | "
-            f"texel ratio: {td.get('ratio')}\n"
+            f"{ratio_line}\n"
             f"review renders: {len(finish['review_renders'])} awaiting owner review "
             f"({finish['review_renders'][0] if finish['review_renders'] else '-'})",
             title="Finish Pipeline (T3)", border_style="green"))
+        rm = finish.get("render_metrics") or {}
+        probe_rows = rm.get("probes") or []
+        if probe_rows:
+            lines = []
+            for p in probe_rows:
+                if not p.get("valid"):
+                    status, detail = "[red]INVALID[/]", p.get("reason", "?")
+                elif p.get("passed"):
+                    status = "[green]PASS[/]"
+                    detail = (f"amplitude x {p['amplitude_x']} / y {p['amplitude_y']} "
+                              f"grey levels >= floor {p['min_amplitude']} "
+                              f"(axes={p['axes']})")
+                else:
+                    status = "[red]FAIL[/]"
+                    detail = (f"amplitude {p.get('amplitude')} grey levels < floor "
+                              f"{p['min_amplitude']} (x {p.get('amplitude_x')}, "
+                              f"y {p.get('amplitude_y')})")
+                lines.append(f"{p['name']} ({p['view']} view): {status} — {detail}")
+            vs = [v for v in (rm.get("views") or {}).values() if v.get("valid")]
+            if vs:
+                lines.append(
+                    f"view stats: {len(vs)} views | worst clipped "
+                    f"{max(v.get('clipped_fraction', 0) for v in vs):.4f} | "
+                    f"mean luminance {min(v['mean_luminance'] for v in vs):.0f}"
+                    f"-{max(v['mean_luminance'] for v in vs):.0f}")
+            console.print(Panel(
+                "\n".join(lines),
+                title="Render Contrast Probes (absolute grey levels — never a ratio)",
+                border_style="green"))
     console.print(f"[bold]qa_report.json:[/] [cyan]{report['package_dir']}/qa_report.json[/]")
 
     if not report["all_passed"]:

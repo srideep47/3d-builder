@@ -4,6 +4,7 @@ the /generate `model` field (job-level override, only when preloaded)."""
 from __future__ import annotations
 
 from .base import NeuralBackend
+from .comfy_trellis2 import ComfyTrellis2Backend
 from .hunyuan3d import Hunyuan3DBackend
 from .mock import MockBackend
 from .trellis import TrellisBackend
@@ -14,6 +15,7 @@ BACKENDS: dict[str, type[NeuralBackend]] = {
     TripoSRBackend.name: TripoSRBackend,
     TrellisBackend.name: TrellisBackend,
     Hunyuan3DBackend.name: Hunyuan3DBackend,
+    ComfyTrellis2Backend.name: ComfyTrellis2Backend,
 }
 
 DEFAULT_BACKEND = "mock"

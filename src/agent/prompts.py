@@ -66,6 +66,22 @@ MATERIALS (flat PBR values export correctly to GLB)
   "velvet_fabric", "frosted_glass", "white_marble".
 - Example: {"preset": "oak_wood", "roughness": 0.55}.
 - Only set "procedural": true when fine surface detail matters for preview renders.
+- Owner texture library: when the user message lists scanned surfaces with a
+  "texture_dir", prefer them over presets for matching materials — set the part
+  material's "texture_dir" to the exact listed path, keeping the preset as the
+  base, e.g. {"preset": "oak_wood", "texture_dir": "input/textures/owner/oak_plank"}.
+  The build reads albedo/roughness/height maps from that directory. NEVER set a
+  "texture_dir" that was not listed, and NEVER use a diffusion-generated
+  texture — only the listed scans or the presets.
+
+UV ATLAS TEXEL PRIORITY (per part, "texel_priority": float, default 1.0)
+- The delivery atlas shares one texel budget across every surface of the model.
+  A uniform split starves printed text while over-serving plain fabric. Set
+  "texel_priority": 3-8 on parts carrying printed text, labels, dials, or fine
+  markings; plain fabric, velvet, and smooth surfaces can stay at 1.0 (or drop
+  to 0.5 when text elsewhere needs the budget). Higher priority = more texels
+  per metre for that part; total atlas use is unchanged. Only set it when a
+  part genuinely carries finer detail than the rest.
 
 MEASUREMENTS (the accuracy contract — the build is verified against these)
 - List EVERY user-given dimension in "measurements":
@@ -79,15 +95,34 @@ CONSTRAINTS
   sit exactly on Z = 0.
 
 METHODS
-- Default "parametric". The shape "organic" REQUIRES "method": "image_to_3d" —
-  it cannot be built parametrically. Use "image_to_3d" ONLY for organic parts
-  that cannot be expressed with the shape vocabulary (freeform cushions,
-  plants, sculptures) AND a reference image exists. For such a part set:
-  "image_crop": "<reference image path from the user message>", "target_size":
-  [x, y, z] (its exact dimensions — the generated mesh is rescaled to this on
-  import), and "dimensions" equal to target_size. Everything expressible with
-  the shape vocabulary stays "parametric". Use "script" with "code" only as a
-  last resort.
+- Default "parametric". The shape "organic" REQUIRES a file-backed method
+  ("image_to_3d", "imported" or "scanned") — it cannot be built parametrically.
+- "image_to_3d": ONLY for organic parts that cannot be expressed with the
+  shape vocabulary (freeform cushions, plants, sculptures) AND a reference
+  image exists. For such a part set: "image_crop": "<reference image path
+  from the user message>", "target_size": [x, y, z] (its exact dimensions —
+  the generated mesh is rescaled to this on import), and "dimensions" equal
+  to target_size.
+- "imported" / "scanned": the user message supplies an EXISTING mesh file
+  (an asset, a purchased model; "scanned" = 3D-scan or photogrammetry
+  capture). Required on such a part: "mesh_path": "<file path from the user
+  message>", "target_size": [x, y, z] (the owner-stated exact size — file
+  units are never trusted), "dimensions" equal to target_size. Optional
+  "mesh_scale": "uniform" preserves the mesh's proportions (one scale
+  factor, no axis exceeds target_size) — use it for scans and authored
+  assets whose aspect must not be stretched; the default "fit" rescales
+  per-axis so bounds land exactly on target_size.
+- Optional "retopology" on any file-backed part, applied automatically
+  after import (the mesh is welded first, always):
+  {"retopology": {"tool": "quadriflow", "target_faces": 8000}} rebuilds the
+  surface as ~target_faces quads (use for dense scans/organic output over
+  the polycount ceiling or with shattered UVs), or
+  {"retopology": {"tool": "voxel", "voxel_size": 6}} for hole-closing
+  density control — voxel_size is in the SPEC'S UNITS like dimensions
+  (6 = 6 mm in a mm spec); keep it >= ~5 mm on ~0.4 m objects, smaller
+  collapses the shape. One tool per part, never both.
+- Everything expressible with the shape vocabulary stays "parametric".
+  Use "script" with "code" only as a last resort.
 
 OUTPUT: ONLY a valid JSON object conforming to ObjectSpec v2. No prose, no code fences.
 """
@@ -108,9 +143,13 @@ Your task:
   is 40mm short, lengthen the supporting part by exactly 0.04m.
 - Remember position semantics: center for box/cylinder/sphere-family shapes,
   bottom-center for tapered_extrude/revolve_lathe/extrude/sweep.
-- Parts with "method": "image_to_3d": fix measurement deltas by adjusting that
-  part's "target_size" (and keep "dimensions" equal to it) — the generated mesh
-  is rescaled to target_size on import. Do NOT drop "target_size" or "image_crop".
+- Parts with a file-backed method ("image_to_3d", "imported" or "scanned"):
+  fix measurement deltas by adjusting that part's "target_size" (and keep
+  "dimensions" equal to it) — the mesh is rescaled to target_size on import.
+  Do NOT drop "target_size", "image_crop", "mesh_path", "mesh_scale" or
+  "retopology". For a "mesh_scale": "uniform" part, adjust target_size by
+  ONE common factor on all axes (its aspect ratio is fixed; per-axis deltas
+  cannot be closed).
 - Keep every part name stable — measurements reference parts by name.
 - Return the complete corrected ObjectSpec JSON and nothing else.
 """

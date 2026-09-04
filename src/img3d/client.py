@@ -156,6 +156,99 @@ class RemoteImg3DProvider(ImageTo3DProvider):
         except Exception as e:
             return self._fail(str(e), started)
 
+    def generate_mesh_from_views(
+        self,
+        views: dict[str, str | Path],
+        output_dir: str | Path,
+        max_tris: int | None = None,
+        seed: int | None = None,
+    ) -> ImageTo3DResult:
+        """Labelled multi-view generation (§4.2 neural intake): front required,
+        back/left/right optional, keys validated server-side by the backend.
+        Sizing is deliberately NOT requested — conform (§4.4) owns scaling and
+        must see the raw aspect ratio."""
+        started = time.perf_counter()
+        label_paths = {str(k): Path(v) for k, v in views.items()}
+        if "front" not in label_paths:
+            return self._fail("multi-view generation needs a 'front' view", started)
+        for label, p in label_paths.items():
+            if not p.is_file():
+                return self._fail(f"view image not found ({label}): {p}", started)
+
+        files: dict[str, tuple[str, Any, str]] = {}
+        for label, p in label_paths.items():
+            mime = "image/png" if p.suffix.lower() == ".png" else "application/octet-stream"
+            files[label] = (p.name, p.read_bytes(), mime)
+        data: dict[str, Any] = {}
+        if max_tris is not None:
+            data["max_tris"] = str(int(max_tris))
+        if seed is not None:
+            data["seed"] = str(int(seed))
+
+        try:
+            resp = httpx.post(
+                f"{self.base_url}/generate",
+                files=files,
+                data=data,
+                headers=self._headers(),
+                timeout=60.0,
+            )
+            if resp.status_code == 401:
+                return self._fail("img3d service rejected the token (401)", started)
+            if resp.status_code != 200:
+                return self._fail(
+                    f"img3d service returned HTTP {resp.status_code}: {resp.text[:300]}", started
+                )
+            job_id = resp.json().get("job_id")
+            if not job_id:
+                return self._fail(f"img3d service returned no job_id: {resp.text[:300]}", started)
+
+            job = self._poll_job(job_id, started)
+            if job is None:
+                return self._fail(
+                    f"img3d job timed out after {self.timeout_sec}s", started
+                )
+            if job.get("status") == "failed":
+                return self._fail(f"img3d generation failed: {job.get('error')}", started, job)
+
+            out_d = Path(output_dir)
+            out_d.mkdir(parents=True, exist_ok=True)
+            target_glb = out_d / f"neural_{job_id[:8]}.glb"
+            dl = httpx.get(
+                f"{self.base_url}/download/{job_id}", headers=self._headers(), timeout=60.0
+            )
+            if dl.status_code != 200:
+                return self._fail(f"download HTTP {dl.status_code}: {dl.text[:300]}", started, job)
+            target_glb.write_bytes(dl.content)
+
+            return ImageTo3DResult(
+                success=True,
+                output_glb_path=target_glb,
+                tri_count=int(job.get("tri_count") or 0),
+                duration_sec=time.perf_counter() - started,
+                error=job.get("error"),
+            )
+        except Exception as e:
+            return self._fail(str(e), started)
+
+    def _poll_job(self, job_id: str, started: float) -> dict | None:
+        """Poll /result until the job leaves the queue; None on timeout, the
+        final job dict otherwise (caller checks status == 'failed')."""
+        deadline = time.monotonic() + self.timeout_sec
+        while True:
+            r = httpx.get(
+                f"{self.base_url}/result/{job_id}", headers=self._headers(), timeout=10.0
+            )
+            if r.status_code != 200:
+                raise RuntimeError(f"result poll HTTP {r.status_code}: {r.text[:300]}")
+            job = r.json()
+            status = job.get("status")
+            if status in ("failed", "completed"):
+                return job
+            if time.monotonic() > deadline:
+                return None
+            time.sleep(self.poll_interval_s)
+
     def _fail(self, message: str, started: float, job: dict | None = None) -> ImageTo3DResult:
         return ImageTo3DResult(
             success=False,

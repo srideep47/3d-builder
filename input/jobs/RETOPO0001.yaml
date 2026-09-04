@@ -1,0 +1,18 @@
+# RETOPO0001 — retopology evidence fixture (Phase 8 item 4).
+# NOT a product job: dimensions are the MEASURED bbox of the generated
+# dense-scan fixture output/meshsrc/dense_scan.glb (5,119 triangle faces,
+# one deleted face as an occlusion hole), authored at full measured
+# precision (the MM-card gate tolerance is ±0.01 mm) for pipeline-exercise
+# only. Rule 9 unaffected: no client product dims.
+job_code: RETOPO0001
+product_class: scan_probe
+dims:
+  length: 424.389
+  width: 421.198
+  height: 445.512
+  unit: MM
+dims_placeholder: false
+complexity: simple
+orientation: floor
+part_scope: "scan probe (fixture)"
+reference_dir: input/references/MAYA00053153

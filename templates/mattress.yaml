@@ -4,23 +4,26 @@
 # no absolute size exists here, and none may ever be added (rule 9: the
 # owner supplies dimensions; a standard queen size must never be inferred).
 #
-# Structure and wording track the §5.2 written transcription of the
-# reference photos (seven bands, top to bottom):
+# Structure and wording track the §5.2 transcription of the reference
+# photos (CORRECTED round 4, reviewer's eyes — six bands, one velvet
+# mass):
 #   1 pillowtop crown (domed, puffed quilt panel, white knit + faint grey
-#     chevron micro-print)          -> band `crown` + quilt displacement
+#     chevron micro-print)          -> band `crown` + real quilt geometry
 #   2 tape edge (top perimeter)     -> tape below crown
-#   3 air-mesh band (white 3D spacer mesh, tallest light band)
+#   3 air-mesh band (white 3D spacer mesh, tall light band)
 #                                   -> band `air_mesh`
 #   4 tape edge (mid)               -> tape below air_mesh
-#   5 border stack: ~3 dark velvet bands separated by white knit ribs
-#                                   -> bands velvet_1..3, knit_1..2
-#   6 tape edge (bottom perimeter)  -> tape below velvet_3
+#   5 border stack: white knit rib, then ONE dark velvet mass with two
+#     FAINT STITCHED SEAMS inside it (round-4 correction: there are NO
+#     white ribs between velvet bands — the seams are stitch lines, not
+#     colour changes), then a white knit rib
+#                                   -> bands knit_top, velvet (+seams), knit_bottom
+#   6 tape edge (bottom perimeter)  -> tape below knit_bottom
 #   7 base (dark, rarely visible, cheap)
 #
-# Band proportions are a FIRST PASS from the §5.2 reading ("air-mesh is
-# roughly the tallest single light band"; three velvet bands separated by
-# knit ribs). They are owner-tunable numbers — review the rendered output
-# against the reference before delivery and adjust.
+# Band proportions are the reviewer's round-4 photo measurements (fractions
+# of total height); they are owner-tunable numbers — review the rendered
+# output against the reference before delivery and adjust.
 product_class: mattress
 description: >
   Pillowtop hybrid mattress: domed quilted crown over a straight-sided
@@ -37,58 +40,89 @@ bands:                 # top to bottom; height_fractions MUST sum to 1.0
     height_fraction: 0.28
     material: knit_white
   - name: air_mesh
-    height_fraction: 0.17
+    height_fraction: 0.15
     material: mesh_white
-  - name: velvet_1
-    height_fraction: 0.095
-    material: velvet_charcoal
-  - name: knit_1
-    height_fraction: 0.0825
+  - name: knit_top
+    height_fraction: 0.09
     material: knit_white
-  - name: velvet_2
-    height_fraction: 0.095
+  - name: velvet           # ONE dark mass (round 4): two faint stitched
+    height_fraction: 0.27  # seams inside, bounded by the two knit ribs
     material: velvet_charcoal
-  - name: knit_2
-    height_fraction: 0.0825
+    seams:                 # stitch lines, NOT colour changes — the mass
+                           # reads continuous at normal viewing distance
+      - height_fraction: 0.3333  # of the band, from its base
+        depth_fraction: 0.0065   # ~2mm pressed crease on a queen
+      - height_fraction: 0.6667
+        depth_fraction: 0.0065
+  - name: knit_bottom
+    height_fraction: 0.11
     material: knit_white
-  - name: velvet_3
-    height_fraction: 0.095
-    material: velvet_charcoal
   - name: base
     height_fraction: 0.10
     material: base_dark
 
 crown:
   profile_exponent: 3.5   # z(s)=H(1-s^Q)^(1/Q): ~3.5 = pillow-like roll-off
-  rings: 10
-  quilt:                  # HP displacement -> baked normal map; LP bounds fixed
-    pattern: grid_diamond # rounded scalloped/diamond cells (§5.2 band 1)
-    cells_across: 8       # quilt cells across the length; square in metres
-    amplitude_fraction: 0.07   # of one quilt CELL — puff depth
-    exponent: 1.6         # soft-edged puffs, not boxy
+  quilt:                  # REAL LP geometry (round 3, reviewer's eyes): the
+                          # puffs break the top silhouette in the photos —
+                          # a baked normal map cannot do that. Grid cap
+                          # FG-mapped onto the footprint; stitch valleys on
+                          # grid lines; peaks land on the nominal band top.
+    pattern: grid_square # straight rows/columns (§5.2 band 1, CORRECTED
+                          # round 3: product photos read SQUARE grid; the
+                          # marketing render shows diamond — see §5.2 note)
+    cells_across: 17     # ~119mm cells on a queen; reference shows 12-14
+                          # cells across the WIDTH -> 13 cross-cells derived
+    amplitude_fraction: 0.12  # of one CELL — ~14.3mm puffs on a queen
+                              # (0.15/17.8mm read as sharp exaggerated
+                              # zigzag in the round-3 Group-A render check)
+    exponent: 1.3         # round domes, soft-edged puffs, not boxy peaks
+    divisions: 4          # grid samples per cell
+    restrict_z: 0.85      # displace only near-flat verts: the steep
+                          # shoulder stays on the footprint (bounds contract)
 
-tape_edges:            # closed sweeps centred on the inset band wall; the
-                       # outer face lands exactly on the nominal L/W silhouette
+tape_edges:            # thin binding tape (§5.2): flush-seated sweeps on the
+                       # inset band wall, one protrusion proud; the outer
+                       # face lands exactly on the nominal L/W silhouette.
+                       # Fractions of min(L, W, H) — cross-section scale,
+                       # NOT of H (H-based fractions made 74 mm collars on
+                       # the tall placeholder build).
+  # Round 3 (reviewer's eyes): the tape reads as a ROUNDED CORD ~2-3% of
+  # H, not a thin flat strip. width == protrusion makes _build_sweep use a
+  # circular section (a cord ~7mm across on a 12in-tall queen); the path
+  # offset of half a protrusion puts the cord's inner tangent on the wall
+  # and outer tangent exactly on the nominal silhouette.
   - at_boundary_below: crown
-    thickness_fraction: 0.045   # vertical, of H
-    protrusion_fraction: 0.035  # radial stick-out, of H
+    width_fraction: 0.023        # cord diameter (== protrusion: round)
+    protrusion_fraction: 0.023
     material: tape_black
   - at_boundary_below: air_mesh
-    thickness_fraction: 0.045
-    protrusion_fraction: 0.035
+    width_fraction: 0.023
+    protrusion_fraction: 0.023
     material: tape_black
-  - at_boundary_below: velvet_3
-    thickness_fraction: 0.045
-    protrusion_fraction: 0.035
+  - at_boundary_below: knit_bottom
+    width_fraction: 0.023
+    protrusion_fraction: 0.023
     material: tape_black
 
 decal:                 # brand label (§5.3): front-left side border, portrait
+                       # Round-3 correction (reviewer's eyes): TALLER and
+                       # NARROWER — spans nearly the whole velvet stack.
+                       # Measured off the reference close-up: aspect ~0.45,
+                       # ~74% of the tape-to-tape border stack height.
+                       # Round 4: re-centred on the single velvet mass
+                       # (z 0.21..0.48 of H); the patch overhangs the ribs
+                       # by ~10mm each side, as a sewn patch does.
   face: front
   along_fraction: -0.35     # left of face centre as seen from the front
-  center_height_fraction: 0.325   # centred on the velvet/knit border stack
-  aspect: 0.7               # patch width / height (<1 = portrait)
-  height_fraction: 0.38     # of H; clears tape_3 (top 0.1225) and tape_2 (bottom 0.5275)
-  texture: input/decals/MAYA00053153   # dir with albedo.png (photo crop)
+  center_height_fraction: 0.345   # velvet mass centre (0.21+0.48)/2
+  aspect: 0.46              # patch width / height (portrait; the photo crop
+                            # is 0.45 — the 2% stretch is imperceptible)
+  height_fraction: 0.34     # of H; spans z 0.175..0.515 — clears tape_3
+                            # (bottom, z 0.10) and tape_2 (mid, z 0.57)
+  texture: input/decals/MAYA00053153   # dir with albedo.png (photo crop of
+                            # the real label: black patch, white text, blue
+                            # icon — round 4, replaced the synthetic stand-in)
 
 textures:
   knit_white:
@@ -116,7 +150,7 @@ textures:
     bump_strength: 0.35              # distinctly open and textural
     layers:
       - kind: oval_holes             # perforated honeycomb/oval holes
-        params: {cell_m: 0.006, hole_rx: 0.30, hole_ry: 0.20}
+        params: {cell_m: 0.010, hole_rx: 0.30, hole_ry: 0.20}
         color: [0.55, 0.56, 0.58]    # holes read darker/greyer
         opacity: 0.55
         height_delta: -0.30          # recessed holes
@@ -125,7 +159,12 @@ textures:
   velvet_charcoal:
     base: scan
     scan: velour_velvet              # CC0 (Poly Haven), napped structure
-    tint: [0.16, 0.16, 0.17]         # dark charcoal (§5.2 band 5)
+    tint: [0.09, 0.09, 0.10]         # near-black charcoal (§5.2 band 5,
+                                      # round-3: 0.16 read too light — the
+                                      # reference velvet is ~8-10% lightness)
+    rotate_deg: 90                   # the scan's nap streaks run horizontal
+                                      # in texture space; quarter-turn so the
+                                      # VERTICAL nap streaks render on walls
     tile_m: 2.79                     # scan physical size (SOURCE.json)
     resolution: 2048
     roughness: 0.50                  # sheen: catches light along the length
@@ -159,10 +198,50 @@ textures:
 
 features:
   carry_handles:
-    enabled: false
-    note: >
-      Vertical dark straps at the quarter points of the long sides
-      (§5.3, moderate confidence) — almost certainly carry handles.
-      NOT modelled until the owner confirms (open question §9.4).
+    enabled: true            # reviewer round-3 correction (photo 9.28.35):
+                             # the handles EXIST — §9.4 open question CLOSED.
+                             # Vertical dark straps crossing the full border
+                             # stack, two per long side at the quarter points.
+    count_per_side: 2
+    width_fraction: 0.08     # ~24mm webbing on a queen (of min(L,W,H))
+    protrusion_fraction: 0.92  # of the tape protrusion — outer face just
+                             # behind the tape plane (no z-fighting where
+                             # the straps cross the tapes)
+    from_boundary: knit_bottom  # strap bottom at the bottom tape line
+    to_boundary: crown         # strap top at the top tape line (full stack)
+    material: tape_black
+
+review_closeups:         # round 4: whole-model views crush the label to
+                         # ~21x45 px — the reviewer's eyes need it readable.
+  - name: label          # tight on the sewn patch
+    part: decal_patch
+    direction: front
+    pad: 0.5
+    frame: part
+  - name: border         # full-height side strip at the label's position:
+                         # the border stack, seams and tapes in context
+    part: decal_patch
+    direction: front
+    pad: 0.1
+    frame: model_height
+
+contrast_probes:         # Phase 8 item 2 — the §H fix: an ABSOLUTE grey-level
+                         # amplitude floor at the quilt pitch. Round 4's FFT
+                         # axis ratio read 0.87 while fill light had flattened
+                         # the quilt to 0.81/0.96 grey levels — a ratio reaches
+                         # 1.0 when both terms go to zero. Never a ratio again.
+  - name: crown_quilt    # the top view's center: the quilt cell grid
+    view: top
+    region: [0.25, 0.25, 0.75, 0.75]   # normalized image coords, y from top;
+                                       # centered on the framed mattress
+    # cycles across the region are scale-invariant: the top view frames
+    # 1.15*max(L,W) of a rect whose footprint fills it, so the region spans
+    # 0.575*cross-cells; 17 cells across -> ~9.8 on both axes at ANY job
+    # size. Band [0.6,1.4] tolerates framing slop, excludes micro-prints.
+    cycles: [10, 10]
+    band: [0.6, 1.4]
+    min_amplitude: 6.0   # grey levels; amplitude = half the peak-to-trough
+                         # swing, so the floor means a 12-level visible swing
+    axes: both           # a square quilt grid must read in BOTH directions
 
 tri_budget: 50000     # Simple tier provisional ceiling (open question §9.2)

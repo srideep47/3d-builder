@@ -100,6 +100,10 @@ class AptosGLMProvider(AIProvider):
 
         self.model_id = os.environ.get("APTOS_MODEL_ID") or self.config.get("model_id") or "zai-org/GLM-5.3"
         self.timeout = float(self.config.get("timeout_sec") or 120.0)
+        # SDK-level retry for transient failures (429/5xx/connection): the
+        # batch phase runs several agent loops against one endpoint
+        # concurrently; the client's own exponential backoff absorbs bursts.
+        self.max_retries = int(self.config.get("max_retries") or 4)
         self.default_temp = float(self.config.get("temperature") or 0.1)
         self.log = log or InferenceLog()
 
@@ -107,6 +111,7 @@ class AptosGLMProvider(AIProvider):
             base_url=self.base_url,
             api_key=self.api_key,
             timeout=self.timeout,
+            max_retries=self.max_retries,
         )
         self._vision_cached: bool | None = None
 

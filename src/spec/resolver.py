@@ -20,12 +20,17 @@ def _to_meters(values: list[float], unit: Unit) -> list[float]:
 
 def _resolve_material(mat: PBRMaterial) -> dict[str, Any]:
     """Merge a material spec with its preset. Only explicitly-set fields override
-    the preset's values (via pydantic's model_fields_set)."""
+    the preset's values (via pydantic's model_fields_set). An explicit JSON null
+    marks the field as set but carries no value — it is treated as UNSET (the
+    preset wins) instead of being iterated or float()-ed into a TypeError."""
     if not mat.preset:
-        return mat.model_dump()
+        # No preset to merge against: drop explicitly-null optionals so the
+        # harness sees clean defaults rather than None payloads.
+        return {k: v for k, v in mat.model_dump().items() if v is not None}
 
     merged = get_preset_values(mat.preset)
-    fields_set = mat.model_fields_set
+    fields_set = {k for k in mat.model_fields_set
+                  if getattr(mat, k, None) is not None}
     if "color" in fields_set:
         merged["color"] = [float(c) for c in mat.color]
     if "roughness" in fields_set:
@@ -77,8 +82,15 @@ def _resolve_part(part: PartSpec, unit: Unit) -> dict[str, Any]:
             p_dict["path_closed"] = True
     if part.caps != "ngon":
         p_dict["caps"] = part.caps
+    if part.seam_rings:
+        p_dict["seam_rings"] = [
+            {"z": unit.to_meters(s.z), "depth": unit.to_meters(s.depth)}
+            for s in part.seam_rings
+        ]
     if part.segments:
         p_dict["segments"] = int(part.segments)
+    if part.texel_priority != 1.0:
+        p_dict["texel_priority"] = float(part.texel_priority)
     if part.method.value != "parametric":
         p_dict["method"] = part.method.value
     if part.image_crop:
@@ -87,6 +99,20 @@ def _resolve_part(part: PartSpec, unit: Unit) -> dict[str, Any]:
         p_dict["mesh_path"] = part.mesh_path
     if part.target_size:
         p_dict["target_size"] = _to_meters(part.target_size, unit)
+    if part.mesh_scale != "fit":
+        p_dict["mesh_scale"] = part.mesh_scale
+    if part.retopology is not None:
+        # R2 (docs/MESH_SOURCES.md §8): rides through for the harness, which
+        # owns the tool call and the fail-closed no-op guard. voxel_size is a
+        # length in SPEC UNITS — converted here like every other length;
+        # target_faces is a count.
+        r = part.retopology
+        rd: dict[str, Any] = {"tool": r.tool}
+        if r.target_faces is not None:
+            rd["target_faces"] = int(r.target_faces)
+        if r.voxel_size is not None:
+            rd["voxel_size"] = unit.to_meters(r.voxel_size)
+        p_dict["retopology"] = rd
     if part.code:
         p_dict["code"] = part.code
 

@@ -266,10 +266,31 @@ def test_chiral_uv_diagnostics(runner):
     })
     assert result["success"], result.get("error")
     uv = result["uv"]
+    # one island per box FACE: two boxes × six single-quad sides, and the
+    # 90° side normals exceed the 66° smart-project angle limit, so no sides
+    # share an island (there is no coplanar adjacency in this fixture — the
+    # UV-continuity MERGE regression is pinned on the mattress template in
+    # test_template_harness.py, where 2118 UV-contiguous faces collapse to
+    # 80 islands; the old loop-matching bug reported one island per face).
     assert uv["islands_total"] == 12, "expected one island per box face"
     assert uv["in_bounds"] is True
     assert uv["overlapping_island_pairs"] == 0
     assert uv["texel_density_texels_per_m"]["ratio"] < 1.05
+    # per-object rollup: shares sum to 1 and each object's density matches its
+    # islands (the standing diagnostic — a starving surface must be visible
+    # without mining the islands list; worst density sorts first)
+    per_obj = uv["texel_density_per_object"]
+    assert set(per_obj) == {"base", "boss"}
+    assert sum(e["atlas_share"] for e in per_obj.values()) == pytest.approx(1.0, abs=1e-9)
+    assert sum(e["world_area_share"] for e in per_obj.values()) == pytest.approx(1.0, abs=1e-9)
+    for name, e in per_obj.items():
+        own = [i for i in uv["islands"] if i["object"] == name]
+        assert e["islands"] == len(own)
+        assert e["uv_area"] == pytest.approx(sum(i["uv_area"] for i in own))
+        assert e["texels_per_m_island_min"] == pytest.approx(min(i["texels_per_m"] for i in own))
+    densities_obj = [e["texels_per_m"] for e in per_obj.values()]
+    assert list(per_obj.values())[0]["texels_per_m"] == min(densities_obj), \
+        "per-object entries must sort worst (lowest) texel density first"
     # quad-clean by construction; n-gons must be zero (never triangulated here)
     topo = result["topology"]
     assert topo["ngons"] == 0 and topo["quads"] == 12

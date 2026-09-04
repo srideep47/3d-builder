@@ -21,8 +21,16 @@ import yaml
 from ..ai.aptos import load_ai_config
 from ..blender.locate import locate_blender
 from ..client.gates import MeshFacts, run_all_gates
-from ..client.job import JobCard, JobDims, load_job
+from ..client.job import (
+    IntakeError,
+    JobCard,
+    JobDims,
+    intake_from_prompt,
+    load_job,
+)
 from ..materials.pbr import list_material_presets
+from ..neural.router import RouteError, decide_route
+from ..neural.view_diversity import measure_view_diversity
 from ..run_store import RunStore
 from ..spec.schema import ObjectSpec
 from ..spec.template import load_template
@@ -115,10 +123,132 @@ def create_app(pipeline=None) -> FastAPI:
 
     # ── build ────────────────────────────────────────────────────────────
 
+    VIEW_LABELS = ("front", "back", "left", "right")
+
+    def _validated_views(payload: dict[str, Any]) -> dict[str, str]:
+        """Labelled view slots (§4.1): label → existing absolute path."""
+        views: dict[str, str] = {}
+        for label, path in (payload.get("views") or {}).items():
+            if label not in VIEW_LABELS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unknown view label {label!r} — expected {list(VIEW_LABELS)}")
+            p = Path(str(path))
+            if not p.is_file():
+                raise HTTPException(
+                    status_code=400, detail=f"view image not found: {path}")
+            views[label] = str(p.resolve())
+        return views
+
+    def _intake_card(payload: dict[str, Any]) -> JobCard:
+        """One JobCard from the neural-intake form + prompt (§4.1): form
+        dims are explicit owner values (never placeholders), prompt
+        constraints ride intake_from_prompt's deterministic parser, and a
+        prompt without dims AND without form dims is REFUSED — rule 9 does
+        not bend for neural input (stop condition S2). The card is saved to
+        input/jobs/ for provenance (never overwriting)."""
+        prompt = str(payload.get("prompt", "")).strip()
+        dims_in = payload.get("dims") or {}
+        explicit: JobDims | None = None
+        try:
+            if dims_in.get("length") and dims_in.get("width") and dims_in.get("height") and dims_in.get("unit"):
+                explicit = JobDims(
+                    length=float(dims_in["length"]),
+                    width=float(dims_in["width"]),
+                    height=float(dims_in["height"]),
+                    unit=str(dims_in["unit"]).strip(),
+                )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid dims: {e}")
+
+        code = str(payload.get("job_code", "")).strip() or f"WEB{uuid.uuid4().hex[:6].upper()}"
+        product_class = str(payload.get("product_class", "")).strip()
+        reference_dir = str(payload.get("reference_dir") or PROJECT_ROOT / "input" / "reference")
+        try:
+            card = intake_from_prompt(
+                prompt,
+                job_code=code,
+                product_class=product_class or "unclassified",
+                reference_dir=Path(reference_dir),
+                complexity=str(payload.get("complexity") or "simple"),
+                orientation=str(payload.get("orientation") or "floor"),
+                part_scope=str(payload.get("part_scope", "")).strip(),
+                explicit_dims=explicit,
+            )
+        except IntakeError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"intake refused (rule 9 — dimensions are never "
+                       f"inferred): {e}")
+
+        # provenance: the card behind every package the compliance panel lists
+        card_path = Path(app.state.jobs_dir) / f"{card.job_code}.yaml"
+        if not card_path.exists():
+            try:
+                from ..client.job import dump_job_yaml
+
+                card_path.parent.mkdir(parents=True, exist_ok=True)
+                card_path.write_text(dump_job_yaml(card), encoding="utf-8")
+            except Exception:
+                pass  # provenance best-effort; the run carries the card anyway
+        return card
+
+    def _diversity_payload(views: dict[str, str]) -> dict[str, Any]:
+        ordered = [views[label] for label in VIEW_LABELS if label in views]
+        result = measure_view_diversity(ordered)
+        return {
+            "score": result.score,
+            "max_pairwise": result.max_pairwise,
+            "min_pairwise": result.min_pairwise,
+            "image_count": result.image_count,
+            "warned": result.warned,
+            "reason": result.reason,
+            "describe": result.describe(),
+        }
+
+    def _route_decision(payload: dict[str, Any], views: dict[str, str], card: JobCard | None):
+        """Decide (or validate a forced) route — §4.0.5. A forced route that
+        cannot run REFUSES here with a named reason, never falls back."""
+        prompt = str(payload.get("prompt", "")).strip()
+        product_class = card.product_class if card is not None else str(payload.get("product_class", "")).strip()
+        ordered = [views[label] for label in VIEW_LABELS if label in views]
+        forced = str(payload.get("route") or "auto").strip().lower()
+        try:
+            return decide_route(
+                prompt=prompt,
+                product_class=product_class or None,
+                views=ordered,
+                forced=forced,
+                templates_dir=app.state.templates_dir,
+            )
+        except RouteError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.post("/api/intake/preview")
+    def intake_preview(payload: dict[str, Any]) -> dict[str, Any]:
+        """Pre-run intake evidence (§4.1): view-diversity score + warning,
+        the Auto route decision WITH its one-line reason (the owner sees it
+        and can override before spending GPU time), and the rule-9 dims
+        verdict — all without starting anything."""
+        views = _validated_views(payload)
+        decision = _route_decision(payload, views, None)
+        intake: dict[str, Any] = {"ok": True, "error": None}
+        try:
+            _intake_card(payload)
+        except HTTPException as e:
+            intake = {"ok": False, "error": str(e.detail)}
+        return {
+            "diversity": _diversity_payload(views),
+            "route": decision.to_dict(),
+            "intake": intake,
+        }
+
     @app.post("/api/build")
     async def build(payload: dict[str, Any]) -> dict[str, Any]:
         mode = str(payload.get("mode", "ai")).lower()
-        if mode == "spec":
+        route_opt = str(payload.get("route") or "").strip().lower()
+
+        if mode == "spec" and not route_opt:
             spec_data = payload.get("spec")
             if not isinstance(spec_data, dict):
                 raise HTTPException(status_code=400, detail="mode 'spec' requires a 'spec' object")
@@ -127,17 +257,52 @@ def create_app(pipeline=None) -> FastAPI:
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Invalid ObjectSpec: {e}")
             run_id = registry.start_spec(spec)
-        else:
-            prompt = str(payload.get("prompt", "")).strip()
-            if not prompt:
-                raise HTTPException(status_code=400, detail="mode 'ai' requires a non-empty 'prompt'")
-            images = [str(p) for p in (payload.get("images") or []) if Path(str(p)).exists()]
-            run_id = registry.start_ai(
-                prompt=prompt,
-                measurements=str(payload.get("measurements", "")),
-                material_preset=payload.get("material_preset") or None,
-                images=images,
-            )
+            return {"run_id": run_id}
+
+        if mode == "neural" or route_opt:
+            # §4.0.5 routed flow: intake card (rule 9 fires here), route
+            # decision recorded in the manifest, dispatch per route.
+            card = _intake_card(payload)
+            views = _validated_views(payload)
+            decision = _route_decision(payload, views, card)
+            if decision.route == "neural" and not views:
+                raise HTTPException(
+                    status_code=400,
+                    detail="the neural route needs labelled reference views "
+                           "(front required) — upload them first")
+            if decision.route == "template":
+                template_path = Path(app.state.templates_dir) / (decision.template_file or "")
+                run_id = registry.start_template(card, template_path, decision.to_dict())
+            elif decision.route == "parametric":
+                images = [views[label] for label in VIEW_LABELS if label in views]
+                run_id = registry.start_ai(
+                    prompt=str(payload.get("prompt", "")).strip() or card.job_code,
+                    measurements=str(payload.get("measurements", "")),
+                    material_preset=payload.get("material_preset") or None,
+                    images=images,
+                    job_card=card,
+                    route_decision=decision.to_dict(),
+                )
+            else:
+                run_id = registry.start_neural(
+                    views=views,
+                    job_card=card,
+                    route_decision=decision.to_dict(),
+                    declared_fabric=bool(payload.get("declared_fabric")),
+                    max_tris=int(payload.get("max_tris") or 50000),
+                )
+            return {"run_id": run_id, "route": decision.to_dict()}
+
+        prompt = str(payload.get("prompt", "")).strip()
+        if not prompt:
+            raise HTTPException(status_code=400, detail="mode 'ai' requires a non-empty 'prompt'")
+        images = [str(p) for p in (payload.get("images") or []) if Path(str(p)).exists()]
+        run_id = registry.start_ai(
+            prompt=prompt,
+            measurements=str(payload.get("measurements", "")),
+            material_preset=payload.get("material_preset") or None,
+            images=images,
+        )
         return {"run_id": run_id}
 
     @app.post("/api/runs/{run_id}/cancel")
@@ -179,17 +344,39 @@ def create_app(pipeline=None) -> FastAPI:
             f"/api/runs/{run_id}/file/steps/{p.name}" for p in sorted((run_dir / "steps").glob("*.glb"))
         ] if (run_dir / "steps").is_dir() else []
 
+        # final.glb is the agent-loop convention; neural/template runs keep
+        # their GLB elsewhere (e.g. neural/<name>.glb) — serve it via the
+        # manifest's path when it lives inside the run dir.
+        final_glb_url = (
+            f"/api/runs/{run_id}/file/final.glb"
+            if (run_dir / "final.glb").exists() else None
+        )
+        if final_glb_url is None and manifest:
+            glb_path = Path(str(manifest.get("final_glb_path") or ""))
+            try:
+                if glb_path.is_file() and run_dir.resolve() in glb_path.resolve().parents:
+                    final_glb_url = (
+                        f"/api/runs/{run_id}/file/"
+                        f"{glb_path.resolve().relative_to(run_dir.resolve()).as_posix()}"
+                    )
+            except (ValueError, OSError):
+                pass
+
         return {
             "run_id": run_id,
             "live": active is not None and active.status == "running",
             "status": (active.status if active else None) or (manifest or {}).get("status"),
-            "mode": active.mode if active else ("spec" if "ui_spec" in run_id else "ai"),
+            "mode": active.mode if active else (
+                "spec" if "ui_spec" in run_id
+                else "template" if "ui_template" in run_id
+                else "neural" if "ui_neural" in run_id
+                else "ai"),
             "label": active.label if active else (manifest or {}).get("model_name"),
             "manifest": manifest,
             "spec": spec,
             "renders": renders,
             "steps": steps,
-            "final_glb": f"/api/runs/{run_id}/file/final.glb" if (run_dir / "final.glb").exists() else None,
+            "final_glb": final_glb_url,
             "run_dir": str(run_dir),
             "events": registry.history(run_id),
         }

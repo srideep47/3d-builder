@@ -1,0 +1,29 @@
+job_code: MAILBOX0001
+dims:
+  length: 260.0
+  width: 130.0
+  height: 200.0
+  unit: mm
+complexity: simple
+orientation: wall
+product_class: wall_mailbox
+part_scope: ''
+reference_dir: D:\Work\LegionStudios\3d-builder\input\references\PHASE6-B-MAILBOX
+axis_map:
+  length: x
+  width: y
+  height: z
+dim_tolerance: null
+dims_placeholder: false
+polycount_ceiling: 20000
+polycount_semantics: triangles
+file_size_caps: null
+required_formats: null
+texture_resolution: null
+fbx_axis_up: null
+fbx_axis_forward: null
+intake_evidence:
+  dims: 260 x 130 x 200 mm — quoted from the prompt
+  polycount_ceiling: '20,000 from ''under 20,000 triangles'' (semantics: triangles)'
+  complexity: 'from ''complexity: simple'''
+  orientation: from 'wall-mounted'

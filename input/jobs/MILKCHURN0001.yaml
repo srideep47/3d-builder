@@ -1,0 +1,30 @@
+job_code: MILKCHURN0001
+dims:
+  length: 340.0
+  width: 340.0
+  height: 640.0
+  unit: mm
+complexity: simple
+orientation: floor
+product_class: milk_churn
+part_scope: ''
+reference_dir: D:\Work\LegionStudios\3d-builder\input\references\PHASE7-E-MILKCHURN
+axis_map:
+  length: x
+  width: y
+  height: z
+dim_tolerance: null
+dims_placeholder: false
+polycount_ceiling: 20000
+polycount_semantics: null
+file_size_caps: null
+required_formats: null
+texture_resolution: null
+fbx_axis_up: null
+fbx_axis_forward: null
+intake_evidence:
+  dims: 340 x 340 x 640 mm — quoted from the prompt
+  polycount_ceiling: 20,000 from 'polycount ceiling 20,000' (semantics unstated →
+    triangle_equivalent default)
+  complexity: 'from ''complexity: simple'''
+  orientation: from 'floor-standing'

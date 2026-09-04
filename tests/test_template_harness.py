@@ -35,7 +35,8 @@ JOB = PROJECT_ROOT / "input" / "jobs" / "MAYA00053153.yaml"
 # the placeholder job card: 12 x 12 x 65 IN stand-ins
 NOM = {"x": 0.3048, "y": 0.3048, "z": 1.651}
 EZ = NOM["z"]
-P_MAX = 0.035 * EZ  # tape protrusion (largest of the template's tapes)
+SCALE = min(NOM.values())  # tape fractions are of the cross-section scale
+P_MAX = 0.023 * SCALE  # tape cord radius*2 (round-3: rounded cord, 2-3% of H)
 A_BODY = NOM["x"] / 2 - P_MAX  # inset band wall half-width
 
 
@@ -64,7 +65,7 @@ def quad_scene(runner, tmp_path_factory):
         resolve_spec_to_build_params(spec, output_glb_path=str(blend)))
     assert res["success"], res.get("error")
     assert res["warnings"] == []
-    assert res["parts_created"] == 12
+    assert res["parts_created"] == 14
     return blend
 
 
@@ -109,8 +110,8 @@ RESULT = out
 # ── every part is a real, closed, quad/tri-only mesh ─────────────────────────
 
 
-def test_twelve_real_mesh_parts(objects):
-    assert len(objects) == 12  # 8 bands + 3 tapes + decal
+def test_all_real_mesh_parts(objects):
+    assert len(objects) == 14  # 6 bands + 3 tapes + 4 handles + decal (round 4)
     for name, o in objects.items():
         assert o["quad"] + o["tri"] > 0, name
 
@@ -130,11 +131,13 @@ def test_every_part_is_an_independently_closed_solid(objects):
 
 
 def test_dome_is_quads_plus_pole_fans(objects):
-    """The crown script part: SEG*RINGS ring quads + two triangle fans
-    (pole + base), deterministically."""
+    """The crown script part (round-3 quilt rework): a Cartesian grid cap —
+    (lines_x-1) x (lines_y-1) quads with stitch valleys exactly on grid
+    lines — plus one triangle fan closing the flat bottom. On this square
+    placeholder job both axes derive 17 cells -> 85 grid lines each."""
     crown = objects["crown"]
-    assert crown["quad"] == 48 * 9  # rings 1..9 of 10
-    assert crown["tri"] == 48 * 2   # apex pole fan + base cap fan
+    assert crown["quad"] == 84 * 84  # grid quads (17 cells x 4 divisions)
+    assert crown["tri"] == 2 * 84 + 2 * 84  # boundary-loop cap fan
 
 
 # ── the geometry contract: nominal silhouette ────────────────────────────────
@@ -144,7 +147,7 @@ def test_band_walls_are_inset_by_the_tape_protrusion(objects):
     body = objects["air_mesh"]
     assert body["x"][1] - body["x"][0] == pytest.approx(2 * A_BODY, abs=2e-4)
     assert body["y"][1] - body["y"][0] == pytest.approx(2 * A_BODY, abs=2e-4)
-    assert body["z"][1] - body["z"][0] == pytest.approx(0.17 * EZ, abs=2e-4)
+    assert body["z"][1] - body["z"][0] == pytest.approx(0.15 * EZ, abs=2e-4)
     # centred on the footprint
     assert body["x"][0] == pytest.approx(-A_BODY, abs=2e-4)
 
@@ -156,7 +159,96 @@ def test_tape_outer_faces_land_exactly_on_nominal(objects):
         assert t["x"][0] == pytest.approx(-NOM["x"] / 2, abs=2e-4), tape
         assert t["y"][0] == pytest.approx(-NOM["y"] / 2, abs=2e-4), tape
         assert t["y"][1] == pytest.approx(NOM["y"] / 2, abs=2e-4), tape
-        assert t["z"][1] - t["z"][0] == pytest.approx(0.045 * EZ, abs=2e-4)
+        assert t["z"][1] - t["z"][0] == pytest.approx(0.023 * SCALE, abs=2e-4)  # cord diameter
+
+
+def test_tape_section_is_a_round_cord_flush_on_the_wall(runner, quad_scene):
+    """§5.2 DEFECT 1 regression pin (round-3 cord form): binding tape HUGS
+    the wall — a round cord whose INNER TANGENT sits on the band wall and
+    whose OUTER TANGENT lands exactly on the nominal silhouette (one
+    protrusion of stand-off). Measured on tape_1's +X-flat ring (path point
+    0 sits at y = 0, x > 0, so the whole section ring is on that flat).
+    The old [2*protrusion x thickness] half-buried section of H rendered as
+    58 mm collars; the flat-strip form read too thin vs the reference
+    photos (round-3 correction: a rounded cord, 2-3% of H)."""
+    code = r"""
+import bpy
+from mathutils import Vector
+tape = bpy.data.objects["tape_1"]
+xs, zs = [], []
+for v in tape.data.vertices:
+    w = tape.matrix_world @ v.co
+    if abs(w.y) < 1e-6 and w.x > 0:  # the +X flat only (y=0 also hits -X)
+        xs.append(w.x)
+        zs.append(w.z)
+RESULT = {"xs": sorted(xs), "z0": min(zs), "z1": max(zs), "n": len(zs)}
+"""
+    res = runner.execute_op("run_script", {"code": code, "input": str(quad_scene)})
+    assert res["success"], res.get("error")
+    sec = res["result"]
+    assert sec["n"] == 12  # one 12-gon section ring at the +X flat
+    assert min(sec["xs"]) == pytest.approx(A_BODY, abs=1e-5)  # inner tangent on wall
+    assert max(sec["xs"]) == pytest.approx(A_BODY + P_MAX, abs=1e-5)  # outer on nominal
+    assert sec["z1"] - sec["z0"] == pytest.approx(P_MAX, abs=1e-5)  # cord diameter
+    # centred on the crown/air-mesh boundary
+    assert (sec["z0"] + sec["z1"]) / 2 == pytest.approx(0.72 * EZ, abs=1e-5)
+
+
+@pytest.fixture(scope="module")
+def prepared_scene(runner):
+    """The compiled mattress through prepare_delivery_scene (build + UV
+    atlas + diagnostics) — the UV-side evidence for the defect-2 fix."""
+    from src.client.job import load_job
+    from src.spec.resolver import resolve_spec_to_build_params
+    from src.spec.template import compile_spec, load_template
+
+    spec, _warnings = compile_spec(load_template(TEMPLATE), load_job(JOB))
+    res = runner.execute_op(
+        "prepare_delivery_scene",
+        {"build": resolve_spec_to_build_params(spec)})
+    assert res["success"], res.get("error")
+    return res
+
+
+def test_uv_contiguous_faces_merge_into_few_islands(prepared_scene):
+    """DEFECT 2 regression pin (UV half): _uv_face_groups must merge
+    UV-contiguous faces across shared edges. The old loop-matching bug
+    compared ONE corner per face across a shared edge — consistent winding
+    puts those two corners at opposite ends of the edge, so they can never
+    match — and every face became a one-face island: margin-dominated
+    packing (~1/3 target texel density), then bake-margin bleed across the
+    wall islands (the black-and-white blotch defect). With vertex-keyed
+    matching the mattress collapses to ~150 islands. (Counts are round-3
+    values: the crown became a real quilted grid cap, the border gained a
+    white band, and four carry-handle boxes were added.)"""
+    uv = prepared_scene["uv"]
+    topo = prepared_scene["topology"]
+    assert topo["faces_total"] == 10158  # round-4: quilted crown + 6 bands
+    # (one velvet mass whose 2 seam creases add 6 wall rings) + handles
+    # + 576-face round-cord tapes (12-gon ring x 48 segments)
+    # island count shifts a little with quilt softness (smart-project groups
+    # by face-normal adjacency — exponent/amplitude tuning moves a few
+    # faces across the 66-degree limit) and with feature count (each handle
+    # box adds 6); the regression this pins is the loop-matching bug, which
+    # produced ONE ISLAND PER FACE (~9000)
+    assert 120 <= uv["islands_total"] <= 170
+    assert uv["overlapping_island_pairs"] == 0
+    assert uv["in_bounds"] is True
+    # Phase 8 item 1: the decal patch authors 4x texel priority (the
+    # illegible-label fix), so the RAW ratio now honestly reports the
+    # authored spread (~4.0) — uniformity lives in the priority-weighted
+    # ratio, which must stay within the old 5% bound
+    assert uv["texel_density_texels_per_m"]["ratio"] == pytest.approx(4.0, rel=0.05)
+    assert uv["texel_density_texels_per_m"]["ratio_priority_weighted"] < 1.05
+    # round-3: the round-cord tapes carry ~3x the strip surface into the
+    # atlas, so the pack scale dropped from 0.75 (flat strips). Phase 8
+    # item 1 moved it back UP one ladder rung: the decal's 4x priority
+    # renormalises rho, shrinking every non-decal island's target ~1.2x in
+    # area — the bulky tape islands then fit on the shelf packer's first
+    # rung (scale ladder is x0.75 per retry: 1.0 -> 0.75 -> 0.5625), so
+    # real atlas utilisation (and every plain surface's absolute texel
+    # density) went UP, not down
+    assert prepared_scene["uv_atlas"]["pack_scale"] == pytest.approx(0.75, abs=0.01)
 
 
 def test_overall_bounds_exactly_nominal(objects):
@@ -183,8 +275,44 @@ def test_decal_recessed_behind_the_tape_plane(objects):
     assert d["y"][1] - d["y"][0] == pytest.approx(0.3 * P_MAX, abs=2e-4)
     h = d["z"][1] - d["z"][0]
     w = d["x"][1] - d["x"][0]
-    assert h == pytest.approx(0.38 * EZ, abs=2e-4)
+    assert h == pytest.approx(0.34 * EZ, abs=2e-4)  # round-3: ~74% of the
+    # tape-to-tape border stack — taller and narrower than the first pass
     assert h > w  # portrait per §5.3
+    # round 4: centred on the single velvet mass (z 0.21..0.48 of H)
+    assert (d["z"][0] + d["z"][1]) / 2 == pytest.approx(0.345 * EZ, abs=2e-4)
+
+
+def test_carry_handles_cross_the_full_stack_inside_nominal(objects):
+    """Round-3 correction (photo 9.28.35): the carry handles exist — two
+    vertical straps per long side at the quarter points. Contract: the
+    strap z-span is the FULL border stack (bottom tape line to top tape
+    line), the outer face stays behind the tape plane (never widens the
+    nominal silhouette, never z-fights the tapes it crosses), and the
+    inner face is buried past the curved wall (no floating gap)."""
+    handles = {n: o for n, o in objects.items() if n.startswith("handle_")}
+    assert len(handles) == 4  # 2 per long side, front and back
+    z0 = 0.10 * EZ   # knit_bottom bottom  (bottom tape line, round 4)
+    z1 = 0.72 * EZ   # crown bottom       (top tape line)
+    for name, hd in handles.items():
+        assert hd["z"][0] == pytest.approx(z0, abs=2e-4), name
+        assert hd["z"][1] == pytest.approx(z1, abs=2e-4), name
+        # behind the tape plane, proud of the wall, buried past the wall —
+        # sign-independent (front handles sit at -y, back handles at +y)
+        y_out = max(abs(hd["y"][0]), abs(hd["y"][1]))
+        y_in = min(abs(hd["y"][0]), abs(hd["y"][1]))
+        assert y_out < NOM["y"] / 2, name   # never widens the silhouette
+        assert y_out > A_BODY, name         # visibly raised off the wall
+        assert y_in < A_BODY, name          # no floating gap under the strap
+        assert (hd["x"][1] - hd["x"][0]) == pytest.approx(0.08 * SCALE, abs=2e-4)
+    # quarter points of the length, mirrored front/back
+    xcs = sorted({round((hd["x"][0] + hd["x"][1]) / 2.0, 4) for hd in handles.values()})
+    assert xcs == pytest.approx([-NOM["x"] / 4, NOM["x"] / 4])
+    fronts = [hd for n, hd in handles.items() if "front" in n]
+    backs = [hd for n, hd in handles.items() if "back" in n]
+    assert len(fronts) == 2 and len(backs) == 2
+    for f, b in zip(sorted(fronts, key=lambda o: o["x"][0]),
+                    sorted(backs, key=lambda o: o["x"][0])):
+        assert f["x"][0] == pytest.approx(b["x"][0])
 
 
 # ── triplanar label orientation (the +0.5 Mapping offset contract) ───────────
@@ -287,3 +415,101 @@ RESULT = {{"png": r"{out_png}"}}
     assert scores["identity"] > scores["flipud"] + 0.1, scores   # upright
     assert scores["identity"] > scores["fliplr"] + 0.1, scores   # unmirrored
     assert scores["identity"] > scores["both"] + 0.1, scores
+
+
+# ── round 4: seam rings (one velvet mass) + the cross-key review rig ─────────
+
+
+def test_velvet_seam_rings_press_inward_inside_the_wall(runner, quad_scene, objects):
+    """Round-4 band correction: ONE velvet mass with two FAINT stitched
+    seams — real LP geometry, not a colour change. The wall carries 8 rings
+    (base, 2 x 3 crease rings, top); the crease rings sit exactly at 1/3 and
+    2/3 of the band height, pressed INWARD by ~depth along the local wall
+    normal (the bounds contract holds — the seam can never widen the
+    silhouette), with crease half-width 2 x depth."""
+    depth = 0.0065 * SCALE
+    w = 2.0 * depth
+    z0, h = 0.21 * EZ, 0.27 * EZ  # velvet band base and height (of H)
+    expect_z = [z0,
+                z0 + h / 3 - w, z0 + h / 3, z0 + h / 3 + w,
+                z0 + 2 * h / 3 - w, z0 + 2 * h / 3, z0 + 2 * h / 3 + w,
+                z0 + h]
+    code = r"""
+import bpy
+from mathutils import Vector
+v = bpy.data.objects["velvet"]
+rings = {}
+for vtx in v.data.vertices:
+    wc = v.matrix_world @ vtx.co
+    rings.setdefault(round(wc.z, 5), []).append((wc.x, wc.y))
+RESULT = [{"z": z, "n": len(p), "r": max((x * x + y * y) ** 0.5 for x, y in p)}
+          for z, p in sorted(rings.items())]
+"""
+    res = runner.execute_op("run_script", {"code": code, "input": str(quad_scene)})
+    assert res["success"], res.get("error")
+    rings = res["result"]
+    assert len(rings) == 8
+    for ring, ez in zip(rings, expect_z):
+        assert ring["z"] == pytest.approx(ez, abs=2e-4)
+        # base/top buckets include the fan-cap centre vertex
+        assert ring["n"] == (49 if ring in (rings[0], rings[-1]) else 48)
+    wall_r = rings[0]["r"]
+    for i in (2, 5):  # the crease rings: pressed inward by ~depth
+        assert wall_r - 3.0 * depth < rings[i]["r"] < wall_r - 0.5 * depth, i
+    for i in (0, 1, 3, 4, 6, 7):
+        assert rings[i]["r"] == pytest.approx(wall_r, abs=1e-4), i
+    # topology: 7 wall strips x 48 quads + 2 fan caps (96 tris), no n-gons
+    v = objects["velvet"]
+    assert v["quad"] == 7 * 48
+    assert v["tri"] == 2 * 48
+    assert v["ngon"] == 0
+
+
+def test_review_rig_is_cross_key_without_axis_privilege(runner, quad_scene):
+    """Round 4, owner's order: the review renders are the QUALITY GATE, so
+    the rig must not misrepresent the model. A single key shades only the
+    relief lines perpendicular to its azimuth (measured on the round-3 rig:
+    12x FFT power asymmetry between the quilt axes — a correct square grid
+    photographed as one-directional corduroy). The Phase 8.2 tune (the §H
+    lesson) moved both keys to 10° RAKING elevation: relief contrast
+    scales with cot(elevation), and the round-4 40° keys left the 14 mm
+    quilt under the absolute floor (0.81/0.96 grey levels while the FFT
+    axis ratio read a healthy 0.87 — a ratio reaches 1.0 when both terms
+    go to zero). Contract: TWO keys whose horizontal travel directions are
+    perpendicular (each rakes one quilt axis at full strength), SHALLOW
+    downward travel (raking, not the steep flattening round-4 geometry),
+    fill a whisper (measured ~0.5 grey levels of quilt amplitude lost per
+    0.1 fill energy), and total energy under the round-3 rig's 7 W that
+    clipped highlights to pure white. The absolute amplitude floor itself
+    is pinned in tests/test_render_rig.py against the rendered fixture."""
+    code = r"""
+import bpy, sys
+from mathutils import Vector
+harness = sys.modules["__main__"]
+harness.setup_studio_lighting()
+out = {}
+for o in bpy.data.objects:
+    if o.type == "LIGHT" and o.data.type == "SUN":
+        d = o.rotation_euler.to_matrix() @ Vector((0, 0, -1))
+        out[o.name] = {"dir": [round(c, 4) for c in d],
+                       "energy": round(o.data.energy, 3)}
+RESULT = out
+"""
+    res = runner.execute_op("run_script", {"code": code, "input": str(quad_scene)})
+    assert res["success"], res.get("error")
+    lights = res["result"]
+    assert set(lights) == {"KeyA", "KeyB", "FillLight", "RimLight"}
+    a, b = lights["KeyA"]["dir"], lights["KeyB"]["dir"]
+    # raking: both travel downward, SHALLOWLY (10° tuned; ~3-17° band)
+    assert a[2] < -0.05 and b[2] < -0.05
+    assert a[2] > -0.30 and b[2] > -0.30
+    # perpendicular horizontal travel — neither quilt axis is privileged
+    dot = a[0] * b[0] + a[1] * b[1]
+    assert abs(dot) < 0.01, dot
+    # each key rakes at full horizontal strength along its own axis
+    assert abs(a[0]) > 0.7 and abs(a[1]) < 0.01  # KeyA travels along X
+    assert abs(b[1]) > 0.7 and abs(b[0]) < 0.01  # KeyB travels along Y
+    # fill is a whisper — it flattens relief amplitude measurably
+    assert lights["FillLight"]["energy"] <= 0.2
+    total = sum(l["energy"] for l in lights.values())
+    assert total < 7.0  # round-3 rig total (clipped the border to pure white)

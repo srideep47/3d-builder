@@ -8,6 +8,28 @@
 > task's exit criteria before writing code. Context is finite: T3 is expected
 > to span sessions.
 
+## ⛔ OPEN OWNER QUESTIONS (HANDOFF_GLM §7 — keep visible until answered)
+
+1. **MAYA00053153 real dimensions** — L × W × H with explicit unit. Blocks
+   every deliverable package (rule 9; the refusal machinery is active and
+   tested).
+2. Is `.spp` mandatory, or are baked PNG sets acceptable?
+3. Simple-tier polycount ceiling (Medium = 200,000; we use 50k provisional).
+4. FBX axis/unit convention the client's validator expects.
+5. Polycount semantics: triangles or faces? (we use triangle-equivalent,
+   the conservative reading)
+6. File-size caps: decimal MB or binary MiB? (we enforce decimal, stricter)
+7. ~~Are the vertical side straps carry handles, and should they be
+   modelled?~~ **CLOSED round 3** (owner's eyes + photo 9.28.35): yes, they
+   are carry handles and they ARE modelled (2 per long side, quarter
+   points). The owner independently confirmed seeing them in the round-3
+   render — the Gemini "missing straps" read was a VLM miss.
+
+~~Replace the NISIEN label placeholder~~ **DONE round 4**:
+`input/decals/MAYA00053153/albedo.png` is now the real photo crop from
+9.28.22 (see `output/make_decal_crop.py`); the synthetic stand-in and its
+magenta-noise purple cast are gone.
+
 ---
 
 ## T0 — Clean the tree ✅ (2026-09-01)
@@ -387,8 +409,12 @@ the map set is hand-tuned yet). The USDZ still exports from the LP GLB
 > stand-in numbers (12 × 12 × 65 IN, `dims_placeholder: true`). The full
 > chain runs and produces structural review renders, but **NO deliverable
 > package is emitted** — dimensions are never inferred and a standard
-> queen size is never guessed (rule 9). Evidence:
-> `output/blocked/MAYA00053153/qa_report.json`. **To unblock:** put the
+> queen size is never guessed (rule 9). Evidence (two different places —
+> do not conflate them): refusal report at
+> `output/blocked/MAYA00053153/qa_report.json`; review renders at
+> `output/finish/MAYA00053153/review/MAYA00053153_{front,side,top,iso}.png`
+> (HANDOFF_GLM correction, 2026-09-01: the renders are NOT in
+> `output/blocked/`). **To unblock:** put the
 > real L × W × H (explicit unit) into `input/jobs/MAYA00053153.yaml`,
 > delete the `dims_placeholder` line, re-run
 > `python -m src.cli package --job input/jobs/MAYA00053153.yaml --template templates/mattress.yaml`.
@@ -658,3 +684,2210 @@ PASS with fresh Blender mesh facts.
   vision support, not the VLM provider (pre-existing behaviour, left
   alone)
 
+
+---
+
+## Session 2026-09-01 (afternoon, post-machine-move) — defect fixes verified via the Gemini visual gate ✅
+
+> HANDOFF_GLM.md order of work executed on Scout (Ryzen 5 4600H, GTX 1650
+> Ti 4 GB, CPU-bound Blender). Branch: `wip/defect-fixes` (the in-flight
+> snapshot survived on a branch + origin; the working-tree copy was lost
+> in the move — nothing needed redoing). All work committed there; main
+> untouched at `75e847f`; **nothing pushed** (owner handles pushes).
+
+**Environment confirmed (step 1):**
+- `python -m src.cli health` → green (Blender 4.5.13 portable found, AI
+  endpoint reachable). `THREED_VLM_API_KEY` present at Windows User scope.
+- `python -m pytest tests -q` on main → **238 passed** (228 s — ~2× the
+  old machine's wall time; CPU-bound, expected on Scout).
+
+**In-flight defect fixes recovered and completed (step 2):**
+- The 7-file WIP survived as commit `b874a6a` on `wip/defect-fixes`
+  ("UNTESTED SNAPSHOT"). First full suite against it: 239 passed,
+  1 failed — `test_chiral_uv_diagnostics` expected 6 islands, got 12.
+- **The WIP's test expectation was wrong, not the code**: the chiral
+  fixture is TWO boxes × six single-quad sides — no coplanar adjacency
+  exists in it, so 12 islands (one per face) is the correct count. The
+  "2 coplanar quads merge" premise described a fixture that doesn't exist.
+  Restored the expectation to 12 with a corrected comment; the REAL merge
+  regression is now pinned where merging happens — the mattress.
+- **Empirical probe** (`scripts/probe_uv_islands.py`, keeper):
+  `prepare_delivery_scene` on the compiled mattress → 2118 faces collapse
+  to **84 islands** at MAYA dims (**80** at queen), pack_scale **0.75**
+  (was 0.3164), texel-density ratio 1.0000, 0 overlaps. The vertex-keyed
+  `_uv_face_groups` matching WORKS; the old one-corner-per-face match
+  reported 2118 one-face islands.
+- New/updated tests: `test_uv_contiguous_faces_merge_into_few_islands`
+  (mattress, 84 islands pinned), chiral expectation 12, refusal stub
+  updated to the real observed values (80 / 0.75).
+- **Suite: 241 passed** (baseline 238 + tape-scale pin + tape-section pin
+  + island-merge pin). Committed `cfd937a`.
+
+**Gemini visual gate switched on and CALIBRATED (step 3):**
+- `config/ai.yaml`: `vision.vlm.provider: gemini`, model pinned
+  `gemini-3.6-flash` (local Qwen-VL path stays available for Forge).
+  Provider constructs, key validates against the live endpoint.
+- **The 12 client reference photos were found in `Temp/`** (repo root;
+  the owner dropped them in during this session — the old
+  `D:\Work\Temp\Test Images` path does not exist on Scout). Describe-mode
+  over all 12 returns a full structured reading that agrees with
+  GLM_BRIEF §5 (pillowtop quilt, mesh band, velvet band stack, black
+  perimeter piping, NISIEN label, vertical straps). Durable copy made at
+  `input/references/MAYA00053153/`; both job cards' `reference_dir`
+  updated to point there.
+- New evidence collector `scripts/run_visual_gate.py` (inspection mode /
+  describe mode / full verdict with `--refs`; prints raw responses
+  verbatim; advisory only — never gates).
+
+**DEFECT 1 + DEFECT 2 fixed and proven with before/after gate evidence
+(step 4)** — same prompt, same view set, only the code changed:
+
+| | BEFORE (main `75e847f`, renders preserved at `output/finish/MAYA00053153/review_BEFORE_defects/`) | AFTER (`cfd937a`) |
+|---|---|---|
+| tape_edges | "protrude heavily as thick collar flanges… roughly 4-5% of total height" | "thin black binding strips hug the side surface snugly… roughly 1% of total height" |
+| band_textures | "broken, chaotic black-and-white pixelated blotches and static" | "coherent fabrics… white knit patterns, mesh, dark charcoal velvet stripes" |
+| other_issues | UV corruption, pinched apex, floating rings | none |
+| verdict | **FAIL** | **PASS** |
+
+(Gemini's fractions are accurate: old thickness was exactly 4.5% of H,
+new is 0.83%.) Queen-proportioned inspection also PASS. All three chain
+runs REFUSED as designed (placeholder dims — exit 2, no package emitted).
+
+**Advisory render-vs-reference verdict (queen renders vs the 12 refs):**
+score **4/10**, `matches_reference: false` — "captures the general side
+band layout" with three concrete issues, recorded verbatim:
+1. top lacks distinct tufting/pillowtop depth — flat, blurry wavy
+   textures at the 1K iteration bake
+2. texture distortion / black artifacting along tape edges and corners
+3. side pattern + branding label lack crispness
+Analysis (not yet fixed — owner review + next iteration): the tape strip
+is ~13.7 mm on a ~2 m product, so at 1K the area-proportional atlas gives
+it only a handful of texel rows (thin-feature texel starvation; the 4K
+delivery bake is 4× better); the quilt reads through the normal map only
+(detail-normal blend, 1K); the label is the known procedural placeholder.
+The gate is advisory and per GLM_BRIEF §8 does not judge quilt pitch —
+these are quality-tuning items, not the gross defects above.
+
+**Other findings this session:**
+- `describe_reference_images` truncated mid-sentence at max_tokens 1600
+  on the real 12-photo set (gemini-3.6-flash thinking budget) — budgets
+  bumped 1600→4096 (describe) and 1200→3072 (verdict) in `src/ai/vlm.py`.
+- Chain wall time on Scout: ~2-4 min per full mattress run at 1024²
+  (build → atlas → 5-map bake → decimate → FBX → 4 renders) — 1K
+  iteration bakes are comfortably cheap on CPU.
+
+**Not verified / still blocked:**
+- All seven owner questions at the top of this file (dims first).
+- No MAYA00053153 deliverable package emitted (rule 9 — correct).
+- The queen verdict issues above are recorded, not fixed.
+
+**Next:** owner supplies dimensions → replace in
+`input/jobs/MAYA00053153.yaml`, delete `dims_placeholder`, re-run
+`python -m src.cli package --job input/jobs/MAYA00053153.yaml --template
+templates/mattress.yaml` (4K bake for the real delivery); owner reviews
+the four queen renders at `output/finish/TEST-QUEEN/review/` and tunes
+`height_fraction`s in `templates/mattress.yaml` if the band proportions
+need adjusting (owner-tunable numbers, no code change).
+
+---
+
+## Session log — 2026-09-01 (round 2: reviewer follow-ups on the quilt)
+
+Reviewer follow-ups answered in order. **No quilt-path code was changed**
+(report-first, per instruction); the only code change is the standing
+per-object texel diagnostic (follow-up #3).
+
+### 1. THE ABSENT QUILT — cause identified: neither (a) nor (b)
+
+The reviewer's decision tree assumed texel starvation (a) or pattern
+collapse (b). It is **(c): the quilt is present, correctly oriented, and
+correctly wired end-to-end — but its rendered contrast is ~1 grey level**,
+and what the reviewer saw as "6 soft horizontal stripes" was never quilt
+content at all. Evidence chain (TEST-QUEEN, 1K before-state preserved at
+`output/finish/TEST-QUEEN/maps_1K/` + `review_1K_quilt_absent/`):
+
+- **(b) excluded:** the baked normal map's crown island carries the exact
+  diamond signature — FFT peaks at the corner (6 cycles along world Y,
+  8 along world X — `frequency_y=6`/`frequency=8` as designed, confirmed
+  by a mesh probe: island UV-U ↔ world Y at 0.096 UV/m, UV-V ↔ world X).
+  The second harmonic (16 along X) is present too. A one-axis collapse
+  cannot produce this.
+- **(a) excluded:** the quilt corner amplitude is **±0.032 G at 1K and
+  ±0.029 G at 4K** — resolution-independent. 25 texels/cell at 1K, ~98 at
+  4K. Re-baking at `--res 4096` did NOT make the quilt appear (render
+  quilt-corner power 2.5e9 at 4K vs 2.9e9 at 1K).
+- **amplitude chain:** analytic synthesis of the exact pattern
+  (`grid_diamond`, exponent 1.6, 17.8 mm over 254 mm cells) on the exact
+  island grid puts only **±0.057 G** in the fundamental — the 1.6
+  exponent concentrates the geometry into sharp crests whose energy sits
+  in harmonics. The bake delivers 55% of even that (±0.032) because the
+  HP vertex grid (~7 vertices per cell after subsurf-2) smooths the
+  crests. A ±0.03 G tilt is ~3.7° → ~±1.2 grey levels under the studio
+  sun rig — literally invisible next to the fabric weave.
+- **the "6 stripes" were basecolor aliasing:** the baked basecolor's crown
+  island is dominated by 8 soft bands along world Y (~190 mm period, ±16
+  grey levels). The source albedo is flat at that scale (row-mean ±2) —
+  the bands are a bake-time aliasing beat of the sub-texel fabric detail:
+  the knit weft (9.6 mm period) and the chevron print lines (4 mm thick)
+  against the crown's 10.2 mm bake texel. At 4K the fabric resolves (weft
+  at 3.8 texels/cycle now renders; the 190 mm beat band dropped to ~43%
+  amplitude and is no longer dominant) — and the chevron print itself is
+  now in the map, though still sub-pixel in a 1024 render.
+- **render path exonerated:** with basecolor flattened to grey, the
+  normal-map-only render's crown power is 31% concentrated at the quilt
+  diamond corner — the normal map renders correctly; the quilt is simply
+  ~13× fainter than the albedo stripes were.
+
+**Gemini verdicts (advisory, verbatim recorded):** BEFORE (1K renders):
+defect inspection PASS (tape ~1/35 H thin binding, bands coherent);
+render-vs-reference **4/10** — "Missing detailed top tufting and diamond
+quilting pattern". AFTER (4K renders): defect inspection PASS but flags
+"Minor dark edge artifacts along top perimeter boundary" (see #2);
+render-vs-reference still **4/10** — "Missing top diamond quilted
+pattern", "Flat top surface detailing". Independent confirmation that 4K
+did not fix the quilt — consistent with the amplitude diagnosis.
+
+**Fix direction (NOT implemented — for owner review):** raise the quilt's
+fundamental amplitude — lower `exponent` (1.6 → ~1.0 puts the energy back
+in the fundamental), and/or raise `amplitude_fraction` (0.07), and/or add
+HP subdivision for the crown (`subdivision_levels` in the part detail).
+Separately, the basecolor aliasing says the fabric detail needs to be
+pre-filtered to the bake texel size (or the basecolor baked at higher
+resolution than the geometric maps). 1K stays the iteration default.
+
+### 2. Residual perimeter speckles — NOT the old bleed
+
+Mechanical figures: smallest island-to-island gap is exactly the packer's
+0.01 UV margin (10.2 px at 1K / 41 px at 4K) vs the bake margin max(4,
+res//128) = 8 px at 1K / 32 px at 4K — margins stay under the gaps at
+both resolutions; islands sit 10.2 px off the atlas border; the maps'
+crown rim content is mild (AO 227-244 vs 255 inner, basecolor 224 vs 231)
+— nothing black to bleed.
+
+The speckles (210-380 dark blobs hugging the silhouette, 3-15 px inside)
+**grow with render resolution**: 441 dark px per 1000 rim px at a 1024
+render vs 3775 at 4096 — the opposite of mip-bleed behaviour. They are
+grazing-angle shading of the micro-weave normal detail on the dome's
+near-vertical rim (normal tilts blow up as cos θ → 0), deepened by the
+rim's AO. Same at 1K and 4K bakes (proportional margins). New
+phenomenon, not the old root cause; also independently flagged by Gemini
+("dark edge artifacts along top perimeter"). Fix direction if wanted:
+suppress the detail-normal blend near silhouette grazing angles, or
+soften the weave bump strength — cosmetic, owner's call.
+
+### 3. Standing per-object texel-density diagnostic — implemented
+
+`_uv_diagnostics` now emits `texel_density_per_object` (worst density
+first): per object — islands, uv_area, atlas_share, world_area_m2,
+world_area_share, texels_per_m (area-weighted) plus island min/max. The
+whole-model ratio can read a healthy 1.000 while a surface starves;
+now the per-object line shows it directly. Pinned by
+`test_chiral_uv_diagnostics` (shares sum to 1, per-object figures match
+the island list, worst-first ordering). Suite: **241 passed**.
+
+Queen figures (reference resolution 1024 — the 1K iteration default):
+every object 96.5 tex/m, ratio 1.000; crown 2 islands, 12.17% atlas
+share, 12.17% world share, 24.5 texels per 254 mm quilt cell. The
+mattress's hidden band caps inflate total world area to 48.7 m² (~8 m²
+visible) — the atlas share is spent proportionally, so nothing starves
+on texels; the quilt starves on amplitude (see #1).
+
+### Operational finding — 4K bake timeout
+
+`bake_maps` inherits the generic 300 s op timeout; a 4096² mattress bake
+takes ~19 min on Scout's CPU. The one-off diagnostic used a
+`_LongBakeRunner` subclass (`output/run_4k_diagnostic.py`, gitignored).
+**If 4K becomes a delivery path, the bake timeout must become a real
+parameter of `finish_delivery`** — not fixed in this round (1K stays the
+default; run_4k_diagnostic.py is the workaround).
+
+**Committed** (wip/defect-fixes, no push): per-object diagnostic + test.
+Quilt amplitude/aliasing fixes await owner/reviewer decision on the
+direction above. MAYA00053153 dims still blocked on the owner (rule 9).
+
+## Session log — 2026-09-01 (round 3: visual quality vs the reference photos)
+
+Owner's directive: NOT the submission phase — optimise for visual quality
+against the reference photos, not the client's unknown validator. The owner
+read the photos directly and corrected §5.2 in seven places (all
+reviewer-sourced; GLM_BRIEF.md §5.2/§5.3 corrected and marked as such).
+Work order: quilt geometry (corrections 3+1+2 as one crown change), band
+order, handles, label, materials, bake timeout — Gemini verdict after each
+group. TEST-QUEEN 80×60×12 IN stays the standing target; 1K stays the
+iteration default. Suite: **243 passed**.
+
+### Group A — the quilt is REAL LP geometry, square grid, ~119mm cells
+
+`_DOME_SCRIPT` is replaced by `_QUILT_DOME_SCRIPT` (template.py). The FG
+superellipse map carries a grid-topology cap: cell-commensurate grid lines
+(spacing exactly 2/(cells·DIV) anchored at u=−1, so every DIV-th line IS a
+cell boundary → stitch valleys land on grid lines), quadratic shoulder
+clustering toward the boundary, boundary loop closed with a triangle fan.
+Displacement is along vertex normals gated `normal.z ≥ restrict_z` (0.85) —
+the steep shoulder stays on the footprint — and `H = h_band − AMP` so puff
+peaks land exactly on the nominal band top. The crown HP is bevel-only
+(`DetailSpec(subdivision_levels=0)`): subsurf would smooth the puffs away
+in the baked normal (the round-2 failure mode).
+
+Chosen numbers (queen): `cells_across: 17` → 17×13 cells = **119.0 ×
+116.5mm** (reviewer target 100-130mm; 12-14 cells across the width → 13
+cross-cells derived); `amplitude_fraction: 0.12` of one cell = **14.3mm**
+(0.15 = 17.8mm read as "sharp, exaggerated zigzag peaks" in the Group-A
+render check → softened, exponent 1.6 → 1.3 with it); divisions 4.
+
+Counts: crown **5,040 quads + 288 fan tris = 10,368 tri-eq** (the grid is
+100% quads; the FG boundary fan is the only tri content; zero n-gons).
+Whole LP **15,612 tri-eq** (after Groups C/E added handles + cord tapes)
+against the provisional 50k Simple ceiling — **decimation is a no-op, the
+quilt geometry survives into the delivered FBX** (3.2× headroom). HP
+200,016 tri-eq. Measured: peaks exactly on the nominal 85.34mm band top
+(0.000mm overshoot); nothing beyond the L/W footprint; silhouette relief
+in the front render **1px → 9px** at a 67px period (was 1px when the quilt
+was a baked normal map); height-field autocorrelation peaks at 119mm (X) /
+116mm (Y); ASCII height field shows straight rows and columns — SQUARE.
+
+**Square vs diamond:** the product photos (9.28.22 / 9.28.35) read SQUARE;
+the marketing render (9.29.19) shows diamond. Two-variant possibility
+flagged in §5.2; switching is one YAML line (`pattern: grid_diamond`).
+Gemini: 3 (before) → 3 (after; the zigzag complaint → fixed by softening)
+→ **4** (after-soft).
+
+### Group B — band order off by one at both ends
+
+Ten bands: crown .28 / air_mesh .162 / knit_1 .062 / velvet_1 .072 /
+knit_2 .062 / velvet_2 .072 / knit_3 .062 / velvet_3 .072 / white_band
+.056 / base .10 — the white knit RIB comes first below the air-mesh, and a
+plain WHITE band sits above the base. New `plain_white` flat surface for
+white_band (smooth — not the ribbed knit). Render luminance walk verifies
+light-dark alternation in the corrected order with white_band light (124)
+above the dark base; knit_1's window reads dark because tape_2 straddles
+its top boundary (perspective, not a band error). Gemini **4** (no
+band-order complaint).
+
+### Group C — carry handles (§9.4 open question CLOSED)
+
+Photo 9.28.35: vertical dark straps crossing the full border stack at
+intervals along the long side. Modelled as `CarryHandleSpec`: **2 per long
+side at the quarter points** (count/spacing read from the photos;
+owner-tunable), width_fraction 0.08 (~24mm webbing), outer face at 0.92×
+the tape protrusion — just behind the tape plane, no z-fighting where the
+straps cross the tapes — inner face buried 4mm past the local curved wall,
+spanning white_band → crown (bottom tape line to top tape line).
+Verified in the LP GLB (world bounds) and in render ASCII crops (dark
+vertical bands at both quarter points crossing the full stack). Gemini
+said "missing vertical strap accents" — contradicted by the pixel
+evidence; recorded as a VLM miss, not acted on. Score **4**. Pinned by
+`test_carry_handles_cross_the_full_stack_inside_nominal`.
+
+### Group D — label taller and narrower
+
+Measured off the corner close-up (not the owner's round numbers): aspect
+**0.46**, height_fraction **0.34** of H (z 0.16..0.50 — inside the velvet
+stack 0.156..0.558, clears tape_3 and tape_2), center 0.33. Gemini **3**
+("label tiny, distorted, unreadable") — judged a 1K render artifact: a
+48×104mm label is ≈21×45px in a full-frame 1024 render. Label verified
+present at the correct spot and size via ASCII; a label close-up render
+would settle it if a verdict-level check is wanted.
+
+### Group E — materials minor tuning
+
+- velvet: tint 0.16 → **[0.09, 0.09, 0.10]**; baked basecolor velvet mode
+  24/255 = **9.4%** (requested 0.08-0.10). New `SurfaceSpec.rotate_deg`
+  (np.rot90 in compose.py — square tiles stay tileable): the scan's nap
+  streaks run horizontal in texture space, quarter-turned so they render
+  **VERTICAL** (−84° measured in the render).
+- tape: **round cord** — width == protrusion at 0.023×min(L,W,H) (~7mm on
+  a queen, 2.3% of H). `_build_sweep`'s circular branch needed
+  `bevel_resolution=4` (12-gon ring). Cord inner tangent exactly on the
+  band wall, outer tangent exactly on nominal — pinned by
+  `test_tape_section_is_a_round_cord_flush_on_the_wall`.
+- mesh holes: `cell_m: 0.010` → **10.0mm** pitch measured in the texture.
+- Gemini verdict: **rate-limited (429) four times over ~35 minutes**
+  (waits of 0/4/15 min between attempts) — daily-quota exhaustion, not a
+  burst limit. The measured evidence above stands; re-run
+  `output/verdict_round3.py groupE_after "output/finish/TEST-QUEEN/review"`
+  after the quota resets if a verdict is wanted.
+
+### Group F — bake timeout is a real finish_delivery parameter
+
+`finish_delivery(bake_timeout_sec=300.0)` → threaded to
+`runner.execute_op("bake_maps", ..., timeout_sec=...)`; recorded in the
+finish section of BOTH the refusal (blocked) report and the delivered
+report; CLI `--bake-timeout`. Tests pin the default (300.0 reaches the
+bake op and is recorded) and the override (3600.0 reaches only the bake
+op). Closes the round-2 operational finding: a 4K mattress bake takes
+~19 min and the old fixed 300s op timeout killed it.
+
+### New gotchas (pinned by tests, or bitten hard enough to write down)
+
+1. **SUBSURF at levels=0 is DISABLED** — `modifier_apply` raises
+   "Modifier is disabled, skipping apply". The harness now adds subsurf
+   only when `part_levels > 0`, and an explicit 0 is distinguished from
+   None (None = inherit HP levels; 0 = bevel-only HP — required for the
+   quilt to survive the bake).
+2. **glTF triangulates quads** — GLB face counts are 2× blend quad
+   counts. Never do blend-side arithmetic with GLB numbers (cost one
+   faces_total pin: predicted 9,870, actual 10,446).
+3. **pack_scale dropped 0.75 → 0.5625** — the round-cord tapes carry ~3×
+   the strip surface into the atlas. Not a defect (it still packs), but
+   the tapes' texel share tripled.
+4. **Exact island-count pins drift with quilt softness** — smart-project
+   regroups faces as normals shift. Island pins are now ranges.
+5. **Gemini verdict quirks this round**: reads "diamond" on a square grid
+   (uncalibrated for pattern orientation — overruled by the owner's
+   direct reading), missed handles the pixel evidence shows, cannot read
+   a 48mm label at 1K. Advisory only — keep measured evidence in the
+   loop.
+
+MAYA00053153 dims untouched (rule 9). `Temp/` (the owner's raw WhatsApp
+photo drop — duplicate of `input/references/MAYA00053153/`) gitignored.
+Committed, no push.
+
+## Session log — 2026-09-01 (round 4: the review rig IS the measuring instrument)
+
+Owner's round-4 order, in priority sequence: (1) FIX THE RENDER RIG FIRST —
+it had produced three wrong reads (190mm aliasing beat, quilt axis, velvet
+tone); "a rig that produces misleading images is a worse problem than any
+remaining model defect"; add label/border CLOSE-UPS, keep the four standard
+views. (2) Band structure: ONE dark velvet mass with two FAINT STITCHED
+SEAMS inside, bounded by exactly two white knit ribs — no white ribs between
+velvet bands (reviewer's photo fractions: crown .28 / air_mesh .15 /
+knit_top .09 / velvet .27 with seams / knit_bottom .11 / base .10); decide
+three-parts-shared-material vs one-part-with-seam-detail and say which+why.
+(3) Label rendering purple → black/white/blue. (4) Re-run the Gemini verdict
+on the NEW rig once quota resets; the 4/10 history is unreliable (scored
+against misleading renders). Keep the square-vs-diamond quilt flag open; do
+not push; MAYA00053153 dims untouched. Suite: **250 passed** (+7 round-4
+tests).
+
+### Task 1 — cross-key rig + close-ups (the instrument rework)
+
+`setup_studio_lighting()` rewritten as **KeyA/KeyB cross keys**: two SUNs of
+equal energy 1.8 at elevations 40°, azimuths 90° apart (travel along −X and
+−Y), so NEITHER quilt axis is privileged — a square grid now shades on both
+axes. Fill 0.7 from the camera-ish −45° azimuth, rim 1.2 from behind.
+Direction math pinned: sun direction = Rz(rz)·Rx(rx)·(0,0,−1); horizontal
+travel azimuth = 90+rz°, elevation = 90−rx°. Suns are direction-only
+(4-tuples; no location). `test_review_rig_is_cross_key_without_axis_privilege`
+pins the rig (both keys downward, axis-aligned X vs Y, total energy < 7).
+
+New `frame_closeup_ortho()` + `closeups` param on `render_views`:
+`frame="part"` (target bounds + pad) or `"model_height"` (target x/y, model
+full height — the "border stack in context" view). Part resolution: exact
+then prefix match; unresolved parts are reported in `closeup_skips`, never a
+crash. Close-ups are threaded from the template (`review_closeups` →
+`ReviewCloseupSpec` → `_render_review`), NOT hardcoded in the finishing
+layer (rule 11): label (decal_patch, part frame, pad 0.5) + border
+(decal_patch, model_height, pad 0.1).
+
+**Instrument-only evidence** (old LP GLB, new rig —
+`output/finish/TEST-QUEEN/review_rigtest/`, isolating the rig change from
+the model changes): top-view FFT quilt power axis ratio **12.0 → 0.87**;
+clipped (≥0.995) pixels **0.06% → 0.000%**; white bands read **0.51–0.75**
+(vs pure white before), velvet **~0.05**; the label close-up frames the
+patch at ~327×717 px vs **21×45 px** in the old full-frame render (~15×).
+Result keys report `render_engine` + `view_transform` (EEVEE Next, AgX).
+
+### Task 2 — ONE velvet mass with stitched seams (decision: ONE part + seam geometry)
+
+**Decision: one part with seam detail as real LP geometry, NOT three parts
+sharing a material.** Why: (a) three shared-material parts would show NO
+seam at all — the wall is continuous with matching normals at part
+boundaries, so the seams must be authored either way; (b) texture-space
+seams cannot be positioned reliably against the atlas packer (island
+assignment is arbitrary) and stitches displace the surface — a pressed
+crease is resolution-independent, survives decimation (decimate is a no-op
+at 15.4k/50k), shades under raking light and picks up bake AO; (c) one part
+keeps the velvet nap streaks continuous (the "one dark mass" reading) and
+the part count drops 18 → 14.
+
+Mechanism: `SeamRingSpec(z, depth)` on PartSpec → `_build_extrude` grows a
+ring stack — each seam at z expands to rings (z−w, 0), (z, depth), (z+w, 0)
+with w = 2·depth, each ring inset along the local 2D outward wall normal;
+the wall is rebuilt per ring pair. Template: velvet .27 of H with seams at
+1/3 and 2/3 of the band, depth 0.0065×min(L,W,H) ≈ 2mm pressed crease.
+Verified: 8 rings at the expected z, crease rings inset ~2mm inside the
+wall, velvet = 7×48 quads + 2×48 fan tris, zero n-gons.
+
+Render evidence (side view, centre column band, 1K): exactly **ONE dark
+run z 0.216–0.475** (mean luminance 0.106 ≈ the 9.4% baked velvet) between
+the two white knit ribs (0.113–0.214 and 0.478–0.560) — no white between;
+border close-up: seams dip **0.035–0.045 below the velvet mean** at z
+0.30/0.39 and stay dark (crease, not rib).
+
+### Task 3 — the purple label (root cause: synthetic stand-in)
+
+The old `input/decals/MAYA00053153/albedo.png` predated the reference
+photos: 85% black + blue rounded-rect + **2% scattered pure magenta noise**
+— averaged to purple at render scale. Replaced with a real crop of the label
+from photo 9.28.22 (`output/make_decal_crop.py`, reproducible: crop box
+(495,940,675,1340), border-bleed cleanup, ×2 LANCZOS; 65.4% black / 8.2%
+white / 18.2% blue / **0 magenta**). Label close-up chroma in the new
+render: **51.4% black** (mean rgb [0.123, 0.126, 0.130]), **30.2% white**
+(text), **5.3% blue** (icon, mean [0.162, 0.395, 0.517]), **0.0% magenta**.
+
+### Task 4 — Gemini verdict on the new rig
+
+Attempted after the re-render: **429 again** (daily quota; resets ~12:30 IST
+Sep 2). One-shot retry scheduled for 12:31 IST Sep 2 (workspace automation)
+running `output/verdict_round3.py round4_newrig output/finish/TEST-QUEEN/review`
+— the 6-view set including both close-ups. Per the owner: the 4/10 verdict
+history is NOT a baseline (scored against the old rig's misleading images).
+
+### Full-chain re-render (1K, TEST-QUEEN placeholder card)
+
+`output/run_round3.py 1024` with `_LongBakeRunner` (3600s) — 6 review views
+(front/side/top/iso + label + border), atlas pack_scale 0.5625, LP **15,420
+tri-eq** (budget 50k, decimation no-op — seam geometry survives), REFUSED as
+designed (placeholder dims, rule 9; evidence in `output/blocked/`).
+Verification (all pass, `output/verify_round4_renders.py`): FFT axis ratio
+**0.86**; total clipped **0.010%** (one specular pixel in the front view);
+**1** band-scale dark run in the border stack; seams resolved as creases;
+label black/white/blue with 0% magenta.
+
+### New gotchas (round 4)
+
+1. **The resolver's PartSpec whitelist silently drops new fields** —
+   `seam_rings` compiled by the template but never passed through
+   `_resolve_part` built a seam-free velvet (192 faces, not 768) with no
+   error anywhere. Any new PartSpec field must be added to the resolver
+   passthrough; the seam-ring test now catches this class of bug.
+2. **2D edge normals are winding-dependent** — the left normal (−ty, tx)
+   points INWARD for CCW loops (footprint_outline is CCW), so seam insets
+   went 2mm OUTWARD (radial 1.4744 vs wall 1.4718). `_profile_2d_normals`
+   now orients by signed area: outward = s·(ay+by, −(ax+bx)) with
+   s = sign(area).
+3. **Fan-cap centre vertices land in the base/top z-buckets** — a ring
+   count over z-buckets reads 49 at the base/top rings (48 wall verts + 1
+   cap centre) vs 48 interior. Pin per-ring, not globally.
+4. **np.interp requires increasing xp** — feeding it a decreasing z array
+   silently returns garbage (a whole band-profile read "all dark" and a
+   seam "read as rib" from flipped profiles before the script bug was
+   found; the renders were correct). Measure scripts are instruments too.
+5. **Test-writing lesson (close-up framing)**: assert the
+   geometrically-guaranteed property, not an opaque pixel share — a thin
+   leg tightly framed still covers few opaque pixels (the tabletop intrudes
+   into the frame). The guarantees: framed part centred, model clipped at a
+   frame edge, vertical pixel span grows >1.3× vs the whole-model view.
+
+MAYA00053153 dims untouched (rule 9). Committed, no push.
+
+## Session log — 2026-09-02 (round 5: Cycles never touched the GPU — device parameterised, measured, reported honestly)
+
+### The bug
+
+`scene.cycles.device` was hardcoded `"CPU"` at two sites in
+`src/blender/harness_script.py` (op_bake_materials ~1945, op_bake_maps ~2851).
+Reviewer's 4K evidence: 531 s wall, GPU 0 % utilisation / 0 MiB VRAM the whole
+bake, 1348 CPU-seconds. Zero GPU setup anywhere (no compute_device_type, no
+get_devices(), no device enabling).
+
+### The trap (recorded per the work order)
+
+The round-3 heuristic "~19 min means CPU, minutes means GPU" was WRONG on this
+machine: a CPU 4K bake here is **~8.8 min — which IS minutes**. Elapsed time
+was the proxy; **GPU utilisation is the mechanism**. The heuristic would have
+passed while the GPU sat idle (it did, for a full session). Same class of
+error as round 4's symmetry-ratio metric. DESKTOP_SETUP §5 now says this
+explicitly with the nvidia-smi one-liner. **Measure the mechanism, not the
+proxy.**
+
+### The fix (exactly like bake_timeout_sec, per master prompt §I)
+
+- `--bake-device` CLI option → `finish_delivery(bake_device=...)` → bake op
+  params `"device"` → harness `_configure_cycles_device()`. The harness reads
+  NO config; the parameter arrives as an op parameter, threaded from the caller.
+- Proper enablement order: `preferences.compute_device_type` →
+  `get_devices()` → per-device `use` flags → **then** `scene.cycles.device`
+  (setting the scene device alone silently does nothing).
+- `auto` (default) tries OPTIX → CUDA → HIP → ONEAPI → METAL; explicit
+  `optix`/`cuda`/… or `cpu`. No usable GPU → clean CPU fallback with a loud
+  `fallback_reason` recorded in the bake result AND qa_report
+  (`finish.bake_device_resolved`: requested, GPU/CPU, compute type, enabled
+  devices, fallback reason). CI and the laptop fall back silently-clean.
+- 7 new tests (`tests/test_bake_device.py`): threading, default, evidence in
+  report, step timings, plus blender-marked live device-evidence shape tests.
+
+### Measurements (4K, TEST-QUEEN, the reviewer's exact workload)
+
+| device | wall | GPU util | VRAM | notes |
+|---|---|---|---|---|
+| CPU | **531.0 s** | 0 % / 0 MiB | 0 | the bug signature, reproduced |
+| OptiX | 590.0 s | mean 13.2 %, max 76 % | 4067 MiB | GPU engaged, evidenced |
+| OptiX + persistent_data | **555.5 s** | mean 11.5 %, max 54 % | 2086 MiB | −6 % vs non-persistent |
+| CUDA (run 1) | crashed ~525 s | — | — | native exit −1 at the FIRST metallic session, no error text; ao/normal/basecolor/roughness already saved |
+| CUDA (repro) | **560.6 s** | mean 10.6 %, max 73 % | 2068 MiB | identical command — crash NOT reproducible (1-in-2 flaky) |
+
+256 px smoke: CPU 23.6 s vs OptiX 76.6 s (overhead-dominated at small res).
+Full data: `output/bakeoff/bake_device_bench.json` (consolidated, all legs +
+run-to-run baselines), `scripts/bench_bake_device.py` (GpuSampler: 1 Hz
+nvidia-smi + per-process Blender CPU-seconds).
+
+**Verdict: GPU is engaged and evidenced, but on THIS workload it is 5–11 %
+SLOWER than CPU.** DESKTOP_SETUP §7's "2–4 min on OptiX" is not achievable by
+device choice — see next section. Default stays `auto` (per the work order);
+`--bake-device cpu` is the fast path on this machine today.
+
+### Why no device wins: the bake op is session-overhead-bound
+
+Profiled a full OptiX 4K bake via a direct subprocess with Cycles' timestamped
+stdout (`output/tmp/profile_optix/blender_stdout.txt`, 266 bake sessions):
+each "Loading <map>" marker is one Cycles session; the AO/detail/emission
+loops show exactly 14 sessions each (one per LP object), but the
+selected-to-active NORMAL loop shows **196 = 14 LP targets × 14 HP sources**:
+Blender splits each bake call (all HP shells selected) into one internal
+session PER SELECTED SOURCE. Per-session cost ~1.8 s with a full scene
+re-sync (14 LP + 14 HP + 14 CAGE objects) between every session:
+
+| phase | sessions | seconds | % of bake |
+|---|---|---|---|
+| ao (self-AO per object) | 14 | 30.3 | 5 % |
+| **normal (selected-to-active)** | **196** | **352.0** | **64 %** |
+| normal_detail (self, bump) | 14 | 41.5 | 8 % |
+| basecolor/roughness/metallic | 42 | 94.7 | 17 % |
+
+GPU ray-traces only ~60–80 s of the ~555 s op — hence mean utilisation ~12 %.
+`use_persistent_data` keeps the BVH alive (−6 %, 590→555.5) but cannot remove
+the per-session sync. **Identified follow-up (NOT done — it changes bake
+semantics and pinned outputs, owner decision): select only the CORRESPONDING
+HP shell as source per LP target → 196 sessions → 14, normal phase ~352 s →
+~25 s. That, not the device, is where the 2–4 min lives.**
+
+### Determinism verdict (work-order constraint 4)
+
+Three layers, all measured:
+
+1. **Fixture level — what the 250 tests actually pin**: bit-identical across
+   devices. `scripts/check_bake_determinism.py` reproduces the
+   test_delivery_finish.py fixtures verbatim (512 px ramp normal, AO cavity);
+   the exact pinned pixels (G=105/85/68 at wy=0.15/0.30/0.45, Δ+0/+1/+1;
+   neutral 128/128/255; AO 0/255) are the SAME on cpu, optix and cuda, and
+   the whole maps diff **0 LSB**.
+2. **Real 4K workload**: CPU vs OptiX/CUDA — normal ≤3, basecolor ≤5,
+   roughness ≤3 LSB max (mean ~0.001 LSB, 0.000 % of texels beyond 2 LSB);
+   metallic byte-identical. The AO channel's 16-LSB tail on 0.008 % of texels
+   appears **between two CPU runs too** (reviewer's chain maps vs bench leg:
+   normal/basecolor/roughness/metallic 0 LSB — CPU is bit-stable run-to-run;
+   AO is the one stochastic channel).
+3. **Full suite with GPU active** (auto→OptiX on this machine):
+   **263 passed in 122 s** (250 baseline + 13 new). No pinned value shifted;
+   nothing re-baselined.
+
+**Verdict: GPU output is equivalent within tolerance — exact (0 LSB) at the
+pinned fixtures, ≤5 LSB worst-channel at 4K where the same-device run-to-run
+floor is 0–1 LSB. No re-baselining needed or performed.**
+
+### Queued item 1 — per-step timings in qa_report (PLAN_AUTONOMOUS §7)
+
+`finish_delivery` now records `finish.step_timings_sec`
+(prepare_scene/bake_maps/decimate_lp/export_fbx/export_usdz/review_renders +
+total_chain) in every qa_report — the §7 per-step budgets are now verifiable
+from delivered reports. Pinned by test.
+
+### Queued item 2 — vision escalation wired (VISION_CONFIG §3)
+
+`config/ai.yaml` `vision.vlm.escalation_model: gemini-3.6-flash` (reviewer's
+`model: gemini-3.5-flash-lite` pin untouched); `vlm.py` validates it with the
+same pinned-version rule (-latest rejected); the agent loop escalates ONCE on
+gate disagreement (parsed verdict ≠ matches_reference) and records
+`escalated_from`. No hardcoding; no live calls (S1: billing unconfirmed).
+4 new tests.
+
+### Phase 3.0 — execute_blender_script removed
+
+Gone from `AGENT_TOOLS_SCHEMA` and the executor; the executor's fallthrough
+intentionally refuses it. Pinned by `tests/test_agent_surface.py` (schema
+absence + executor refusal). The validated-spec boundary is now enforced by
+test, not convention.
+
+### Brain test (GLM_PROMPT_BRAIN_TEST.md)
+
+S2 RESOLVED mid-session: the reviewer filled §4 (three hand-written
+descriptions with stated dimensions; reference images committed under
+input/references/BRAINTEST-*). S1 still blocks VISION calls only — the brain
+test needs none (descriptions are the input by design). Authored the three
+ObjectSpecs cold, one shot each, no builds/renders/measure-feedback (schema
+validation only): `output/braintest_specs/braintest_a_writing_desk.json`,
+`braintest_b_teacup.json`, `braintest_c_doormat.json` + generation script.
+Delivered in the session report with §5 notes blocks; the reviewer builds and
+judges per §7. (Authoring-time catch worth recording: the rounded-rect
+profile generator had a TL corner-centre typo — `hy+r` instead of `hy-r` —
+that bulged the doormat's top-left corner 2×r outward; caught by a bbox
+self-check added to the generator BEFORE any build. The check now ships with
+it. Coordinate lists need guards exactly like measurements do.)
+
+### New gotchas (round 5)
+
+1. **Blender splits selected-to-active bakes per selected source** — N
+   sources = N internal Cycles sessions per bake call, each with a full scene
+   re-sync. Selecting "all HPs" for every LP object costs 196 sessions where
+   14 suffice. (Measured, not documented anywhere in Blender's docs.)
+2. **CUDA bake is flaky on this driver/Blender build** — 1 native hard crash
+   (exit −1, no error text) in 2 identical 4K runs, at a metallic self-bake
+   session. OptiX ran the identical workload twice, clean. `auto` prefers
+   OptiX before CUDA — keep that order.
+3. **AO is the one stochastic bake channel** — 16-LSB tails on 0.008 % of
+   texels between two CPU runs; never treat an AO pixel diff as device drift
+   without a same-device run-to-run baseline. CPU-vs-CPU: everything else
+   bit-stable.
+4. **os.times() does not account child CPU on Windows** — poll
+   `Get-Process blender` instead (GpuSampler).
+5. **A crash that kills the measuring script loses the report** — bench and
+   determinism scripts now record device crashes as findings and continue.
+
+MAYA00053153 dims untouched (rule 9). 263 tests green. Committed, no push.
+
+## Session log — 2026-09-02 (round 6: Phase 3.1 — the agent's delivery tools, measured facts only)
+
+### Brain test — measured gates green on all three specs (§7 visual verdict pending)
+
+The reviewer ran the three authored specs through the full loop
+(`output/runs/20260902_051750_braintest_*`); measured results from the
+manifests:
+
+| spec | dimension gate | mesh gate | tri-eq | bounds (m) | worst delta | wall |
+|---|---|---|---|---|---|---|
+| A writing desk | passed | passed | 374 | 1.200 × 0.750 × 0.600 | 0.0 mm | 5.4 s |
+| B teacup | passed | passed | 2016 | 0.135 × 0.075 × 0.105 | 0.01 mm | — |
+| C doormat | passed | passed | 160 | 0.750 × 0.020 × 0.450 | 0.0 mm | — |
+
+Renders exist (`output/braintest_renders/{a,b,c}/view_{front,iso,side,top}.png`)
+but NO §7 visual verdict is recorded anywhere — that judgement is the
+reviewer/owner's call (the builder is text-only). S3 therefore NOT triggered;
+per master order §D, work continued on the fork-independent Phase 3 items.
+
+### Phase 3.1 — finish / inspect / review / package as agent tools
+
+`src/agent/tools.py` now exposes the master order's tool table, all returning
+measured facts, never prose:
+
+| tool | wraps | returns |
+|---|---|---|
+| `inspect` | topology_report + measure + NEW uv_report ops + local dimension gate | per-part dims/bounds/closed-solid, polycount, n-gons, UV/texel diagnostics, every gate WITH its value (deltas in mm, budget vs tri-eq, ground-contact failures) |
+| `review` | render_views op + advisory verdict | render paths, closeup skips, verdict JSON (only when refs AND a VLM exist) |
+| `finish` | `finish_delivery` | lp/hp tri-eq, budget, bake device + step timings, UV/texel facts, gates — or the loud refusal |
+| `package` | `package_delivery` | package dir, gates, file manifest (sizes/hashes), placeholders — or the loud refusal |
+
+Design points pinned by tests:
+
+- **State threading**: `build_spec` records `last_spec` alongside
+  `last_built_glb`; finish/review/inspect default to it. An explicitly-passed
+  INVALID spec errors loudly — never a silent fallback to the stale spec.
+- **Rule 9 through the tool boundary**: `PlaceholderDimensionsError` is
+  caught and returned as `{"success": false, "refused": true, "reason":
+  "dims_placeholder", "error": ...}` — a result the brain can read, never an
+  exception crashing the loop. The package tool does NOT demand a source GLB
+  for a placeholder job (the refusal fires before the source is touched, so
+  a missing GLB can never mask it — pinned with the MAYA card).
+- **Verdict cache** (VISION_CONFIG §6): keyed by sha256 of render + reference
+  image contents + model id; a cache hit is flagged `"cached": true` and
+  makes no VLM call (pinned: 2 identical reviews → 1 call).
+- **One shared escalation policy** (§3): `advisory_visual_verdict()` in
+  tools.py is now used by BOTH the agent loop's visual gate and the review
+  tool (behavior-preserving refactor of `loop._run_visual_gate`; FakeVLM
+  wiring test still passes). S1 honored: no live vision calls — all verdict
+  tests run against fakes.
+- Broad exception catch on finish/package returns the error as a tool result
+  (the brain sees errors; the loop never dies mid-chain).
+
+### Harness additions (read-only measurement)
+
+- `op_uv_report` (new, registered in DISPATCH): import → `_uv_diagnostics`
+  at a caller-chosen resolution. Pure measurement — unwrapping stays in
+  `generate_uvs`; a file with no UV layers reports islands_total=0 + reason.
+- `op_topology_report` gains additive `objects_detail`: per-object
+  verts/faces/tri/quad/ngon/tri-eq, loose/boundary/nonmanifold edges,
+  bounds, and `closed_solid`.
+
+### New gotchas (round 6)
+
+1. **glTF vertex splits make every imported closed box look open.** The
+   chiral fixture's boxes report `boundary_edges: 24` per part straight
+   after build→GLB→import (vertices are split per normal/UV attribute, so no
+   edge is shared). `closed_solid` is therefore computed on a WELDED copy
+   (`bmesh.ops.remove_doubles`, dist=1e-6 m — the splits are exact
+   duplicates). The RAW boundary/nonmanifold counts stay in the report as
+   file facts; the welded answer is what gates. Same class as the known
+   "plain trimesh.concatenate reports false non-watertightness" invariant.
+2. **A fresh parametric build is NOT "no UVs".** Blender primitives carry a
+   default UV map and it survives the glTF round trip: the chiral build
+   reports islands_total=12 (6 per box), in-bounds. The atlas step is about
+   overlap elimination and packing, not UV existence — `inspect` reports
+   what is actually in the file.
+
+### Tests
+
+`tests/test_agent_tools.py` (new): 21 tests — schema registration (incl.
+Phase 3.0 no-code pin), inspect green/failure paths with values, invalid-
+spec loudness, finish argument threading + REAL refusal chain on a stub
+runner (evidence lands in blocked/, no package), package refusal without a
+source (MAYA card), review verdict cache + one-escalation + closeup
+threading + no-refs/no-VLM honesty, shared-helper unit + loop wiring, and a
+blender-marked real round trip (chiral fixture: build → inspect →
+generate_uvs → inspect; pins tri-eq 24, welded closed_solid True, raw
+boundary 24, islands 12, dimensions gate green).
+
+**Suite: 284 passed in 138 s** (263 baseline + 21 new; baseline grew,
+nothing re-baselined). MAYA00053153 dims untouched (rule 9). Committed, no
+push.
+
+## Session log — 2026-09-02 (round 7: Phase 4 — intake, prompt → JobCard, owner textures)
+
+### What the owner's prompt can now drive (all dynamic, nothing hardcoded)
+
+`src/client/job.py` extended — NO parallel structure. New optional JobCard
+fields, all `None` = contract default, all consumed through
+`effective_*()` helpers so an override and the enforced number cannot
+drift:
+
+| field | effect | default (contract) |
+|---|---|---|
+| `polycount_ceiling` | overrides the tier table; UNBLOCKS `complex` (unknown ceiling → otherwise fail closed) | simple 50k (provisional) / medium 200k (observed) |
+| `polycount_semantics` | which count the gate compares: `triangles` / `faces` / `triangle_equivalent` | triangle_equivalent (conservative) |
+| `file_size_caps` | per-suffix `SizeCap(value, basis)` — MB (decimal, 10⁶) vs MiB (2²⁰) kept verbatim; the byte counts differ by 4.9% | observed decimal-MB caps (FBX 10 MB, LP 15 MB, HP 50 MB) |
+| `required_formats` | defines "complete package" for the naming/file-size gates | full 9-file contract set |
+| `texture_resolution` | bake/atlas resolution when the caller passes `resolution=None` (now the CLI default) | 1024 px |
+| `fbx_axis_up`/`fbx_axis_forward` | FBX export axes (must be a non-parallel pair) | Y-up, -Z-forward |
+| `intake_evidence` | constraint → quoted prompt fragment; rides into qa_report.json | — |
+
+Settled decision (recorded here, pinned in tests): `required_formats`
+drives the GATES and qa_report annotation (`required: true/false` per
+emitted file + `contract_note`), NOT conditional emission — the finishing
+chain always emits the standard superset because a partial chain degrades
+the FBX (its materials come from the bake).
+
+### Intake: prompt → JobCard, deterministic and loud
+
+`intake_from_prompt()` (regex, no LLM) + `dump_job_yaml()` (round-trips
+`load_job`, verified). Extracts ONLY explicitly stated constraints;
+every silence or ambiguity is an `IntakeError` — rule 9 extended past
+dimensions to every constraint:
+
+- dims: `L x W x H <unit>` (unit REQUIRED; bare dims → error naming the
+  triple; absent → placeholder path needs `placeholder_dims` +
+  `placeholder_unit` together, refusal behavior unchanged);
+- polycount: ceiling word + poly noun required (kills prose
+  false-positives like "faces 3 challenges"); disagreeing duplicates
+  error; non-integer ceilings error ("intake does not round a
+  constraint");
+- file-size caps: must NAME the deliverable; an orphan "max 20 MB"
+  errors ("intake never guesses the target"); MB/MiB basis verbatim;
+- resolution: `2048px`, or `2K` only with a texture word (a bare "8k" is
+  more likely "8k tris"); conflicting statements error;
+- formats: labeled clause only ("Formats: FBX, GLB"); unknown token
+  fails loudly naming the known tokens;
+- axis map: all three of L/W/H or none; FBX axes: up+forward pair or
+  nothing (half-specified convention is a guess);
+- complexity/orientation: explicit caller argument > prompt statement >
+  error. Never guessed.
+
+### Owner-supplied textures: the drop-directory index
+
+`src/textures/owner_index.py` — scans `input/textures/owner/<surface>/`,
+one sub-directory per surface with the SAME canonical map names the
+harness `_find` already consumes (albedo/roughness/height + .jpg/disp.png
+aliases), because a selected surface's path goes STRAIGHT into
+`PBRMaterial.texture_dir` (triplanar BOX projection — no copying, no
+renaming). Writes deterministic `index.json` with measured facts per map
+(resolution_px, sha256, edge_wrap_delta_mean), skipped dirs with
+reasons, and the selection contract in the index itself: **if a required
+surface has no supplied file, compose from CC0 scans; NEVER generate one
+with a diffusion model** (does not tile seamlessly, cannot produce a
+true normal map).
+
+`edge_wrap_delta_mean` = mean absolute per-channel diff (0–255) between
+opposite edges: 0 = edge VALUES continue across the tile boundary.
+Documented caveat (pinned as behavior in tests): a 1px checker is
+geometrically tileable yet reads ~255 — the number measures value
+continuity, not tiling correctness; judgment stays with the brain.
+
+### Bugs the new tests caught (production fixes this round)
+
+1. `_POLY_NOUN` lacked `faces?` — its own docstring promised "no more
+   than 8000 faces" but the regex only knew tri/poly nouns; faces-
+   semantics statements were silently ignored (worse than erroring: the
+   ceiling would silently default). Fixed; `polycount_semantics="faces"`
+   now extracts.
+2. The tabletop orientation pattern `\btable[- ]top\b` missed the
+   one-word spelling "Tabletop" → a tabletop prompt errored with "no
+   orientation". Fixed to `\btable[- ]?top\b`.
+3. Pillow deprecation: `Image.getdata` is removed in Pillow 14 —
+   `_edge_wrap_delta_mean` rewritten on `tobytes()` (identical
+   arithmetic, zero warnings).
+
+### Gates + packaging threading (measured, pinned)
+
+- `check_naming`/`check_polycount`/`check_file_sizes` read effective
+  values only; existing message pins preserved verbatim ("50,000"
+  ceiling text, "10.00MB > 10MB" offender format).
+- faces semantics is a REAL constraint, pinned: 150k faces / 290k
+  tri-eq passes a 200k `faces` ceiling that triangle_equivalent fails.
+- MB vs MiB pinned: a 12,000,000-byte FBX passes "12 MiB"
+  (12,582,912 B) and fails "12 MB" — the basis is carried, never
+  assumed.
+- `complex` + no ceiling fails closed ("the job card sets no
+  polycount_ceiling override — ask the client, do not guess"); the
+  override unblocks it.
+- `finish_delivery` threads the card end-to-end (stubbed-chain test
+  with a fake independent FBX parse): decimate budget = card ceiling
+  (beats both tier table and spec tri_budget), bake resolution =
+  card's 2048 when the CLI passes None, FBX exported with the card's
+  Z-up/Y-forward pair, `axis_convention.requested` + per-file
+  `required` flags + `contract_note` in qa_report.json, all six gates
+  green against matching stub facts.
+- CLI `--res` default None → the card's `texture_resolution`, else
+  1024; the agent `finish` tool threads None the same way (it no
+  longer forces 1024 over the card).
+
+### Tests
+
+`tests/test_client_intake.py` (37): SizeCap basis math; every effective
+helper (incl. complex-tier unblock, semantics default, cap fallbacks);
+card validation errors (unknown format/cap key, empty formats, half and
+parallel FBX pairs); intake happy paths (full prompt extracting all
+eight constraint kinds + evidence; metric dims; noun-first polycount;
+faces semantics + k suffix; px resolution + num-first caps; explicit
+args beating prompt statements); every refusal path (bare dims, no
+dims, conflicting dims/polycount/resolution, orphan cap, unknown format
+token, partial axis map, FBX up-only, missing complexity/orientation,
+placeholder without unit); YAML round-trip with card equality; gate
+overrides (complex fail-closed/ceiling override/faces
+semantics/naming subset/MiB-vs-MB); finish threading via the stubbed
+chain + explicit-resolution-beats-card.
+
+`tests/test_owner_textures.py` (11): edge-wrap metric (flat 0.0, seam
+>100, checker caveat ≥200, 1px → None); index surfaces sorted with
+measured facts (resolution, sha256 vs hashlib on disk, wrap, min
+resolution, other_files); .jpg and disp.png aliases; skipped dirs
+(normal-only drop, hidden) + root files; selection contract carried in
+the index; index.json written + deterministic across runs + ignores
+itself; write=False; missing root fails loud.
+
+**Suite: 332 passed in 130 s** (284 baseline + 48 new; baseline grew,
+nothing re-baselined). MAYA00053153 dims untouched (rule 9). Committed
+under the owner's identity, no push.
+
+
+## Session log — 2026-09-02 (round 8: Phase 5 — the closed loop)
+
+Master order Phase 5: `build → inspect (gates) → green? → review (vision)
+→ decide → fix → repeat; red → skip vision, fix, repeat`. Gates before
+eyes, always. Hard iteration cap, start at 8. On cap: stop, report
+exactly what failed with the evidence. Never loop forever. Never claim a
+success you cannot evidence.
+
+### What changed
+
+**Iteration cap 5 → 8** — `config/ai.yaml agent.max_iterations: 8` +
+loop.py fallback default 8. Pinned by a config test.
+
+**Honest cap report** (`loop.py`, the gap that motivated this round): a
+cap-exhausted run whose corrector "fixed" the spec on the final iteration
+used to exit the while loop with `last_error=None` and report
+`completed_with_warnings` + `unresolved_error: null` — a silent,
+unevidenced near-success. Now every cap-exhausted run (red gates OR never
+verified) gets:
+- manifest status `iteration_cap_exhausted` (surfaced by the web run
+  registry via the manifest read; `web/js/app.js` classes it "bad");
+- `metrics.iteration_cap_hit: true` + `metrics.cap_report` — which gates
+  failed with values: dimension gate (checked/passed/failed counts, max
+  delta in the message in mm, per-measurement failed details, ground
+  contact) and mesh gate (faces, warnings, errors), or `last_error` when
+  no iteration ever produced a verified build;
+- a guaranteed non-None `unresolved_error` naming the cap ("Iteration cap
+  (8) reached without passing gates: dimension gate FAILED (1/2
+  measurements passed, max delta 60.00 mm); … no success is claimed.");
+- an `iteration_cap_hit` progress event for the web UI.
+
+**Gates before eyes, pinned**: new `tests/test_closed_loop.py` drives
+`AgentLoop.run()` end-to-end with fakes (provider/runner/verifier/VLM —
+no Blender, no network): 3 red iterations → ZERO vision verdict calls
+(the analyst-eye describe is allowed pre-loop; verdicts are not); green →
+exactly ONE advisory verdict after `verification.passed`.
+
+**Owner texture library → analyst prompt**: `AgentLoop(owner_texture_root=…)`
+(default auto-detects `input/textures/owner/`) indexes the drop directory
+via Phase 4's `owner_index.py` and appends an "OWNER TEXTURE LIBRARY"
+section to the analyst user text: every scanned surface with its exact
+resolved `texture_dir` path, maps, min resolution, and the selection
+contract (closest surface by look; NEVER invent a path; NEVER
+diffusion — only these scans or presets). `ANALYST_SYSTEM_PROMPT`
+MATERIALS documents `texture_dir` the same way. No library / empty
+library → no section (presets only, exactly as before). The harness
+already consumes `texture_dir` (canonical map names), so a selected
+surface builds end-to-end.
+
+**Close-ups in the loop's renders**: the spec's `review_closeups` now
+ride into the loop's `render_views` op (same shape as the review tool), so
+the visual gate receives label/border frames — the master order's
+close-up rule only works if the loop actually produces them.
+
+**429 branching implemented** (`src/ai/vlm.py`, VISION_CONFIG §7 —
+previously policy-only in docs): every chat POST goes through
+`_post_with_429_policy`:
+- `RATE_LIMIT_EXCEEDED` → exponential backoff with jitter: base
+  2 s × 2ⁿ capped at 60 s, + uniform jitter [0, 1) s, at most
+  `RATE_LIMIT_MAX_RETRIES = 5` retries, then `RateLimitExhaustedError`
+  (fail soft; NOT the quota branch — no local fallback for a rate limit).
+- `QUOTA_EXCEEDED` / `RESOURCE_EXHAUSTED` → `QuotaExhaustedError`
+  immediately, no retry. Classification prioritizes the specific
+  `RATE_LIMIT_EXCEEDED` reason code — real Gemini rate-limit bodies also
+  carry `status: "RESOURCE_EXHAUSTED"`, which alone is the quota branch
+  per the §7 table.
+- Quota → local Qwen verdict: `visual_verdict` routes through
+  `_chat_vision_quota_fallback` — when the primary (Gemini) is
+  quota-exhausted the call is served by the local OpenAI-compatible
+  provider configured under `vision.local_fallback` (base_url + model of
+  the vLLM server; loading/unloading it and returning the GPU to Blender
+  is a server-side ops action, documented in code). The verdict records
+  `quota_fallback: true` + the fallback model honestly. No fallback
+  configured → honest `quota_exhausted` error verdict. The local tier has
+  no second fallback (no loop-back).
+- Tests monkeypatch `vlm._sleep` to RECORD delays — no real waiting; all
+  against the mocked Gemini/local servers (S1: no live vision calls).
+
+**Phase 5 image-size policy** (`vlm.py`): overview renders
+(front/side/top/iso) and reference photos are downscaled to ≤768×768
+(LANCZOS, aspect preserved, JPEG q90 / PNG) before sending; close-up
+renders (any non-overview key) are NEVER downscaled — fine detail is
+their entire purpose. `describe_reference_images` sends refs at ≤768.
+Verdicts record the applied `image_policy`. `chat_vision` grew an
+optional `image_max_dims` parameter (parallel to image_paths; None
+entries pass through untouched) — backward compatible.
+
+### Tests
+
+`tests/test_closed_loop.py` (10): red-gates cap report (error text,
+manifest status `iteration_cap_exhausted`, cap_report evidence incl.
+failed measurement details, non-None unresolved_error, zero vision
+calls, corrector ran every red iteration); green → exactly one vision
+call + `completed`; build-failure cap (no verification → last_error in
+cap_report); budget exhaustion is NOT a cap (status stays
+`budget_exhausted`); review_closeups rendered into the loop's views;
+owner library in the analyst prompt (both surfaces + exact paths +
+never-diffusion, index.json written) + no-library/empty-library/
+explicit-missing-root skips; config pins `max_iterations: 8`.
+
+`tests/test_vlm.py` (+9): rate-limit backoff sequence (2 s and 4 s bases
++ jitter, recorded sleeps, then success); bounded give-up (exactly 5
+retries, sorted exponential, ≤ 60 s + 1 s cap, RateLimitExhaustedError);
+quota → zero sleeps + QuotaExhaustedError; quota → local-Qwen verdict
+(`quota_fallback`, fallback model, parsed verdict); quota without
+fallback → honest `quota_exhausted`; local primary has no second
+fallback; `_image_b64` downscale semantics (oversized → 768 aspect-
+preserved, close-up None → byte-identical, small → untouched);
+`visual_verdict` threads the policy (mock server receives 768/768/2000
+for reference/overview/close-up); describe sends refs at ≤768.
+
+One classifier bug found by the tests: the first `_classify_429` treated
+any `RESOURCE_EXHAUSTED` body as quota, but real Gemini rate-limit bodies
+carry that status string too — the specific `RATE_LIMIT_EXCEEDED` reason
+code now wins (documented in the classifier docstring).
+
+**Suite: 351 passed in 131.75 s** (332 baseline + 19 new; baseline grew,
+nothing re-baselined). S1 honored: no live vision calls — all 429/quota/
+image-policy paths verified against the mocked Gemini v1beta and local
+OpenAI-compatible servers with recorded sleeps. MAYA00053153 dims
+untouched (rule 9). Committed under the owner's identity, no push.
+
+## Session log — 2026-09-02 (round 9: Phase 6 — three unseen objects, end to end)
+
+Master order Phase 6: three objects never seen before, start to finish,
+report renders + honest read. **The reviewer is the visual judge** — S1
+held for every run (owner has not confirmed Gemini billing; both
+`THREED_VLM_API_KEY` and `GEMINI_API_KEY` stripped from the environment,
+analyst prompt records "NOTE: vision is unavailable", visual gate fails
+soft, no live vision calls).
+
+### The chain (identical for all three)
+
+`scripts/phase6_intake.py` (PROMPT.md → `input/jobs/<CODE>.yaml` via the
+deterministic intake; dims + explicit unit, never inferred) →
+`python -m src.cli build -p "$(cat PROMPT.md)" -m <measurements> -i
+<photos> -n <name>` (analyst → gates → corrector) → `package --spec
+<run>/spec.json --job input/jobs/<CODE>.yaml` (T3 finish chain) →
+`validate <pkg> --job` (client mirror).
+
+### Honest results per object
+
+**A — coat stand** (refs: Rijksmuseum objectnr 8284 + a catalog photo;
+job COATSTAND0001, 480×480×1750 mm floor): build GREEN in **2 iterations,
+35.1 s**; package 29 s; **ALL SIX client gates PASSED** — dims
+480/480/1750 mm, Δ ≤ 0.001 mm on every axis; LP 2240 tri-eq (budget
+30000), HP 95872, 66 UV islands, 0 overlaps, texel ratio 1.0000051.
+End-to-end ≈ 64 s.
+
+**B — wall-mount mailbox** (refs: two museum/street photos; job
+MAILBOX0001, 260×130×200 mm wall): three attempts, and the first two
+failures were cold-path defects, not the model —
+attempt 1 (125 s): corrector gave up at iteration 2 and the give-up was
+**silent** (defect 1); attempt 2 (958 s): corrector chased mislabeled
+targets with no measured part geometry (defect 2); attempt 3 (both fixes
+in): GREEN in **7 iterations, 545 s**; package 28 s; **2 of 6 gates FAIL,
+honestly**: Dimensions H→Z 200.73 mm vs 200.00 (**Δ+0.730 mm** — passes
+the internal ±1 mm, fails the client ±0.01 in = ±0.254 mm) and
+Orientation `wall` (intake accepts the word; the client contract defines
+no wall semantics — the validator refuses to guess, rule 9). L/W exact.
+LP 528/20000, HP 19728, 34 UV islands, 0 overlaps.
+
+**C — watering can** (refs: two museum photos; job WATERCAN0001,
+380×200×340 mm floor): build GREEN in **3 iterations, 181.8 s**; package
+24 s; **1 gate FAIL**: L→X 379.19 vs 380.00 (**Δ−0.815 mm** — internal
+placement tolerance ±5 mm passed, client ±0.254 mm failed); W/H exact.
+LP 496/25000, HP 5728, 28 UV islands, 0 overlaps.
+
+Renders (reviewer holds the visual verdict): `output/runs/
+20260902_124637_phase6_a_coatstand_8a7669/renders/`,
+`…_131627_phase6_b_mailbox_582f3d/renders/` (7 steps),
+`…_132642_phase6_c_wateringcan_866b4d/renders/`, plus finish review
+renders under `output/finish/<JOB>/review/`.
+
+### Cold-path defects found by the runs (all fixed)
+
+1. **Corrector give-up was silent.** A corrector response that failed
+   JSON extraction or ObjectSpec validation read as "cannot fix" with
+   the reason swallowed; a run could die at iteration 2 leaving no trace.
+   `_correct_spec` now retries once with the failure quoted back
+   (transient ≠ incapable), records `last_correction_failure`, and every
+   give-up reaches the manifest as `unresolved_error: "Corrector gave
+   up: …"`.
+2. **The corrector flew blind.** Gate deltas alone leave part
+   repositioning to guesswork (attempt 2 burned 958 s on mislabeled
+   targets). Gate-failure correction prompts now carry the measured
+   per-part geometry table (dims, center, bottom_z, top_z) — B converged
+   only after this (`_measured_geometry_table`).
+3. **NGON caps vs the strict delivery n-gon gate.** First live spec
+   package in history with cylinders: `prepare_delivery_scene` refused
+   20 n-gons (10 cylinders × 2 NGON caps) after the build had already
+   converged. Caps are now TRIFAN fills in `_build_cylinder` /
+   `_build_tapered_cylinder` / `_build_cone` — Blender 4.x parameter is
+   **`end_fill_type`** (`fill_type` is unrecognized) — and extrude parts
+   default to `caps: fan` at the schema level. Same triangle-equivalent
+   count, so tri ceilings are unaffected.
+4. **The regression that fix exposed, and its root cause.** After (3)
+   the coffee_mug golden benchmark lost watertightness. Causal chain,
+   pinned empirically: the EXACT boolean solver leaves **24
+   coincident-but-distinct vertex pairs joined by zero-length edges**
+   where the cut crosses the inner fan-cap ring (live mesh stays
+   edge-closed; Blender's own `validate()` strips nothing); glTF
+   tessellation ships them as **48 zero-area triangles `[P,P,Q]`**; the
+   delivery check welds by position, and each degenerate face
+   double-counts its edges (32 degree-4 + 8 degree-6 = 40 non-manifold
+   edges) → not watertight. Fix: `apply_boolean` now dissolves
+   zero-length edges (`_weld_solver_duplicates`, bmesh
+   `dissolve_degenerate`, dist 1e-7 m — 2500× below the tightest client
+   tolerance, so only solver artifacts can match). Bonus: the pinched
+   5-vert loop faces dissolve back to quads (mug n-gons 48 → 0).
+   Isolation verified: a bare TRIFAN cylinder is clean (0 zero-length
+   edges) and the already-shipped COATSTAND LP/HP weld watertight with 0
+   zero-area faces — the pathology is boolean-solver-only.
+5. **Measurement grammar enforced pre-build + honest UNMEASURABLE
+   feedback** (earlier in the phase): `applies_to` targets are
+   structure-checked (unknown part / unmeasurable attribute refuse
+   before any Blender call); verifier feedback names the reason instead
+   of a fake Δ0 mm when a measurement cannot be taken.
+
+### Findings recorded, deliberately NOT fixed (owner decisions)
+
+- **Internal ±1 mm vs client ±0.254 mm tolerance gap.** B (+0.730) and
+  C (−0.815) pass the internal gate and fail the client gate. Flipping
+  the default was rejected mid-phase: the golden benchmark specs
+  (coffee_mug, coffee_table, counter_stool, chiral_test) carry
+  measurements without explicit `tolerance_m` and depend on the default.
+  Options: tighten the default + add explicit tolerances to the goldens,
+  or add a delivery-side re-check at client tolerance inside the loop.
+- **Orientation `wall`** is accepted by intake vocabulary but has no
+  client-contract semantics → the validator refuses to guess (rule 9).
+  Needs a client clarification or an intake-vocabulary restriction.
+- **No `center_z` in the measurement grammar**: A's peg-ring centers
+  land 14 mm low (the analyst maps center-height constraints to
+  `top_z`).
+- **B body/dome split** 126.5/73.5 mm vs the prompt's stated 135/65.
+
+### Tests
+
+**+17 (351 → 368)**: explicit-JSON-null materials (2), resolver crash →
+build error not run crash (1), corrector retry/give-up-reason/validation
+reason/measured-geometry table (5), extrude caps default fan (1),
+applies_to grammar + UNMEASURABLE feedback (4), and the NEW
+blender-marked `tests/test_spec_shapes_delivery.py` (4: every vocabulary
+shape n-gon-free; every shape a closed solid; boolean result welds
+watertight after glTF; boolean result exports zero zero-area faces).
+
+**Suite: 368 passed in 131.47 s** (was 365 passed + 1 failed at the low
+point — the mug regression was fixed at the source, not by loosening its
+assertion; baseline grew, nothing re-baselined). S1 honored (no live
+vision calls). Rule 9 honored (no dims inferred; MAYA00053153
+untouched). Committed under the owner's identity, no push.
+
+## Session log — 2026-09-02 (round 10: Phase 7 — batch throughput)
+
+Master order Phase 7: "3 jobs concurrently (32 threads, 64 GB), CPU bakes
+at 1K for iteration, GPU reserved for final 4K; then a batch of 5 with
+real measured wall clock per model and total." S1 held for every run
+(owner has not confirmed Gemini billing; the batch driver strips both
+`THREED_VLM_API_KEY` and `GEMINI_API_KEY` per worker, analyst prompts
+record "NOTE: vision is unavailable", visual gate fails soft — the
+reviewer holds the visual verdict on the renders).
+
+### Subjects (authored fresh, never seen before)
+
+Five hard-surface objects, two CC0/museum reference photos each with
+PROVENANCE.json, PROMPT.md in the Phase 6 format, deterministic intake →
+`input/jobs/<CODE>.yaml` (dims + explicit unit, never inferred):
+
+| Job | Object | Card dims (mm) | Ceiling |
+|---|---|---|---|
+| STEPSTOOL0001 | two-step step stool | 450×420×480 | 25,000 |
+| MILKCHURN0001 | milk churn | 340×340×640 | 20,000 |
+| GARDENTROWEL0001 | garden trowel | 320×70×45 | 15,000 |
+| CHAMBERSTICK0001 | chamber candlestick | 190×140×65 | 20,000 |
+| GALVBUCKET0001 | galvanized bucket | 260×260×330 | 20,000 |
+
+Driver: `scripts/phase7_batch.py` — per-job subprocess chain
+(build → package --bake-device cpu → validate), ThreadPoolExecutor,
+`THREED_BLENDER_THREADS` per worker (32 cores ÷ concurrency), per-step
+logs + `summary.json` under `output/phase7/<tag>/`.
+
+### The shakedown found two cold-path defects (both fixed at the source)
+
+3-way shakedown (177 s total): MILKCHURN + GARDENTROWEL all gates PASS;
+STEPSTOOL **Dimensions FAIL** — L/W swapped 90° about Z (Δ∓30 mm). Root
+cause: the analyst's spec declares its own measurement→axis binding, so
+the internal dimension gate verifies the analyst's DECLARED binding; the
+loop never saw the job card, so the swap was invisible until package
+time. **Fix:** `src.cli build --job <card>` threads the card into the
+loop — the analyst prompt gets a CLIENT JOB CARD CONTRACT section (axis
+map, meter-converted dims, `applies_to` bindings) and
+`evaluate_card_axis_gate` (verifier.py) checks the measured overall
+extents against the card inside `verify_run`, so the corrector fixes it
+in-loop. Pinned in `tests/test_card_axis_gate.py` (12 tests).
+
+The first full batch then failed CHAMBERSTICK by **+0.100 mm** and
+GALVBUCKET by **+0.104 mm** — inside the internal ±1 mm (loop stopped)
+but outside the client tolerance, which is 0.01 **in the card's declared
+unit** (±0.01 mm for mm cards, ~100× tighter than the internal figure).
+**Fix:** the card-axis gate now enforces the CARD's delivery tolerance
+(`job.dim_tolerance_m()`), so an internally-green build is driven to
+client-green inside the loop. Same test file pins the near-miss case.
+
+Third fix (pre-existing, exposed by these runs): prompts phrased "under
+N triangles" made intake set `polycount_semantics: triangles` — the
+client Polycount gate then counted literal triangle faces, which read
+~0 on a quad-clean FBX (vacuous pass). Prompts rephrased to "polycount
+ceiling N" (noun `polycount` → semantics unstated → conservative
+triangle-equivalent default); all five cards re-intaken.
+
+### Batch of 5 — ALL FIVE JOBS PASS ALL SIX CLIENT GATES
+
+Concurrency 5, 6 Blender threads/worker, CPU 1K iteration bakes
+(GPU reserved), 32 logical cores / 62 GB RAM:
+
+| Job | Iterations | Build | Package | Validate | LP tri-eq | HP tri-eq | Dimensions Δ |
+|---|---|---|---|---|---|---|---|
+| STEPSTOOL0001 | 1 | 31.2 s | 21.8 s | 10.7 s | 432 | 4,800 | ±0.000 mm |
+| MILKCHURN0001 | 2 | 56.4 s | 23.7 s | 2.6 s | 2,176 | 49,152 | ±0.000 mm |
+| CHAMBERSTICK0001 | 2 | 106.0 s | 20.2 s | 2.7 s | 2,688 | 14,080 | ±0.000 mm |
+| GALVBUCKET0001 | 5 | 210.4 s | 16.8 s | 2.6 s | 1,472 | 38,464 | +0.002 mm worst |
+| GARDENTROWEL0001 | 4 | 289.4 s | 12.5 s | 2.6 s | 44 | 1,316 | ±0.000 mm |
+
+**Total wall clock: 305 s (5.1 min) for 5 verified, packaged models** —
+~61 s/model of throughput at 5-way concurrency, every model
+dimension-exact against its card (worst delta +0.002 mm, inside the
+±0.01 mm card tolerance), polycount gates now counting real
+triangle-equivalents (44–2,688 against 15,000–25,000 ceilings). Evidence:
+`output/phase7/batch5/` (per-step logs + summary.json),
+`output/packages/<CODE>/qa_report.json`. Iteration counts rose vs the
+pre-fix batch (the card gate refuses to stop at ±1 mm) — that is the
+honest cost of converging to the client's delivery tolerance in-loop;
+STEPSTOOL needed only 1 iteration because the prompt contract oriented
+the analyst correctly on the first spec.
+
+### Final 4K GPU bake (GPU was reserved during the batch)
+
+`package --spec <milkchurn run>/spec.json --job MILKCHURN0001.yaml
+--res 4096 --bake-device optix --out-root output/phase7/final4k`:
+**99.4 s** wall, `bake_device_resolved: GPU / OPTIX` on the RTX 4080
+SUPER (recorded in qa_report), 5-map bake 84.6 s at 4096², LP 2,176 /
+HP 49,152 tri-eq, 24 UV islands, 0 overlaps, texel ratio 1.0000008,
+ALL SIX GATES PASSED, 9 deliverables + qa_report under
+`output/phase7/final4k/MILKCHURN0001/`. Review renders await the
+reviewer's visual verdict:
+`output/phase7/finish/MILKCHURN0001/review/`.
+
+### Suite + commit
+
+**Suite: 389 passed in 135.43 s** (389 = 368 Phase 6 + 9
+batch-concurrency + 12 card-axis-gate; baseline grew, nothing
+re-baselined). S1 honored (no live vision calls). Rule 9 honored (no
+dims inferred; MAYA00053153 untouched). AGENTS.md invariants added: the
+card-axis gate contract and the polycount-phrasing semantics.
+Committed under the owner's identity, no push.
+
+## Session log — 2026-09-02 (round 11: Phase 8 item 1 — per-surface texel priority)
+
+Master order Phase 8 item 1: "The atlas gives every surface the same
+density... That is the bug: velvet needs almost no detail, printed text
+needs many times more. Fixes the illegible label and generalises to every
+branded asset."
+
+### Design
+
+`PartSpec.texel_priority` (default 1.0, bounds 0.25–16.0) multiplies a
+part's texel density in the shared delivery atlas. Density scales with
+√uv-area, so the packer squares the multiplier: an island's target uv_area
+= rho · prio² · world_area, with rho renormalised over Σ(world_area ·
+prio²) — **total atlas use is unchanged; priorities redistribute the
+budget**. `DecalSpec.texel_priority` defaults to 4.0 (a brand label is the
+canonical high-detail surface) and rides the compiled `decal_patch` part.
+The analyst prompt documents the field (label/text parts 3–8, plain fabric
+1.0 or 0.5); the resolver omits the field at 1.0 so historic specs produce
+byte-identical build params.
+
+Diagnostics split in two: the RAW density ratio honestly reports the
+authored spread, and `ratio_priority_weighted` (each island's density
+divided by its part's priority) is the uniformity metric that must stay
+~1.0 — the Phase 8 item 2 principle ("a ratio alone must never gate
+this") applied here. The CLI finish panel surfaces the weighted figure
+whenever spread is authored; `uv_diagnostics` reaches the loop's measured
+facts whole.
+
+### Measured (mattress template, 1024² reporting resolution)
+
+| Surface | Priority | texels/m | Atlas share | World share |
+|---|---|---|---|---|
+| decal_patch | 4.0 | 1,295.4 | 31.21% | 2.76% |
+| velvet | 1.0 | 323.8 | 14.54% | 20.55% |
+| crown | 1.0 | 323.8 | 12.69% | 17.93% |
+| base | 1.0 | 323.8 | 7.71% | 10.89% |
+
+Raw ratio 4.000034, priority-weighted ratio 1.000019, pack_scale 0.75,
+132 islands, in bounds, 0 overlapping texels. **The label now gets 727
+texels across its 561 mm patch height — up from ~136 before the fix
+(5.3×), at 1024².** Plain surfaces got 1.33× DENSER, not sparser: the
+renormalisation shrank the bulky tape islands ~1.2× in area and the shelf
+packer fit one ladder rung higher (0.5625 → 0.75; the ladder is ×0.75 per
+retry). Rule 9 held throughout (numbers above are pipeline-exercise only;
+MAYA00053153 stays `dims_placeholder: true`, no package emitted).
+
+### Defects found and fixed
+
+- **The priorities extraction read the wrong key** — `build_params["parts"]`
+  instead of `build_params["spec"]["parts"]` — which would have made every
+  priority silently 1.0 at runtime. Caught while writing the pinning test
+  (by reading how `op_build_from_spec` consumes the params), fixed before
+  any test ran green against it.
+- Two stale mattress pins updated (not weakened): the raw texel-ratio pin
+  `< 1.05` became `≈ 4.0` raw + `< 1.05` weighted, and pack_scale
+  `0.5625` → `0.75` with the cause recorded in the test comment.
+
+### Tests
+
+New `tests/test_texel_priority.py` (12): schema bounds + resolver
+passthrough/omission, analyst-prompt sync, template decal default, and
+four Blender-marked atlas tests through `prepare_delivery_scene` — a 4×
+priority part measures 4.00× the plain part's texels/m, atlas stays valid
+(in bounds, 0 overlaps), raw ratio reports the spread while weighted stays
+< 1.05, and no-priority specs keep weighted == raw exactly.
+
+**Suite: 401 passed in 121.86 s** (401 = 389 + 12 texel-priority;
+baseline grew, nothing re-baselined). S1 honored (no live vision calls).
+Committed under the owner's identity, no push.
+
+## Session log — 2026-09-02 (round 12: Phase 8 item 2 — raking key + absolute-contrast metric)
+
+Master order Phase 8 item 2: "Add a key that reveals form, reduce fill
+until form returns without reintroducing clipping, and pin a floor on
+absolute grey-level amplitude at the quilt pitch — suggest 6+ — alongside
+the existing balance and clipping checks. **A ratio alone must never gate
+this again.**" (§H context: round 4's FFT axis ratio read 0.87 while fill
+had flattened the quilt to 0.81/0.96 grey levels — a ratio reaches 1.0
+when both terms go to zero.)
+
+### The substrate bug that almost hijacked the tune
+
+The first tuning substrate (the prepared-but-unbaked GLB) was invalid:
+`prepare_delivery_scene` atlas-repacks UVs while materials still reference
+SOURCE textures, so the normal map sampled garbage UVs and tilted the
+effective shading normals arbitrarily — the crown rendered pitch-black
+under both keys while the file NORMAL attribute was healthy (nz +0.985)
+and the light math said it should be lit (keys 2.31 vs rim 0.689
+irradiance, but rendered means 19 vs 123 — a monotonicity violation that
+exposed the substrate, not the rig). **SUBSTRATE RULE**: rig tuning runs
+on a pure-form substrate (flat 0.75 albedo, textures stripped); the real
+baked LP is the verification target. Second trap on the stripped GLB:
+the knit albedo aliases onto the quilt grid — 10.55 grey levels of
+SPURIOUS y-modulation at the quilt pitch under a zero-gradient overhead
+sun. The overhead-sun discriminator (no gradient ⇒ any modulation is
+albedo) separates form from texture before any rig conclusion.
+
+### The tuned rig (committed as `setup_studio_lighting` defaults)
+
+| Light | Type | Energy | Rot (°) | Meaning |
+|---|---|---|---|---|
+| KeyA | SUN | 2.5 | (80, 0, 90) | elevation 10°, travels −X: rakes x-relief |
+| KeyB | SUN | 2.5 | (80, 0, 0) | elevation 10°, travels +Y: rakes y-relief, lights front wall |
+| FillLight | SUN | 0.1 | (25, 0, −45) | steep whisper (was 0.7) |
+| RimLight | SUN | 0.6 | (−55, 0, 0) | 35° from behind |
+
+Physics: relief modulation scales with cot(elevation) — the round-4 40°
+keys left the 14 mm quilt relief under the floor; 10° gives ~4.8× the
+modulation/mean ratio. AgX's shoulder compresses amplitude at high mean
+luminance, so a lower mean preserves modulation. Fill flattens
+measurably: ~0.5 grey levels of quilt amplitude per 0.1 fill energy
+(sweep-verified; the analytic "fill's 0.906 vertical component flattens
+x" hypothesis was WRONG — per-light ablation beat theory).
+
+### The probe (rule 11 all the way down)
+
+`src/render/metrics.py` (pure numpy+PIL): `view_stats` (balance/clipping
+over opaque pixels) + `measure_contrast_probe` — Hann-windowed rFFT2
+amplitude at the authored pitch (3-point parabolic peak in a 0.6–1.4×
+search band), scanline p95−p5 cross-check, box-blur detrend. The gate
+keys on the WEAKEST gated axis (`axes: both|x|y`): a strong y can never
+carry a dead x past the floor — the §H defect rotated 90°, caught while
+writing the tests. The measurement is conservative by ~13% at 10 cycles
+across (detrend sinc); the floor is calibrated against THIS analyzer.
+Fail-closed refusals (region < 90% opaque, < 32 px) carry
+`passed: false`, never a silent pass. Probe failure is loud recorded
+evidence in qa_report, NOT delivery refusal — the six client gates own
+refusal.
+
+Product knowledge lives in `templates/mattress.yaml`
+(`contrast_probes: crown_quilt, top view, region [0.25,0.25,0.75,0.75],
+cycles [10,10], floor 6.0, axes both`), threaded schema → template
+compile → ObjectSpec → `_collect_render_metrics` → `finish.render_metrics`
+in qa_report (both the delivered and the blocked flows) → CLI panel.
+Cycles are scale-invariant: the square top-view framing spans
+0.575 × cells_across ≈ 9.78 ≈ 10 at ANY job-card size (verified:
+detected 9.9/9.75).
+
+### Measured
+
+- Pure-form fixture (RIGTUNE0001, 2000×1200×300 mm, 17×10 quilt cells):
+  **x 9.486 / y 7.495 grey levels** (floor 6.0), detected cycles
+  9.9/9.75, means 146–171, clip 0.0000, crush ≈ 0. Deterministic — the
+  rig pin test reproduces these exact numbers.
+- **Real baked LP** (full T4 chain, `output/packages/RIGTUNE0001/`):
+  **x 9.587 / y 7.578 grey levels**, peak-to-trough 33.6, all six client
+  gates PASS (L/W exact, H Δ−0.006 mm), LP 13,380 tri-eq of 50,000,
+  124 islands 0 overlaps, texel ratio 4.0 raw / 1.0 priority-weighted.
+  The baked normal map ADDS contrast over pure form — the delivery
+  substrate exceeds the tuning substrate.
+- RIGTUNE0001 is an AUTHORED fixture card (flat mattress proportions for
+  the rig physics), not a product job; MAYA00053153 stays
+  `dims_placeholder: true` (rule 9 untouched).
+
+### Tests
+
+New `tests/test_render_metrics.py` (13, synthetic gratings): per-axis and
+additive amplitude recovery ±5% at 20 cycles (where detrend sinc ≈ 0),
+detected-cycles accuracy, out-of-band pitch exclusion, **ratio-never-gates
+(same ratio 1.0: 2/2 gl fails, 12/12 passes)**, per-axis gating
+(strong y + dead x fails on axes=both), fail-closed refusals, clipped
+fraction over opaque only. New `tests/test_render_rig.py` (3,
+Blender-marked): the default rig meets the floor on BOTH axes on the
+rendered pure-form fixture, views balanced (clip < 0.02, mean 40–230),
+and the tune environment pinned (EEVEE Next + AgX — the constants were
+tuned under these scene defaults; a Blender upgrade that changes them
+trips the floor first). 5 template-threading tests in
+`tests/test_template.py`. The round-4 cross-key rig pin was UPDATED, not
+weakened: the perpendicular two-key/no-privilege contract stands, the
+elevation band inverted to shallow raking (10° tuned, 3–17° band) with
+the §H cause recorded, fill-whisper and total-energy caps added.
+
+**Suite: 422 passed in 151.89 s** (422 = 401 + 21 new: 13 analyzer + 3
+Blender rig pin + 5 template threading; the round-4 rig pin was updated
+in place, not added). Baseline grew, nothing re-baselined. S1 honored
+(no live vision calls — the probe is numeric, no VLM involved). Committed
+under the owner's identity, no push.
+
+## Session log — 2026-09-02 (round 13: Phase 8 item 3 — mesh-source interface)
+
+Master order Phase 8 item 3: "**Mesh-source interface.** One contract
+behind which parametric, template, neural image-to-3D, imported assets and
+scans all satisfy. Cheap now, expensive after the DSL calcifies."
+
+### The contract
+
+Every part declares exactly ONE geometry source (`method`), and the fields
+a part may carry are entailed by that source — enforced fail-closed by a
+`PartSpec` cross-field validator:
+
+| Source | `method` | `mesh_path` | `target_size` | Who materializes the file |
+|---|---|---|---|---|
+| Parametric / template / script | `parametric`, `custom_script` | forbidden | — | nobody (shape vocabulary / code builds it) |
+| Neural image-to-3D | `image_to_3d` | generated at build time | optional (dimensions fallback) | the loop, via the img3d service, cached in `run_dir/neural/` |
+| Imported asset | `imported` | REQUIRED (authored) | REQUIRED | nobody — the file IS the geometry |
+| Scan | `scanned` | REQUIRED (authored) | REQUIRED | nobody — same mechanics, different provenance |
+
+Mechanically, all file-backed sources pass through ONE harness path that
+already existed for neural parts — import → join → rescale to `target_size`
+→ place — now keyed on the file-backed method SET instead of the neural
+enum value. Only provenance differs, and provenance is exactly what Phase
+8 item 4 (retopology) needs: a `scanned` part is raw reality capture that
+MUST be retopologized before delivery; an `imported` asset may already be
+delivery-grade. Two enum values, one code path.
+
+Design decisions, each pinned by a test:
+- **`target_size` is required for imported/scanned** (rule-9 spirit): file
+  units are never trusted; the owner states the size or the spec is
+  refused. Without this, an asset would silently rescale onto the
+  `[1,1,1]`-metre `dimensions` default.
+- **`mesh_scale`**: `"fit"` (default, existing behavior) rescales per-axis
+  so bounds land EXACTLY on target_size — dimension gates exact; `"uniform"`
+  applies one factor (min of the per-axis ratios) — aspect preserved, no
+  axis exceeds target. Authored assets and scans where per-axis stretch is
+  damage get `uniform`; the corrector is told to adjust such parts by one
+  common factor (their aspect is fixed).
+- **The loop resolves authored mesh paths to ABSOLUTE** before build — the
+  harness subprocess must not depend on the caller's CWD — and fires a
+  loud `mesh_source_error` event when the file is absent (unlike neural
+  parts, a missing authored file is unsatisfiable; the build skips the
+  part and the gates fail honestly downstream).
+- **A part with two sources is refused** (parametric + `mesh_path`), as
+  are another source's fields (`image_crop` off `image_to_3d`, `code` off
+  `custom_script`). Templates compile to `PartSpec` directly, so template
+  parts get the whole vocabulary for free (rule 11 intact: the finishing
+  layer still knows no product nouns).
+
+### Defects found and fixed
+
+- **The organic-rewrite would have clobbered authored sources.**
+  `_normalize_spec_methods` rewrote ANY `organic` part whose method wasn't
+  `image_to_3d` to `image_to_3d` — under the new contract that retargets an
+  `imported`/`scanned` organic part at a neural generation it never asked
+  for (and points it at a reference image it may not have). Fixed: only
+  `parametric`/`custom_script` organics are rerouted. Found by writing the
+  contract down, before any test ran.
+- **My first placement test was wrong, not the code**: I asserted absolute
+  x/y position through `build_from_spec`, but `center_origin_bottom`
+  (assembly ground normalization, a deliberate pipeline invariant)
+  re-centers the whole model at origin after placement. Rewritten as a
+  RELATIVE test: an anchor box z 0..0.4 with the imported part (`base`
+  mode, z=0.4) sitting exactly on top — which is the placement contract
+  that actually survives a build.
+
+### Measured (Blender 4.5 harness, real exported GLB as the "owner asset" —
+a 0.30 × 0.10 × 0.20 m box, deliberately non-uniform so fit and uniform
+are distinguishable by measurement, not by code path)
+
+- `fit` (default): imported part bounds read **[0.60, 0.20, 0.40] m**
+  (target ×2 per axis) ± 1e-4 m; zero build warnings.
+- `uniform` at target [0.60, 0.60, 0.60]: per-axis ratios [2.0, 6.0, 3.0]
+  → factor 2.0; bounds read **[0.60, 0.20, 0.40] m** — the most
+  constrained axis lands exactly on target, none exceeds it, and the
+  source's 3:1:2 aspect survives (0.20/0.60 and 0.40/0.60 match
+  0.10/0.30 and 0.20/0.30 within 1e-3).
+- Placement: imported part `base`-mode min z **0.4 m** on the anchor's
+  max z **0.4 m**, top at **0.8 m** (± 1e-4 m).
+- Missing file: build SUCCEEDS with `parts_created: 0` and a warning
+  naming the path ("mesh file not found … does_not_exist.glb") — the loop
+  fires `mesh_source_error` with part, method and path.
+- End-to-end through the real CLI loop
+  (`build --spec` with an `imported` part, `organic` shape, authored
+  `mesh_path`): status completed in **1 iteration** (no correction round),
+  dimension gate PASSED — overall 0.60/0.20/0.40 m at **delta 0.0 mm on
+  all three axes** — mesh gate PASSED (watertight, 12 tri), and the
+  run-dir `spec.json` carries the loop-absolutized `mesh_path`.
+
+### Scope boundary honored
+
+The contract lets dirty meshes ENTER the pipeline; it does not make them
+PASS the finish gates. An imported GLB is triangulated by glTF and will
+fail quad-verify — that is the documented state ("organics stay out until
+retopology exists"), and retopology is item 4's deliverable, not this
+one. No retopology was written; no organics were enabled; nothing in the
+finishing layer learned a product noun.
+
+### Tests
+
+New: `tests/test_mesh_source.py` (6 Blender-marked: fit exact, uniform
+aspect, relative placement, scanned same-path, organic+authored-mesh
+imports, missing-file skip-loudly), `tests/test_mesh_source_contract.py`
+(4 pure: resolver threading + default-omission, JSON round trip, prompt
+sync for analyst AND corrector), +5 in `test_schema.py` (required fields,
+two-sources refusal, entitled-fields-only, `is_file_backed`/`mesh_scale`
+validation, positive-triple target_size), +2 in `test_img3d.py`
+(normalize no-clobber, resolve-and-fire). 17 new in total.
+
+**Suite: 439 passed in 159.71 s** (439 = 422 + 17; baseline grew, nothing
+re-baselined). S1 honored (no live vision calls). Committed under the
+owner's identity, no push.
+
+## Session log — 2026-09-02 (round 14: Phase 8 item 4 — RETOPOLOGY scoped, measured, proven)
+
+**Deliverable**: `docs/MESH_SOURCES.md` — the retopology scoping doc the
+master order asked for, anchored end-to-end on direct measurements. No
+retopology implementation was committed (that is R1/R2 below); no
+organics were enabled; the scope boundary held. Evidence fixtures
+committed as job cards `input/jobs/RETOPO0001.yaml` (5,119-tri scan,
+424.389 × 421.198 × 445.512 mm at full measured precision) and
+`RETOPO0002.yaml` (81,919-tri scan, 428.304 × 424.246 × 447.386 mm).
+
+### The audit that corrected the plan's assumption
+
+The order's premise: feed a dense triangulated organic mesh in and "it
+fails all of them [the gates]". Measured: it doesn't. The 5,119-tri scan
+with one hole passes ALL SIX client gates through the full T3 chain
+(dimensions Δ+0.000 mm; triangles aren't n-gons; the 8.3 base placement
+grounds it). The gates measure the contract, not mesh quality. What
+actually fails, with numbers: UV atlas shattering (5,118 islands ≈ one
+per face, texel density spread 36.5–204.0 texels/m = 5.59× ratio,
+vs 124 islands / 1.00 on the mattress), polycount at real scan scale
+(81,919 > 50,000), finish-chain collapse at scale
+(prepare_delivery_scene TIMEOUT at 300.0 s), no watertight check anywhere
+in the package path (the hole ships; the internal verifier logs
+non-watertight as a warning, `passed: True`), and no quad editability.
+
+### Root cause found and fixed-in-evidence: glTF vertex splitting
+
+The fixture GLB stores 15,355 verts for 5,119 triangles (per-attribute
+split); Blender's import preserves it, so every edge is a boundary edge.
+That split — not "triangles" — is what shatters the atlas (smart_project
+cannot walk across faces), what makes QuadriFlow refuse the raw import
+("Remeshing failed"), and what the importer's `merge_vertices=True` does
+NOT repair (measured: 15,355 verts unchanged; it only fuses identical
+attributes). The repair is a by-distance weld, `remove_doubles` at
+1e-6 m: 15,355 → 2,562 verts / 15,355 → 3 boundary edges in 0.02 s
+(81,919-tri scan: 245,653 → 40,962 verts in 0.25 s).
+
+### Tool survey (Blender 4.5.13, CPU paths, this machine)
+
+- **QuadriFlow** (op only; the Remesh modifier has no quad mode —
+  BLOCKS/SMOOTH/SHARP/VOXEL): welded 5,119 tris → 1,796 quads, hole
+  closed, 0.57 s; welded 81,919 tris → 7,812 quads in 2.66 s; target
+  honored within ~10%.
+- **Voxel remesh**: all quads, holes closed, 0.03–0.08 s; density ladder
+  0.012→6,152 / 0.008→14,132 / 0.006→25,278 / 0.005→36,578 quads;
+  surface shrinks ~½ voxel (−4.0/−3.7/−2.2 mm at 0.008).
+- **Decimate** triangulates quads (14,132 quads ×0.5 → 6,430 tris +
+  3,851 quads): a reducer, not a retopo tool.
+- **Measured defect #1**: QuadriFlow SILENTLY NO-OPS on voxel-remeshed
+  geometry — byte-identical mesh, 0.01 s, no error, at every target
+  (2k–12k), after shade_smooth / duplicate / normals-clear / GLB round
+  trip. Voxel and QuadriFlow are alternatives, never a chain; any
+  harness chaining of remesh steps must verify the face count changed.
+- **Measured defect #2**: voxel_size 0.004 collapses the fixture to 400
+  quads with dims −28/−17/−61 mm (deterministic across trials,
+  adaptivity 0.0, unexplained). Usable floor on ~0.4 m objects: 0.005.
+- **The GLB round trip destroys quads**: 1,796 quads → 3,592 tris
+  (exporter triangulates; verts stay welded if smooth-shaded and
+  UV-free). Retopology must therefore run in the live harness scene,
+  never via a pre-processed GLB hop.
+
+### End-to-end proof (full `src.cli package` T3 runs)
+
+| run | gates | LP tri-eq | islands | texel ratio | chain |
+|---|---|---|---|---|---|
+| 5,119-tri scan, split import (status quo) | ALL PASS | 5,119 | 5,118 | 5.59 | 45.7 s |
+| same, welded | ALL PASS | 5,119 | 212 | 1.00 | 19.9 s |
+| same, weld + QuadriFlow 2000 | ALL PASS | 3,592 | 221 | 1.00 | 19.0 s |
+| 81,919-tri scan, split import | — | — | — | — | TIMEOUT 300 s |
+| same, weld + QuadriFlow 8000 | ALL PASS | 15,624 | 367 | 1.00 | 44.0 s |
+
+Welding alone fixes the texture story at fixture scale; retopology is
+what rescues real scan scale (timeout → delivery) and buys polycount
+control + closed manifolds + (in-scene) quads.
+
+### Scoping outcomes (in the doc)
+
+Output contract (7 measurable, fail-closed criteria incl. the no-op
+guard), integration design (optional `retopology` block on file-backed
+parts, applied by the harness in-scene after import, before
+rescale/place; corrector must never drop it; recipe persisted under
+`run_dir/retopo/`), phased plan R1 weld-on-import → R2 the block →
+R3 external/neural backends, and the 8.5 dependency: neural image-to-3D
+emits dense tri soup, so R1 is a hard prerequisite before TRELLIS 2 vs
+Hunyuan3D 2.1 (owner's choice, one at a time).
+
+### Confessions (§H)
+
+- My first two survey probes had a broken UV-island counter: bmesh
+  `edge.link_loops` yields one loop per adjacent face (the corner where
+  the edge starts), so the "both endpoints match" union never fired and
+  the counter returned the FACE COUNT for every mesh. The control case
+  (born-in-Blender sphere: "512 islands" on 512 faces) exposed it. The
+  corrected counter was validated against two known cases (sphere → 6;
+  split scan → 5,118, matching the production atlas exactly) before any
+  number was trusted. All numbers above are from the corrected counter
+  or from the pipeline's own qa_report.
+- One probe exported intermediates after a scene reset, so a UV
+  measurement ran on the wrong mesh; discarded and re-measured live.
+- The `merge_vertices=True` repair hypothesis was wrong — measured, and
+  the doc says so.
+
+### Tests
+
+No code changed in this round — it is a scoping deliverable. **Suite:
+439 passed in 163.60 s** (baseline unchanged). S1 honored (no live
+vision calls). Committed under the owner's identity, no push.
+
+## Round 15 — Phase 8.5 R1: weld-on-import BUILT (the retopology prerequisite)
+
+The master order's item 5 (neural image-to-3D behind retopology) starts
+with the R1 prerequisite from docs/MESH_SOURCES.md §9. Implemented this
+round; R2 (the `retopology` spec block) and the neural backend follow.
+
+### What was built
+
+`_weld_imported_mesh()` in `src/blender/harness_script.py`: edit-mode
+`remove_doubles(threshold=1e-6)` applied to EVERY file-backed import
+(`image_to_3d` / `imported` / `scanned` / authored `organic`) inside
+`op_build_from_spec` — after the multi-object join (join fuses datablocks
+but keeps per-object coincident verts separate), before rescale. Key
+architectural fact found while placing the call: `op_prepare_delivery_scene`
+calls `op_build_from_spec` IN-PROCESS and saves a .blend intermediate, so
+the single call site covers the entire T3 spec-driven finish path; the T2
+raw-file flow runs gates only (no atlas), so no second site exists. The
+op result carries per-part `weld` stats — verts and boundary-edge counts
+before/after — because the export re-splits and post-hoc measurement from
+a second process is impossible: the report IS the evidence.
+
+### Measured results (all on this machine, direct counts)
+
+- Holed scan fixture (icosphere subdiv 3, 1 face removed, flat-shaded,
+  exported GLB): source 162 verts / 319 faces; import split to **957
+  verts (= 3 per face), 957 boundary edges**; after weld **162 verts
+  (exact restoration), 3 boundary edges** — the hole rim SURVIVES the
+  weld (matches RETOPO0001's measured 3). Bounds still land on target
+  [0.60, 0.20, 0.40] m within 4e-8 m.
+- Full T3 `prepare_delivery_scene` on the same fixture: **6 UV islands**
+  (was one per face pre-R1 — the doc's 5,119-face scan measured 5,118),
+  texel ratio **1.0000001**, 0 overlapping island pairs, all UVs in 0-1,
+  0 n-gons.
+- Do-no-harm control (UV-free smooth sphere): **162 → 162 verts,
+  0 → 0 boundary edges** — the weld is a no-op on healthy topology.
+
+### Root-cause refinement (measured, new this round)
+
+The glTF vertex split has TWO attribute sources, not one: a smooth-shaded
+icosphere that kept its primitive UV layer still exports **162 → 205
+verts with 88 boundary edges** — per-corner UVs split corners across UV
+seams even when normals are shared. (My first control fixture asserted
+smooth shading alone would round-trip clean — it failed, I measured why,
+and the doc's §4 now records both sources.) UV seams SURVIVE the weld as
+UV discontinuities because UVs are per-loop attributes, not per-vertex —
+which is why the welded fixture still unwraps to 6 islands, not 1.
+
+### Confessions (§H)
+
+- Two failed attempts to delete a face in the fixture script (selection
+  on a throwaway bmesh copy that never wrote back; then `polygons[i]`
+  .select writes that don't reach the live edit-mesh). The probe kept
+  reporting a CLOSED sphere (320 faces, boundary 0) and I initially read
+  the second run's identical numbers as a stale-file problem before
+  checking the source count. Fixed with pure-bmesh `bm.faces.remove()` +
+  `bm.to_mesh()` — no ops, no selection, deterministic.
+- The smooth-control prediction was wrong (expected 162, measured 205)
+  because I forgot the primitive's UV layer; measured, root-caused, and
+  the control now strips UVs (the honest "already-welded" input).
+
+### Tests
+
+3 new blender-marked tests in `tests/test_mesh_source.py`:
+`test_weld_on_import_restores_shared_topology`,
+`test_weld_is_noop_on_already_welded_input`,
+`test_scan_finish_chain_atlas_not_shattered` (e2e through
+prepare_delivery_scene). **Suite: 442 passed in 169.03 s** (baseline 439
++ 3). S1 honored (no live vision calls). Committed under the owner's
+identity, no push.
+
+## Round 16 — Phase 8.5 R2: the `retopology` spec block BUILT
+
+R1 (weld-on-import) gave shared topology on every file-backed import;
+R2 adds the analyst-facing control on top: an optional per-part
+`retopology` block, applied in the live harness scene between the weld
+and the rescale.
+
+### What was built
+
+- **Schema** (`src/spec/schema.py`): `RetopologySpec` — `tool:
+  "quadriflow" | "voxel"`, `target_faces` (100–200,000, quadriflow) or
+  `voxel_size` (> 0, voxel; SPEC UNITS like dimensions — a mm spec
+  writes 6 for 6 mm). Exactly ONE tool per part (chaining refused —
+  voxel → QuadriFlow is the §5.2 no-op); the block is refused on
+  non-file-backed methods (parametric parts are born quad-clean).
+- **Resolver** (`src/spec/resolver.py`): threads the block with
+  `unit.to_meters` on `voxel_size`, mirroring the dimension convention.
+- **Harness** (`src/blender/harness_script.py`): `_apply_retopology()`
+  after `_weld_imported_mesh()` and before rescale, in the live scene
+  (the GLB round trip triangulates quads — §5.5). Quadriflow via
+  `bpy.ops.object.quadriflow_remesh`; voxel via a Remesh modifier
+  (VOXEL, adaptivity 0.0, applied). Per-part `retopology` report
+  (recipe + before/after topology stats) rides the op result beside the
+  R1 `weld` stats. Three fail-closed guards: silent no-op (faces AND
+  verts unchanged → error naming the measured counts), empty output
+  (faces == 0 → error), and a harness-level refusal of retopology on
+  non-file-backed parts (defense behind the schema).
+- **Prompts**: the Analyst METHODS block documents both tools with
+  examples and the ≥ ~5 mm voxel floor; the Corrector's do-not-drop
+  list now includes `"retopology"`.
+
+### Measured results (all on this machine, direct counts)
+
+- Quadriflow on the holed scanned sphere (162 verts / 319 tris /
+  boundary 3) at `target_faces: 800` → **816 quads, 100% quads, 0
+  boundary edges** (hole closed), bounds exact on the [0.60, 0.20,
+  0.40] m target.
+- Voxel at `voxel_size: 0.05` (meters via the spec path) → **1,834
+  quads, boundary 0**, bounds exact.
+- Full T3 chain (spec → prepare → atlas → bake → FBX) on the
+  quadriflow part: **816 quads, 0 tris, 0 n-gons, 7 UV islands, texel
+  ratio 1.0000001** — retopologized parts ride the finish chain clean.
+- The no-op guard fires deterministically on the fixed-point fixture
+  (voxel-20 box saved as .blend — quads survive — re-imported,
+  voxel-remeshed at the same size): exactly 8 verts / 6 faces unchanged
+  → "silent no-op (6 faces, 8 verts unchanged)" raised as
+  `BlenderExecutionError`.
+
+### Defect #1 re-measured (probes 9–12) — two of my earlier claims were wrong
+
+Re-measuring before writing the docs overturned two mid-session
+claims (both now corrected in MESH_SOURCES.md §5.2):
+
+1. "The R1 weld repairs the QuadriFlow no-op" — **input-specific, not a
+   repair**. The original survey chain (dense scan → weld → voxel
+   0.008 → 14,132 quads → QuadriFlow 2000) silently no-ops, and it
+   STILL no-ops after a GLB round trip + re-weld (56,528 imported
+   verts → weld → 14,134 / 28,264 tris, unchanged, no error). The
+   sphere's voxel output IS repaired by the same chain (3,638 tris →
+   1,946 quads). The trigger is not density (a generated ico-sphere at
+   18,110 quads runs fine: 1,957 quads) and is not reconstructible
+   from generated geometry, so the real trigger cannot be pinned by a
+   fresh-fixture test — the deterministic fixed-point test pins the
+   GUARD instead, and the guard is required, not decorative: the
+   cross-file chain (part A exports voxel output, part B imports it
+   with a quadriflow block) is legal and demonstrably reaches the
+   silent no-op.
+2. "The live voxel → QuadriFlow chain fails loudly" — that was only
+   the EMPTY-output case (sphere @ 0.008 remeshes to 0 faces →
+   `RuntimeError: QuadriFlow: Remeshing failed`). On non-empty live
+   voxel output the no-op stays silent (sphere @ 0.05: 1,836 / 1,834
+   unchanged). Empty voxel output is itself silent — hence the
+   faces == 0 guard.
+
+### Confessions (§H)
+
+- **The R1 commit mishap**: `git add -A` swept the owner's untracked
+  "Test Images/" (10 PNGs) into commit ad0ebe6. Caught immediately,
+  reversed (`git reset --soft HEAD~1`, unstaged the directory,
+  re-committed as 1c3a3ff with explicit paths). Standing rule now
+  followed: never `git add -A`, always explicit file lists.
+- A harness Edit meant to add the parametric-retopology guard instead
+  deleted the `if not mesh_path` warning block (old/new string
+  mismatch); caught by reviewing the diff immediately and restored in
+  the corrected edit.
+- Two R2 tests initially asserted the wrong failure mode: the runner
+  RAISES `BlenderExecutionError` on `{"success": False}` harness
+  results rather than returning them — no prior test had asserted an
+  op failure. Both rewritten as `pytest.raises(..., match=...)` with
+  message-content asserts.
+- The two wrong defect-#1 claims above — caught by re-measurement
+  before they reached the committed docs.
+
+### Tests
+
+9 new: 4 in `tests/test_mesh_source_contract.py` (resolver unit
+conversion, schema misuse refusals, spec JSON round-trip, prompt
+documentation) + 5 blender-marked in `tests/test_retopology.py`
+(quadriflow closes the hole, voxel density control, no-op guard,
+harness parametric refusal, T3 e2e threading). **Suite: 451 passed in
+173.29 s** (baseline 442 + 9). S1 honored (no live vision calls).
+Committed under the owner's identity, no push.
+
+## Round 17 — Phase 8.5 R3: the TRELLIS.2 backend BUILT (via trellis.cpp)
+
+The master order named "TRELLIS 2 (MIT, 16 GB at 512³)". Research
+first, because both halves of that name needed correcting on the
+record: the model is **TRELLIS.2** (repo `microsoft/TRELLIS.2` — dot
+notation, NOT the v1 repo), 4B-param flow-matching image-to-3D over
+O-Voxel sparse latents with PBR surface attributes (arXiv:2512.14692,
+MIT). The official requirement is **24 GB VRAM, Linux-only**; "16 GB
+at 512³" is community-measured behavior, not a vendor claim. And the
+reference Python repo cannot run on this Windows machine at all
+(NVlabs-licensed nvdiffrast/nvdiffrec submodules, CUDA toolchain —
+it would also fight our torch 2.6.0+cu124 service venv). So R3 ships
+TRELLIS.2-4B through **trellis.cpp** (pwilkin, MIT, C++/GGML port):
+a prebuilt Windows CUDA binary with a resident HTTP server, running
+the model as GGUF. Zero new Python dependencies in either venv —
+this was the deciding factor over the reference repo.
+
+### What was built
+
+- **`services/img3d_service/providers/trellis.py`** (was a stub): the
+  real `TrellisBackend` — an httpx client to the trellis-server, with
+  two modes: **remote** (`IMG3D_TRELLIS_URL` — point at an
+  already-running server) and **managed spawn** (default,
+  127.0.0.1:8712): `load()` verifies the 10 GGUF files + binary
+  fail-closed, spawns `trellis-server.exe` (CREATE_NO_WINDOW, log at
+  `models/trellis/server.log`), polls `/health` up to 90 s, registers
+  atexit cleanup. A healthy server at the target port is ADOPTED, not
+  re-spawned, and `shutdown()` only ever kills a process this backend
+  started. `generate()` posts the pinned multipart contract (file part
+  `image`, fields `seed`/`resolution`), checks the GLB magic, and
+  either passes the server bytes through untouched (no target and
+  under `max_tris` — PBR textures preserved) or decimates (optional
+  fast_simplification, guarded) and scales per-axis to
+  `target_size_m`.
+- **`scripts/setup-trellis-cpp.ps1`**: downloads the v0.6.0 cuda zip
+  (`trellis-cuda-windows-x64.zip`) → `models/trellis/bin/` and the 10
+  q8 GGUFs from `ilintar/trellis2-gguf` flattened into
+  `models/trellis/` (what `--models` points at); `-Quant f16|q8|q4`,
+  `-Backend cuda|cuda12|vulkan|rocm`, skip-if-non-empty, verifies the
+  full set. Weights stay gitignored under `models/`.
+- **Server contract pinned from the v0.6.0 source**
+  (`src/trellis-server.cpp`), not from docs: GET `/health` → 200
+  `ok` (text/plain); POST `/generate` multipart — file part `image`
+  REQUIRED (400 if absent), text fields `seed`, `resolution`
+  (512/1024/1536), `bg_removal`, `uv`, `band`, `webp` → 200 GLB bytes
+  or 400/500 JSON `{"error": ...}`. CLI flags: `--models`, `--host`,
+  `--port`, `--res`, `--gpu`, `--seed`, `--bg-removal`,
+  `--require-gpu`, `--f32`, `--no-fa`, `--no-texture`, `--decim`,
+  `--atlas`. No shutdown endpoint — hence adopt/kill semantics.
+- Wiring: `start-img3d.ps1 trellis` (+ weights warning),
+  `httpx>=0.27` recorded in both service requirements files (already
+  present in both venvs — nothing installed), README/PLAN.md/
+  PROJECT_PLAN.md/AGENTS.md updated. `bakeoff_img3d.py --backend
+  trellis` already worked — no changes.
+
+### Measured results (all on this machine, direct counts)
+
+- **Suite: 464 passed in 322.45 s** (baseline 451 + 13 new).
+  `tests/test_img3d_trellis.py` standalone: 13 passed in 16.20 s.
+- Install via the setup script, measured on disk:
+  `trellis-cuda-windows-x64.zip` 694.7 MB downloaded (728,541,568
+  bytes) → `trellis-server.exe` 2,976,768 bytes + `trellis-cli.exe`
+  + 8 ggml/cuda DLLs extracted (Turing+ CUDA 13.1 build; this
+  machine's RTX 4080 Super is sm 8.9, driver 610.47). GGUF q8 tier:
+  **9,997,159,776 bytes (9.31 GiB) across the 10 required files** on
+  disk (five flow-model files at ~1.28 GiB each dominate; ss_dec.gguf
+  is the smallest at 140.5 MiB).
+- With the full set on disk, `TrellisBackend().is_available()` probes
+  `(True, "ready (managed spawn on 127.0.0.1:8712, res 512)")` —
+  fail-closed verified both directions: 0 files → "missing 10/10"
+  with the setup hint, 9 files → "missing 1/10".
+
+### Confessions (§H)
+
+- **The setup script's first run exposed a silent-corruption trap in
+  my own `Save-File`**: a connection reset mid-body (curl exit 56,
+  which plain `--retry` does NOT cover) left ss_dec.gguf at 107 MB of
+  its 140.5 MB under the FINAL name — and both the skip-if-present
+  check (`Length -gt 0`) and the final verification (`Test-Path`)
+  would have treated that partial as complete, printing "backend
+  ready" over a truncated weight. Caught because the script's
+  `$ErrorActionPreference = "Stop"` halted the run (exit 1) and I
+  read the log before re-running; fixed BEFORE the resume: downloads
+  now go to `<name>.part` and only get the final name after curl
+  exits 0, plus `--retry-all-errors --retry-delay 2`; the poisoned
+  partial was deleted by hand and the run resumed off the three
+  intact files.
+- **No live GPU generation was run.** During the whole round the card
+  sat at 15,197/16,376 MiB held by the owner's processes (LM Studio
+  llama-server pid 5240 + pid 2632). They are the owner's; not
+  killed. The backend's HTTP behavior is verified against a
+  contract-pinned stub server (13 tests), and the binary + weights
+  are installed and size-verified — but the first real
+  image → GLB run is deferred to a free GPU window, and quality
+  parity of the GGUF port vs the reference repo is the port's claim
+  until the bake-off leg measures it. Registered as the top §13.3
+  backlog item.
+- My first repo search nearly concluded "TRELLIS 2 does not exist" —
+  the WebFetch of `microsoft/TRELLIS` shows no v2; TRELLIS.2 lives
+  in its own repo with dot notation. Caught by dispatching a fresh
+  research agent instead of trusting the first page.
+- One test initially asserted a constant error string against a
+  regex that could not match (the real message embeds the server's
+  JSON body, `failed (500): {"error": "pipeline exploded"}`); caught
+  by an observed failure and rewritten as two substring asserts on
+  the raised message.
+- Scope honesty: the master order's "TRELLIS 2" is delivered as
+  TRELLIS.2-4B **via a third-party C++/GGUF port**, not the reference
+  implementation — on Windows that is the only route without WSL2,
+  and it costs nothing in our venvs, but it is a different engine
+  and must prove itself in the bake-off.
+
+### Tests
+
+13 new in `tests/test_img3d_trellis.py`: stub trellis-server (stdlib
+ThreadingHTTPServer, real multipart parsing) — remote-mode
+available/unreachable reasons, the full generate contract (exact
+image bytes, seed "7", resolution "512"), resolution override +
+seed-None omission, byte-exact pass-through, per-axis scale to
+[0.30, 0.20, 0.10] m within 5 mm, decimation guard (conditional on
+optional fast_simplification), 500-error propagation, spawn gates on
+missing install + partial weights fail-closed, ready-after-setup,
+adopt-not-respawn (+ shutdown leaves adopted server alive, generate
+still works), spawn command flags, cold-generate-requires-load.
+**Suite: 464 passed in 322.45 s** (baseline 451 + 13). S1 honored.
+Committed under the owner's identity, no push.
+
+### Round 17 addendum — the deferred live GPU verification (window opened)
+
+The owner handed over the GPU ("the gpu is all yours do what ever you
+want"); the R3 confession "no live GPU generation was run" is now
+discharged. Everything below is direct measurement on this machine.
+
+**Live legs (bake-off, 2 images × 3 targets each, `input/bakeoff/`):**
+
+| backend | done | avg s/gen | avg tris | watertight | avg bodies | scale err | VRAM peak |
+|---|---|---|---|---|---|---|---|
+| trellis (q8, res 512) | 6/6 | 37.71 | 49,999 | 0.0 | 198.67 | 0.0 m | 3,489 MiB |
+| tripo_sr | 6/6 | 1.32 | 50,000 | 0.0 | 2.0 | 0.0 m | 10,211 MiB |
+
+Both legs at the exact 50k budget (the decimation fix, below), scale
+error 0.0 m on every run. Raw undecimated TripoSR control (max_tris
+100M, target [0.30, 0.20, 0.15] m): 110,638 tris, 3 bodies,
+**watertight**, 0.00304 m³ — the model's own output is closed; the
+non-watertightness measured on BOTH decimated legs is our QEM step's
+doing. Evidence: `output/bakeoff_20260903_013109.json` (trellis),
+`output/bakeoff_20260903_015828.json` (tripo_sr),
+`output/trellis_smoke/tripo_raw_control.json`.
+
+**Three defects found by the live run, all fixed fail-closed:**
+
+1. **The bake-off `--backend` flag was a label, not a selector.** The
+   service runs ONE backend per process (selected at startup); the
+   first "tripo_sr" leg was 6 more TRELLIS runs wearing the wrong name
+   (caught via `/health`: model "trellis", jobs_total 12). Fixed:
+   `bakeoff_img3d.py` reads the service's selected backend and REFUSES
+   a mismatched `--backend` (exit 2, restart hint) and verifies
+   `model` on every `/result` poll. Verified live in both directions.
+   The mislabeled JSON + GLBs were deleted; pre-R3 bake-offs only
+   scored mock, so no historical data was poisoned.
+2. **Both providers swallowed the decimation failure.** trimesh 5.x
+   `simplify_quadric_decimation` takes `percent` (0–1) first — a face
+   count there raises ValueError, which a silent guard swallowed while
+   shipping 142,688 avg tris against the 50,000 budget (the pre-fix
+   trellis leg). Fixed: shared `decimate_to_budget()` in
+   `providers/base.py` (face_count kwarg, loud warning when the
+   simplifier is unavailable), wired into both providers and pinned by
+   the trellis tests.
+3. **TripoSR generate() had never run — two latent breaks.** The
+   vendored `TSR.extract_mesh` REQUIRES `has_vertex_color` (TypeError)
+   and returns a LIST of meshes (upstream run.py indexes [0]; our call
+   did `mesh.export(...)` → "'list' object has no attribute 'export'").
+   Both hidden until now by defect 1. Fixed with
+   `has_vertex_color=False` + `meshes[0]`; pinned in the new
+   `tests/test_img3d_tripo.py` (fake TSR, 3 tests) so the contract
+   survives without torch.
+
+**Voxel consolidation measured (the R2 question answered):** voxel
+remesh has UNION semantics — nested closed shells collapse to the
+OUTERMOST surface. Raw TRELLIS output (4 shells): 1 body, 7,556 quads
+at voxel 0.005 / 2,994 at 0.008, boundary 0, volume 0.000253 →
+0.00357 m³. Decimated output (133 bodies, 9,711 open edges the weld
+does not heal): 133 → 1 body, 9,711 → 0 open edges. QuadriFlow does
+NOT consolidate (per-component remesh; 4 shells stay 4). Deterministic
+twin (reversed inner ico-sphere inside an outer one) pins both
+semantics in `tests/test_retopology.py`; the `before`-fingerprint
+assertion caught my own wrong fixture edit (subdivisions 2 vs 3)
+during development — the pin did its job. Finding recorded in
+`docs/MESH_SOURCES.md` §5.3.
+
+**OpenVDB pinch hazard (measured, documented, not a blocker):** voxel
+output can carry coincident-but-distinct vertices (synthetic twin: 6
+verts / 9 pinch edges, 0 open edges, live Euler χ = 2) that read
+non-manifold after GLB round trip + position weld — the EXACT-boolean
+zero-length-edge class. Tests pin bodies + open edges, never
+`is_watertight`; live neural outputs measured clean.
+
+**Confessions (§H):** the mislabeled leg is the round's headline
+defect — it had silently verified nothing about TripoSR while looking
+like a completed comparison; the two provider breaks it hid were found
+only when the GPU work forced a real generation. Near-miss: my first
+VRAM-peak extraction sorted the log by the utilization column instead
+of MiB (would have reported 10,211 as ~99 MiB nonsense) — caught by
+reading the line before quoting it. The raw control needed two
+attempts (first exposed defect 3's list bug; the service restart
+in-between is why two service lifetimes appear in the logs). Round 18
+follow-up registered, not coded: analyst-prompt guidance for voxel
+retopology on delivery-bound neural parts + per-body decimation
+(§13.3).
+
+**Tests:** +3 (`tests/test_img3d_tripo.py`) +2 blender-marked
+(`tests/test_retopology.py` consolidation pair). Full suite below in
+the commit. Committed under the owner's identity, no push.
+
+## Round 18 — Neural intake BUILT (GLM_PROMPT_NEURAL_INTAKE.md: images + prompt → constrained deliverable)
+
+The reviewer seat authored the order after building and measuring the
+whole TRELLIS 2 path live on this machine; the mandate was "the wiring,
+not the invention." Four stages — intake → generate → analyse →
+conform — now run end to end: four labelled photos plus a prompt go
+in, the router picks template / parametric / neural, a neural job
+generates through ComfyUI (TRELLIS.2-4B-FP8), analyse measures the
+output against the JobCard, conform adapts it into the nine-file
+delivery contract. "The test baseline only goes up. It is 471." — it
+is now **575**.
+
+### What was built
+
+- **`src/neural/view_diversity.py`** (§3.1): 64-bit dHash, mean
+  pairwise normalised Hamming distance, `WARN_THRESHOLD = 0.20` — the
+  threshold was measured on the four `Test Images/` sets before being
+  fixed (table below). Warn-only, never refuse (the owner's call); the
+  score rides the run manifest and the router weighs it.
+- **`src/neural/gpu_lock.py`** + the service-side copy (§4.0): a
+  machine-wide lock at `C:\ProgramData\threed-builder\gpu.lock`
+  (msvcrt on Windows, fcntl elsewhere), a process-wide singleton
+  `machine_gpu_lock()` so nested acquires from different call sites
+  cannot self-deadlock, and a `gpu_lock()` context manager. The
+  service wraps every backend generation in it and FAILS the job
+  loudly on `GpuLockError` (S3) instead of proceeding unsynchronised.
+- **`src/neural/router.py`** (§4.0.5): cheapest-first routing —
+  template (product_class match) → parametric (12 ShapeType
+  primitives) → neural (organic/freeform, or spec-route gate failure
+  with the escalation SURFACED). Decision + one-line reason recorded
+  in the manifest every time; a FORCED route that cannot run REFUSES
+  with a named reason — never a silent fallback.
+- **`services/img3d_service/providers/comfy_trellis2.py`** (§4.2):
+  TRELLIS.2-4B-FP8 behind the existing `NeuralBackend` ABC, driving
+  the measured §2.4 graph over ComfyUI's HTTP API — node inputs built
+  from `/object_info` defaults (the saved UI workflow has fewer widget
+  values than the nodes have inputs; positional mapping silently
+  mis-assigns), images uploaded first, `/history` polling, `POST /free`
+  as the `unload()` leg. No torch in the service venv — the GPU work
+  stays inside the ComfyUI process (its own Python 3.11).
+  `GenerateParams` grew labelled views additively; `tripo_sr` is
+  unchanged in behavior and still green.
+- **`src/neural/analyse.py`** (§4.3): the measured-fact table —
+  triangles vs the card's ceiling, open edges AFTER position merge
+  (the §3.5 trap), bodies, aspect deviation vs the card, the 5 maps,
+  metallic on declared-fabric surfaces. Gates before eyes; vision is
+  not called in this flow at all (S4 honored by construction).
+- **`src/neural/conform.py`** (§4.4): the adapter — import (weld
+  ships, R1), scale to the card's L×W×H on the axis map with the S1
+  REFUSAL when the source aspect is off beyond tolerance (never
+  quietly distort — the square-mattress case), voxel retopology for
+  consolidation AND re-quad in one step (Blender's voxel remesh emits
+  all-quad geometry), packed metallic-roughness split, HP→LP normal+AO
+  bake, `package_delivery`.
+- **`src/neural/flow.py`**: owns the ORDER and the evidence — every
+  decision lands in the run manifest, every stage emits a progress
+  event, the stop conditions fail loud (S1–S4 mapped).
+- **Intake UI** (§4.1): four labelled slots (front required), the
+  diversity check with a visible warning, prompt → JobCard
+  constraints (dims + unit, polycount, formats, axis convention, size
+  caps, texture resolution, tri-vs-face semantics), explicit dims
+  MANDATORY (rule 9 does not bend for neural input), the route control
+  (Auto default, forced paths refuse), live progress with the model
+  shown next to the references. Browser-verified end to end —
+  screenshots 10–12 in `docs/gui-screenshots/` (low-diversity warn,
+  route preview with reason, fail-loud refusal).
+- **CLI**: `python -m src.cli img3d-views --front … [--back/--left/
+  --right]` — no target size on purpose: conform owns sizing and must
+  see the raw aspect ratio.
+
+### Measured results (this machine, direct counts)
+
+**View-diversity calibration** (the §3.1 mandate — measure before
+choosing the threshold; the cup and mattress sets are the calibration
+pair):
+
+| Set | dHash score | vs 0.20 threshold |
+|---|---|---|
+| cup (two genuinely opposite views) | 0.299 | pass |
+| desk | 0.323 | pass |
+| doormat | 0.344 | pass |
+| mattress (four near-identical fronts — the square-mattress failure) | **0.135** | **WARN** |
+
+The threshold sits in the gap (0.135 vs 0.299 minimum). Warn-only.
+
+**The §4.0 exit criteria — GPU bake ×3 after TRELLIS, back to
+back.** Each cycle: a full TRELLIS cup generation, then IMMEDIATELY
+the RIGTUNE mattress package chain (build → atlas → 5-map GPU bake →
+FBX → gates). All three bakes ran while the card held
+13,520/16,376 MiB — the owner's Blender GUI (up since 21:57), Ollama
+llama-server (23:43) and the ComfyUI worker (00:35) — i.e. the
+"PyTorch does not return VRAM after `/free`" condition this test
+exists to catch:
+
+| cycle | generation wall | tris | bake chain | gates | crown_quilt probe (grey levels) |
+|---|---|---|---|---|---|
+| 1 | 502.3 s | 48,856 | 185 s bake, ~3 min chain | all 6 PASS | x 9.587 / y 7.578 ≥ 6.0 |
+| 2 | 509.1 s (cold — worker `/free`'d after c1) | 48,062 | 2 min 07 s | all 6 PASS | identical |
+| 3 | 294.5 s (warm pipeline) | 48,406 | ~2 min, fired 24 s after generation ended | all 6 PASS | identical |
+
+Three for three, zero failures — the acceptance test is discharged.
+Evidence: `output/cmp/gpu_cycles/cycle{1,2,3}/qa_report.json` (+ the
+cycle-3 GLB); generation GLBs in `output/cmp/t2_cup_cli{,2,3}/`.
+
+**Generation reproducibility** (the project's own analyse helpers —
+position-merged open edges, world-space extents):
+
+| cycle | tris | bodies | open edges | aspect (max-normalised) |
+|---|---|---|---|---|
+| 1 | 48,856 | 130 | 0 | 1 : 0.792 : 0.559 |
+| 2 | 48,062 | 71 | 0 | 1 : 0.792 : 0.559 |
+| 3 | 48,406 | 68 | 0 | 1 : 0.792 : 0.559 |
+
+Identical ratios across runs, within ~2% of the §2.5 cup truth
+(1 : 0.778 : 0.556); 0 open edges everywhere; tris within noise of
+the 48,452 baseline. Bodies 68–130 recorded honestly — consolidation
+is conform's voxel step, not the generator's job.
+
+**`keep_models_loaded` measured** (§4.0's "measure, do not assume"):
+cold run with models freed ≈ 509 s vs warm pipeline ≈ 295 s — the
+reload costs ~215 s per generation. Freeing after each stage is right
+for single jobs; keeping loaded pays only when the verify-fix loop
+revisits generation.
+
+**S3 probe (redone correctly):** during cycle-3's live generation, a
+separate process's `machine_gpu_lock().acquire(timeout_s=5)` raised
+`GpuLockError` after the full 5.0 s wait — "GPU lock busy for 5s
+(C:\ProgramData\threed-builder\gpu.lock) — another GPU tenant (Blender
+bake / neural generation / vision server) is holding the card; raise
+THREED_GPU_LOCK_TIMEOUT if this wait is legitimately long". Fail-loud,
+actionable, no silent proceeding.
+
+**Suite: 575 passed in 209.50 s** (baseline 471 exceeded by 104; the
+90 blender-marked tests ran — bundled Blender 4.5.13 found via
+`locate_blender()`).
+
+### Confessions (§H)
+
+- **The S3 probe's first attempt was API misuse** — `gpu_lock.acquire`
+  against the module-level context-manager FUNCTION (which has no
+  `acquire`) instead of the `machine_gpu_lock()` singleton. It
+  "failed" without testing anything. Redone during a live generation,
+  above.
+- **My own open-edge probe this round returned nonsense** (~5×10⁸
+  "open edges" from a misused `trimesh.grouping.group_rows`) — caught
+  because the number exceeded the mesh's edge count; redone with the
+  project's `_open_edge_count`. The reporting discipline caught its
+  own bug.
+- **The session stalled between cycle-2 generation and its bake**
+  (~01:25 → 01:50) with the owner's "how long?" asked twice and
+  unanswered — the handoff capsule flagged it URGENT. Resumed,
+  answered, completed.
+- UI-verification workarounds, recorded for the next browser pass:
+  IAB cannot open file choosers (simulate drops with canvas-generated
+  files); Playwright role-clicks time out (use direct
+  `document.querySelector(...).click()`).
+- trimesh 5.x: `merge_vertices()` mutates in place (returns None);
+  `mesh.split()` can crash — `body_count` instead. Windows:
+  run-relative GLB URLs need `.as_posix()`.
+
+### Tests
+
+New files: `test_view_diversity.py` 9, `test_router.py` 17,
+`test_neural_flow.py` 7, `test_neural_intake_api.py` 17,
+`test_neural_analyse_conform.py` 19, `test_comfy_trellis2.py` 18,
+`test_gpu_lock.py` 10 — plus multi-view client tests in
+`test_img3d.py` (+7). The fast half (`-m "not blender"`, 485 tests)
+was run IN PARALLEL with cycle-3's generation — 484 passed + 1
+skipped in 38.24 s — hermetic by construction (fake `base_url`,
+`tmp_path` lock paths, ephemeral-port stub servers), so GPU work and
+CPU verification overlapped without interference. Full suite
+afterwards, GPU idle: **575 passed in 209.50 s**.
+
+### Not built (registered, not hidden)
+
+- **§4.5 band segmentation** — the order's own condition is "only
+  after 4.4 works"; 4.4 works now, so this is the next item for
+  stratified goods (the template path already covers the mattress).
+- Round 17's registered follow-ups stand (analyst-prompt guidance for
+  voxel retopology on delivery-bound neural parts; per-body
+  decimation).

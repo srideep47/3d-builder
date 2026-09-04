@@ -42,9 +42,17 @@ class ThreeDBuilderPipeline:
         run_dir: str | Path | None = None,
         progress=None,
         cancel=None,
+        job_card=None,
+        route_decision: dict | None = None,
     ) -> AgentRunResult:
         """Generate a fully verified 3D model from prompt, measurements, and
-        optional reference images using GLM-5.3."""
+        optional reference images using GLM-5.3.
+
+        job_card: optional client JobCard (src/client/job.py). When present,
+        the loop states the card's axis convention to the analyst and runs the
+        card-axis gate in verification, so an axis swap is caught (and
+        corrected) inside the loop instead of at package time.
+        route_decision: §4.0.5 router output, recorded in the manifest."""
         enhanced_prompt = prompt
         if material_preset:
             enhanced_prompt += f"\nPrimary Material Preset: {material_preset}"
@@ -57,6 +65,8 @@ class ThreeDBuilderPipeline:
             run_dir=run_dir,
             progress=progress,
             cancel=cancel,
+            job_card=job_card,
+            route_decision=route_decision,
         )
 
     def generate_from_spec(
@@ -66,8 +76,14 @@ class ThreeDBuilderPipeline:
         run_dir: str | Path | None = None,
         progress=None,
         cancel=None,
+        job_card=None,
+        route_decision: dict | None = None,
     ) -> AgentRunResult:
-        """Deterministically build and verify a 3D model from an ObjectSpec."""
+        """Deterministically build and verify a 3D model from an ObjectSpec.
+
+        job_card: optional client JobCard — no analyst prompt in this flow,
+        but the card-axis gate still runs in verification.
+        route_decision: §4.0.5 router output, recorded in the manifest."""
         if isinstance(spec_source, ObjectSpec):
             spec_obj = spec_source
         elif isinstance(spec_source, dict):
@@ -85,6 +101,8 @@ class ThreeDBuilderPipeline:
             run_dir=run_dir,
             progress=progress,
             cancel=cancel,
+            job_card=job_card,
+            route_decision=route_decision,
         )
 
     def measure_file(self, file_path: str | Path) -> dict[str, Any]:
