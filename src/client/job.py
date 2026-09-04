@@ -511,6 +511,7 @@ def intake_from_prompt(
     part_scope: str = "",
     placeholder_dims: tuple[float, float, float] | None = None,
     placeholder_unit: str | None = None,
+    explicit_dims: "JobDims | None" = None,
 ) -> JobCard:
     """Build a JobCard from an owner prompt + the structural facts the caller
     supplies (job code, product class, reference dir).
@@ -522,6 +523,8 @@ def intake_from_prompt(
     IntakeError — never a guess:
 
     - dimensions: 'L x W x H <unit>' (unit REQUIRED, rule 9). Absent dims
+      accept `explicit_dims` (the intake FORM's real owner-supplied values —
+      recorded as form evidence, NOT placeholders, delivery NOT refused) or
       require explicit `placeholder_dims` + `placeholder_unit` (delivery
       stays refused via dims_placeholder); bare dims without a unit are an
       error, not a default.
@@ -558,6 +561,27 @@ def intake_from_prompt(
         dims_placeholder = False
         evidence["dims"] = (f"{triple[0]:g} x {triple[1]:g} x {triple[2]:g} "
                             f"{triple[3]} — quoted from the prompt")
+        if explicit_dims is not None:
+            # both sources stated: they must AGREE (converted to metres) —
+            # a silent pick between contradictory owner statements is a guess
+            a = [to_metres(dims.length, dims.unit), to_metres(dims.width, dims.unit),
+                 to_metres(dims.height, dims.unit)]
+            b = [to_metres(explicit_dims.length, explicit_dims.unit),
+                 to_metres(explicit_dims.width, explicit_dims.unit),
+                 to_metres(explicit_dims.height, explicit_dims.unit)]
+            if any(abs(x - y) > 1e-6 for x, y in zip(a, b)):
+                raise IntakeError(
+                    f"the prompt states {a[0]:g} x {a[1]:g} x {a[2]:g} m but the "
+                    f"form supplies {b[0]:g} x {b[1]:g} x {b[2]:g} m — "
+                    "contradictory owner dimensions are never silently resolved"
+                )
+            evidence["dims"] += " (agrees with the intake form)"
+    elif explicit_dims is not None:
+        dims = explicit_dims
+        dims_placeholder = False
+        evidence["dims"] = (f"{dims.length:g} x {dims.width:g} x {dims.height:g} "
+                            f"{dims.unit} — owner-supplied via the intake form "
+                            "(explicit, not placeholders; rule 9 satisfied)")
     elif placeholder_dims is not None:
         if not placeholder_unit:
             raise IntakeError("placeholder_dims given without placeholder_unit "

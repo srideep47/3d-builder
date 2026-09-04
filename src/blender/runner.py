@@ -4,6 +4,13 @@ Uses isolated process executions with JSON temp files to guarantee:
 1. No scene cross-contamination across operations
 2. Safe argument passing on Windows paths containing spaces or special characters
 3. Structured output parsing framed between sentinel markers
+
+GPU sequencing (GLM_PROMPT_NEURAL_INTAKE.md §4.0): Cycles GPU-capable ops
+(bake_maps / bake_materials / render_views) hold the machine-wide GPU lock
+(src/neural/gpu_lock.py — shared file with the img3d service, so a neural
+generation and a Blender bake never share the card) unless the op is
+explicitly pinned to `device: "cpu"`. A lock that cannot be obtained fails
+loud as a BlenderExecutionError (stop condition S3) — never run unlocked.
 """
 
 from __future__ import annotations
@@ -12,19 +19,32 @@ import json
 import os
 import subprocess
 import tempfile
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+from ..neural.gpu_lock import GpuLockError, gpu_lock
 from .locate import BlenderInstall, locate_blender
 
 SENTINEL_BEGIN = "<<<3DBUILDER_RESULT_BEGIN>>>"
 SENTINEL_END = "<<<3DBUILDER_RESULT_END>>>"
 HARNESS_SCRIPT_PATH = Path(__file__).parent / "harness_script.py"
 
+# Ops that configure a Cycles compute device and may take the GPU
+# ("auto" tries GPU first — only an explicit "cpu" opts out of the lock).
+GPU_OPS = ("bake_maps", "bake_materials", "render_views")
+
 
 class BlenderExecutionError(Exception):
     """Raised when Blender headless execution fails or returns an error."""
     pass
+
+
+def _needs_gpu_lock(op: str, params: dict[str, Any] | None) -> bool:
+    if op not in GPU_OPS:
+        return False
+    device = str((params or {}).get("device", "auto")).strip().lower()
+    return device != "cpu"
 
 
 class BlenderRunner:
@@ -96,17 +116,27 @@ class BlenderRunner:
             env = dict(os.environ)
             env.setdefault("PYTHONIOENCODING", "utf-8")
 
-            process = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout_sec,
-                env=env,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
+            # §4.0: GPU-capable Cycles ops run inside the machine GPU lock.
+            # The lock wait happens before the child starts, so the op's own
+            # timeout still bounds only Blender's run.
+            lock_ctx_factory = gpu_lock if _needs_gpu_lock(op, params) else nullcontext
+            try:
+                with lock_ctx_factory():
+                    process = subprocess.run(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=timeout_sec,
+                        env=env,
+                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    )
+            except GpuLockError as e:
+                raise BlenderExecutionError(
+                    f"GPU lock unobtainable for op '{op}' (stop condition S3): {e}"
+                ) from e
 
             stdout = process.stdout or ""
             stderr = process.stderr or ""

@@ -572,13 +572,17 @@ class AgentLoop:
         progress=None,
         cancel=None,
         job_card=None,
+        route_decision: dict | None = None,
     ) -> AgentRunResult:
         """Execute the full build-measure-verify loop.
 
         progress: optional callable(dict) receiving live stage events
           ({"event": "analyst_done", ...}) — used by the web UI.
         cancel: optional callable() -> bool, checked between stages.
-        run_dir: reuse an existing run directory instead of creating one."""
+        run_dir: reuse an existing run directory instead of creating one.
+        route_decision: §4.0.5 router output — recorded verbatim in the
+          manifest (metrics.route) and emitted as a route_decided event, so
+          a disputed asset always shows which path built it and why."""
         started = time.time()
         if run_dir is not None:
             run_dir = Path(run_dir)
@@ -613,6 +617,9 @@ class AgentLoop:
             images=[str(p) for p in image_paths],
             job_code=job_card.job_code if job_card is not None else None,
         )
+        if route_decision is not None:
+            emit("route_decided", route=route_decision.get("route"),
+                 reason=route_decision.get("reason"), forced=route_decision.get("forced", False))
 
         # Step 1: obtain the initial ObjectSpec.
         if spec_override:
@@ -635,6 +642,7 @@ class AgentLoop:
                     started=started,
                     emit=emit,
                     user_cancelled=cancelled(),
+                    route_decision=route_decision,
                 )
             current_spec = spec_obj
             emit(
@@ -854,6 +862,7 @@ class AgentLoop:
             visual_verdict=visual_verdict,
             iteration_cap_hit=iteration_cap_hit,
             cap_report=cap_report,
+            route_decision=route_decision,
         )
 
     def _run_visual_gate(self, rendered_views, image_paths, spec, emit) -> dict | None:
@@ -900,6 +909,7 @@ class AgentLoop:
         visual_verdict: dict | None = None,
         iteration_cap_hit: bool = False,
         cap_report: dict | None = None,
+        route_decision: dict | None = None,
     ) -> AgentRunResult:
         passed = bool(verification and verification.passed)
         self.run_store.save_spec(run_dir, spec)
@@ -933,6 +943,8 @@ class AgentLoop:
                 "visual_verdict": visual_verdict,
                 "iteration_cap_hit": iteration_cap_hit,
                 "cap_report": cap_report,
+                # §4.0.5: which path built this asset and why — every run
+                "route": route_decision,
             },
             status=status,
         )
@@ -952,6 +964,7 @@ class AgentLoop:
                     tri_count=manifest.tri_count,
                     error=error,
                     wall_clock_s=manifest.metrics["wall_clock_s"],
+                    route=route_decision,
                 )
             except Exception:
                 pass

@@ -436,3 +436,117 @@ def test_validate_imported_parts_resolves_paths_and_fires_on_missing(tmp_path):
     assert err["method"] == "scanned"
     assert "missing.stl" in err["mesh_path"]
     assert "not found" in err["error"]
+
+
+# ── Multi-view generation (GLM_PROMPT_NEURAL_INTAKE.md §4.2) ─────────────────
+
+
+def _views_files(tmp_path: Path) -> dict[str, tuple[str, bytes, str]]:
+    colors = {
+        "front": (200, 180, 160),
+        "back": (60, 60, 200),
+        "left": (60, 200, 60),
+        "right": (200, 60, 60),
+    }
+    out = {}
+    for label, color in colors.items():
+        p = _make_image(tmp_path, f"cup_{label}.png", color)
+        out[label] = (p.name, p.read_bytes(), "image/png")
+    return out
+
+
+def _wait_completed(client: TestClient, job_id: str) -> dict:
+    deadline = time.time() + 30
+    while True:
+        res = client.get(f"/result/{job_id}")
+        assert res.status_code == 200
+        status = res.json()["status"]
+        assert status != "failed", res.json()
+        if status == "completed":
+            return res.json()
+        assert time.time() < deadline, "mock job never completed"
+        time.sleep(0.1)
+
+
+def test_service_generate_multiview_mock(tmp_path):
+    client = TestClient(service_app)
+    r = client.post("/generate", files=_views_files(tmp_path))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["views"] == ["back", "front", "left", "right"]
+
+    job = _wait_completed(client, body["job_id"])
+    assert job["views"] == ["back", "front", "left", "right"]
+    assert job["tri_count"] > 0
+    assert Path(job["glb_path"]).exists()
+
+    dl = client.get(f"/download/{body['job_id']}")
+    assert dl.status_code == 200
+    assert dl.content[:4] == GLB_MAGIC
+
+
+def test_service_multiview_requires_a_front(tmp_path):
+    client = TestClient(service_app)
+    img = _make_image(tmp_path, "back_only.png", (10, 10, 120))
+    r = client.post(
+        "/generate", files={"back": (img.name, img.read_bytes(), "image/png")}
+    )
+    assert r.status_code == 400
+    assert "front" in r.json()["detail"]
+
+
+def test_service_no_image_at_all_rejected():
+    client = TestClient(service_app)
+    r = client.post("/generate")
+    assert r.status_code == 400
+    assert "no image supplied" in r.json()["detail"]
+
+
+def test_service_file_stands_in_for_front(tmp_path):
+    client = TestClient(service_app)
+    primary = _make_image(tmp_path, "primary.png")
+    back = _make_image(tmp_path, "back.png", (10, 10, 10))
+    r = client.post(
+        "/generate",
+        files={
+            "file": (primary.name, primary.read_bytes(), "image/png"),
+            "back": (back.name, back.read_bytes(), "image/png"),
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["views"] == ["back", "front"]
+    job = _wait_completed(client, r.json()["job_id"])
+    # the mock derives its output name from the front view = the legacy file
+    assert Path(job["glb_path"]).name == f"{primary.stem}_mock.glb"
+
+
+def test_client_views_end_to_end(live_service_url, tmp_path):
+    provider = RemoteImg3DProvider(base_url=live_service_url, poll_interval_s=0.2)
+    views = {
+        "front": _make_image(tmp_path, "v_front.png", (200, 180, 160)),
+        "back": _make_image(tmp_path, "v_back.png", (60, 60, 200)),
+        "left": _make_image(tmp_path, "v_left.png", (60, 200, 60)),
+        "right": _make_image(tmp_path, "v_right.png", (200, 60, 60)),
+    }
+    result = provider.generate_mesh_from_views(views, tmp_path / "out", max_tris=4000)
+    assert result.success, result.error
+    assert Path(result.output_glb_path).exists()
+    assert Path(result.output_glb_path).read_bytes()[:4] == GLB_MAGIC
+    assert result.tri_count > 0
+
+
+def test_client_views_requires_front(tmp_path):
+    provider = RemoteImg3DProvider(base_url="http://127.0.0.1:1", health_timeout_s=0.2)
+    img = _make_image(tmp_path, "x.png")
+    result = provider.generate_mesh_from_views({"back": img}, tmp_path)
+    assert not result.success
+    assert "front" in (result.error or "")
+
+
+def test_client_views_missing_file(tmp_path):
+    provider = RemoteImg3DProvider(base_url="http://127.0.0.1:1", health_timeout_s=0.2)
+    result = provider.generate_mesh_from_views(
+        {"front": tmp_path / "does_not_exist.png"}, tmp_path
+    )
+    assert not result.success
+    assert "not found" in (result.error or "")

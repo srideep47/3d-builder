@@ -253,6 +253,54 @@ def img3d(
         raise typer.Exit(1)
 
 
+@app.command("img3d-views")
+def img3d_views(
+    front: str = typer.Option(..., "--front", help="Front view image (required)"),
+    back: str = typer.Option(None, "--back", help="Back view image"),
+    left: str = typer.Option(None, "--left", help="Left view image"),
+    right: str = typer.Option(None, "--right", help="Right view image"),
+    max_tris: int = typer.Option(50000, "--max-tris", help="Triangle budget for the exported mesh"),
+    seed: Optional[int] = typer.Option(None, "--seed", help="Generation seed"),
+    output_dir: Optional[str] = typer.Option(None, "--out", "-o", help="Output directory for the GLB"),
+):
+    """Generate a mesh from labelled views (front required) via the multi-view
+    neural backend (comfy_trellis2). No target size on purpose: conform owns
+    sizing and must see the raw aspect ratio."""
+    from .img3d import get_img3d_provider
+
+    views: dict[str, Path] = {}
+    for label, value in (("front", front), ("back", back), ("left", left), ("right", right)):
+        if value is None:
+            continue
+        p = Path(value)
+        if not p.exists():
+            console.print(f"[bold red]Error: {label} view not found:[/] {value}")
+            raise typer.Exit(1)
+        views[label] = p
+
+    provider = get_img3d_provider()
+    if provider is None:
+        console.print("[bold red]img3d is disabled.[/] Set img3d.enabled: true in config/hardware.yaml")
+        raise typer.Exit(1)
+    if not provider.is_available():
+        console.print(f"[bold red]img3d service unreachable at {provider.base_url}[/]")
+        console.print("[dim]Start it with: scripts/start-img3d.ps1 comfy_trellis2[/]")
+        raise typer.Exit(1)
+
+    out_dir = Path(output_dir) if output_dir else views["front"].parent / "img3d_output"
+    with console.status("[bold cyan]Generating mesh from views (neural service)...[/]"):
+        result = provider.generate_mesh_from_views(views, out_dir, max_tris=max_tris, seed=seed)
+
+    if result.success and result.output_glb_path:
+        console.print("[bold green]✓ Neural mesh generated:[/]")
+        console.print(f" - [bold cyan]GLB:[/] {result.output_glb_path}")
+        console.print(f" - [bold cyan]Triangles:[/] {result.tri_count}")
+        console.print(f" - [bold cyan]Duration:[/] {result.duration_sec:.1f}s")
+    else:
+        console.print(f"[bold red]img3d generation failed:[/] {result.error}")
+        raise typer.Exit(1)
+
+
 @app.command()
 def health():
     """Check AI provider endpoint and Blender installation status."""

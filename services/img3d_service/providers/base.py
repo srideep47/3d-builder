@@ -16,12 +16,28 @@ from typing import Any
 
 @dataclass
 class GenerateParams:
-    image_path: Path
-    output_dir: Path
+    # `image_path` is the legacy single-view contract (tripo_sr, trellis.cpp);
+    # `views` carries the labelled multi-view set (front/back/left/right) for
+    # backends that can use it (comfy_trellis2). Both are optional at the
+    # dataclass level; resolve_views() enforces that at least one is present.
+    image_path: Path | None = None
+    output_dir: Path | None = None
     target_size_m: list[float] | None = None  # [x, y, z] in meters
     max_tris: int = 50000
     seed: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    # Labelled views, e.g. {"front": p, "back": p, "left": p, "right": p};
+    # backends decide which labels they accept.
+    views: dict[str, Path] | None = None
+
+    def resolve_views(self) -> dict[str, Path]:
+        """The labelled view set for this job: `views` when given, else the
+        single image as the front view. Raises when neither is present."""
+        if self.views:
+            return dict(self.views)
+        if self.image_path is not None:
+            return {"front": self.image_path}
+        raise ValueError("GenerateParams needs image_path or views")
 
 
 @dataclass
@@ -60,6 +76,11 @@ class NeuralBackend(ABC):
 
     name: str = "abstract"
 
+    # Backends that never touch the GPU skip the machine-wide GPU lock in
+    # the service worker — a mock generation must not queue behind (or hold
+    # up) a real one.
+    uses_gpu: bool = True
+
     @abstractmethod
     def is_available(self) -> tuple[bool, str]:
         """(available, reason). Must not import heavy deps — probe installs."""
@@ -71,3 +92,14 @@ class NeuralBackend(ABC):
     @abstractmethod
     def generate(self, params: GenerateParams) -> GenerateOutput:
         """Run inference and write the GLB. Synchronous — the queue serializes."""
+
+    def unload(self) -> None:
+        """Release GPU memory after a generation (§4.0 GPU sequencing).
+
+        Default no-op: backends with in-process weights may deliberately
+        stay resident (the legacy "model stays loaded" behaviour). Backends
+        driving an external GPU process (comfy_trellis2 → POST /free)
+        override this. The service worker calls it after every generate()
+        while still holding the machine GPU lock; an unload failure is
+        logged by the caller and must never lose a completed generation.
+        """

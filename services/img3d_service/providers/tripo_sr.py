@@ -119,6 +119,8 @@ class TripoSRBackend(NeuralBackend):
     def generate(self, params: GenerateParams) -> GenerateOutput:
         if self.model is None:
             self.load()
+        if params.image_path is None:
+            raise RuntimeError("tripo_sr takes a single image (image_path), not labelled views")
         started = time.perf_counter()
         params.output_dir.mkdir(parents=True, exist_ok=True)
 

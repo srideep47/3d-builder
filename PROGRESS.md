@@ -2709,3 +2709,185 @@ retopology on delivery-bound neural parts + per-body decimation
 **Tests:** +3 (`tests/test_img3d_tripo.py`) +2 blender-marked
 (`tests/test_retopology.py` consolidation pair). Full suite below in
 the commit. Committed under the owner's identity, no push.
+
+## Round 18 — Neural intake BUILT (GLM_PROMPT_NEURAL_INTAKE.md: images + prompt → constrained deliverable)
+
+The reviewer seat authored the order after building and measuring the
+whole TRELLIS 2 path live on this machine; the mandate was "the wiring,
+not the invention." Four stages — intake → generate → analyse →
+conform — now run end to end: four labelled photos plus a prompt go
+in, the router picks template / parametric / neural, a neural job
+generates through ComfyUI (TRELLIS.2-4B-FP8), analyse measures the
+output against the JobCard, conform adapts it into the nine-file
+delivery contract. "The test baseline only goes up. It is 471." — it
+is now **575**.
+
+### What was built
+
+- **`src/neural/view_diversity.py`** (§3.1): 64-bit dHash, mean
+  pairwise normalised Hamming distance, `WARN_THRESHOLD = 0.20` — the
+  threshold was measured on the four `Test Images/` sets before being
+  fixed (table below). Warn-only, never refuse (the owner's call); the
+  score rides the run manifest and the router weighs it.
+- **`src/neural/gpu_lock.py`** + the service-side copy (§4.0): a
+  machine-wide lock at `C:\ProgramData\threed-builder\gpu.lock`
+  (msvcrt on Windows, fcntl elsewhere), a process-wide singleton
+  `machine_gpu_lock()` so nested acquires from different call sites
+  cannot self-deadlock, and a `gpu_lock()` context manager. The
+  service wraps every backend generation in it and FAILS the job
+  loudly on `GpuLockError` (S3) instead of proceeding unsynchronised.
+- **`src/neural/router.py`** (§4.0.5): cheapest-first routing —
+  template (product_class match) → parametric (12 ShapeType
+  primitives) → neural (organic/freeform, or spec-route gate failure
+  with the escalation SURFACED). Decision + one-line reason recorded
+  in the manifest every time; a FORCED route that cannot run REFUSES
+  with a named reason — never a silent fallback.
+- **`services/img3d_service/providers/comfy_trellis2.py`** (§4.2):
+  TRELLIS.2-4B-FP8 behind the existing `NeuralBackend` ABC, driving
+  the measured §2.4 graph over ComfyUI's HTTP API — node inputs built
+  from `/object_info` defaults (the saved UI workflow has fewer widget
+  values than the nodes have inputs; positional mapping silently
+  mis-assigns), images uploaded first, `/history` polling, `POST /free`
+  as the `unload()` leg. No torch in the service venv — the GPU work
+  stays inside the ComfyUI process (its own Python 3.11).
+  `GenerateParams` grew labelled views additively; `tripo_sr` is
+  unchanged in behavior and still green.
+- **`src/neural/analyse.py`** (§4.3): the measured-fact table —
+  triangles vs the card's ceiling, open edges AFTER position merge
+  (the §3.5 trap), bodies, aspect deviation vs the card, the 5 maps,
+  metallic on declared-fabric surfaces. Gates before eyes; vision is
+  not called in this flow at all (S4 honored by construction).
+- **`src/neural/conform.py`** (§4.4): the adapter — import (weld
+  ships, R1), scale to the card's L×W×H on the axis map with the S1
+  REFUSAL when the source aspect is off beyond tolerance (never
+  quietly distort — the square-mattress case), voxel retopology for
+  consolidation AND re-quad in one step (Blender's voxel remesh emits
+  all-quad geometry), packed metallic-roughness split, HP→LP normal+AO
+  bake, `package_delivery`.
+- **`src/neural/flow.py`**: owns the ORDER and the evidence — every
+  decision lands in the run manifest, every stage emits a progress
+  event, the stop conditions fail loud (S1–S4 mapped).
+- **Intake UI** (§4.1): four labelled slots (front required), the
+  diversity check with a visible warning, prompt → JobCard
+  constraints (dims + unit, polycount, formats, axis convention, size
+  caps, texture resolution, tri-vs-face semantics), explicit dims
+  MANDATORY (rule 9 does not bend for neural input), the route control
+  (Auto default, forced paths refuse), live progress with the model
+  shown next to the references. Browser-verified end to end —
+  screenshots 10–12 in `docs/gui-screenshots/` (low-diversity warn,
+  route preview with reason, fail-loud refusal).
+- **CLI**: `python -m src.cli img3d-views --front … [--back/--left/
+  --right]` — no target size on purpose: conform owns sizing and must
+  see the raw aspect ratio.
+
+### Measured results (this machine, direct counts)
+
+**View-diversity calibration** (the §3.1 mandate — measure before
+choosing the threshold; the cup and mattress sets are the calibration
+pair):
+
+| Set | dHash score | vs 0.20 threshold |
+|---|---|---|
+| cup (two genuinely opposite views) | 0.299 | pass |
+| desk | 0.323 | pass |
+| doormat | 0.344 | pass |
+| mattress (four near-identical fronts — the square-mattress failure) | **0.135** | **WARN** |
+
+The threshold sits in the gap (0.135 vs 0.299 minimum). Warn-only.
+
+**The §4.0 exit criteria — GPU bake ×3 after TRELLIS, back to
+back.** Each cycle: a full TRELLIS cup generation, then IMMEDIATELY
+the RIGTUNE mattress package chain (build → atlas → 5-map GPU bake →
+FBX → gates). All three bakes ran while the card held
+13,520/16,376 MiB — the owner's Blender GUI (up since 21:57), Ollama
+llama-server (23:43) and the ComfyUI worker (00:35) — i.e. the
+"PyTorch does not return VRAM after `/free`" condition this test
+exists to catch:
+
+| cycle | generation wall | tris | bake chain | gates | crown_quilt probe (grey levels) |
+|---|---|---|---|---|---|
+| 1 | 502.3 s | 48,856 | 185 s bake, ~3 min chain | all 6 PASS | x 9.587 / y 7.578 ≥ 6.0 |
+| 2 | 509.1 s (cold — worker `/free`'d after c1) | 48,062 | 2 min 07 s | all 6 PASS | identical |
+| 3 | 294.5 s (warm pipeline) | 48,406 | ~2 min, fired 24 s after generation ended | all 6 PASS | identical |
+
+Three for three, zero failures — the acceptance test is discharged.
+Evidence: `output/cmp/gpu_cycles/cycle{1,2,3}/qa_report.json` (+ the
+cycle-3 GLB); generation GLBs in `output/cmp/t2_cup_cli{,2,3}/`.
+
+**Generation reproducibility** (the project's own analyse helpers —
+position-merged open edges, world-space extents):
+
+| cycle | tris | bodies | open edges | aspect (max-normalised) |
+|---|---|---|---|---|
+| 1 | 48,856 | 130 | 0 | 1 : 0.792 : 0.559 |
+| 2 | 48,062 | 71 | 0 | 1 : 0.792 : 0.559 |
+| 3 | 48,406 | 68 | 0 | 1 : 0.792 : 0.559 |
+
+Identical ratios across runs, within ~2% of the §2.5 cup truth
+(1 : 0.778 : 0.556); 0 open edges everywhere; tris within noise of
+the 48,452 baseline. Bodies 68–130 recorded honestly — consolidation
+is conform's voxel step, not the generator's job.
+
+**`keep_models_loaded` measured** (§4.0's "measure, do not assume"):
+cold run with models freed ≈ 509 s vs warm pipeline ≈ 295 s — the
+reload costs ~215 s per generation. Freeing after each stage is right
+for single jobs; keeping loaded pays only when the verify-fix loop
+revisits generation.
+
+**S3 probe (redone correctly):** during cycle-3's live generation, a
+separate process's `machine_gpu_lock().acquire(timeout_s=5)` raised
+`GpuLockError` after the full 5.0 s wait — "GPU lock busy for 5s
+(C:\ProgramData\threed-builder\gpu.lock) — another GPU tenant (Blender
+bake / neural generation / vision server) is holding the card; raise
+THREED_GPU_LOCK_TIMEOUT if this wait is legitimately long". Fail-loud,
+actionable, no silent proceeding.
+
+**Suite: 575 passed in 209.50 s** (baseline 471 exceeded by 104; the
+90 blender-marked tests ran — bundled Blender 4.5.13 found via
+`locate_blender()`).
+
+### Confessions (§H)
+
+- **The S3 probe's first attempt was API misuse** — `gpu_lock.acquire`
+  against the module-level context-manager FUNCTION (which has no
+  `acquire`) instead of the `machine_gpu_lock()` singleton. It
+  "failed" without testing anything. Redone during a live generation,
+  above.
+- **My own open-edge probe this round returned nonsense** (~5×10⁸
+  "open edges" from a misused `trimesh.grouping.group_rows`) — caught
+  because the number exceeded the mesh's edge count; redone with the
+  project's `_open_edge_count`. The reporting discipline caught its
+  own bug.
+- **The session stalled between cycle-2 generation and its bake**
+  (~01:25 → 01:50) with the owner's "how long?" asked twice and
+  unanswered — the handoff capsule flagged it URGENT. Resumed,
+  answered, completed.
+- UI-verification workarounds, recorded for the next browser pass:
+  IAB cannot open file choosers (simulate drops with canvas-generated
+  files); Playwright role-clicks time out (use direct
+  `document.querySelector(...).click()`).
+- trimesh 5.x: `merge_vertices()` mutates in place (returns None);
+  `mesh.split()` can crash — `body_count` instead. Windows:
+  run-relative GLB URLs need `.as_posix()`.
+
+### Tests
+
+New files: `test_view_diversity.py` 9, `test_router.py` 17,
+`test_neural_flow.py` 7, `test_neural_intake_api.py` 17,
+`test_neural_analyse_conform.py` 19, `test_comfy_trellis2.py` 18,
+`test_gpu_lock.py` 10 — plus multi-view client tests in
+`test_img3d.py` (+7). The fast half (`-m "not blender"`, 485 tests)
+was run IN PARALLEL with cycle-3's generation — 484 passed + 1
+skipped in 38.24 s — hermetic by construction (fake `base_url`,
+`tmp_path` lock paths, ephemeral-port stub servers), so GPU work and
+CPU verification overlapped without interference. Full suite
+afterwards, GPU idle: **575 passed in 209.50 s**.
+
+### Not built (registered, not hidden)
+
+- **§4.5 band segmentation** — the order's own condition is "only
+  after 4.4 works"; 4.4 works now, so this is the next item for
+  stratified goods (the template path already covers the mattress).
+- Round 17's registered follow-ups stand (analyst-prompt guidance for
+  voxel retopology on delivery-bound neural parts; per-body
+  decimation).

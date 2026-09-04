@@ -10,13 +10,15 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 // ── api client ───────────────────────────────────────────────────────────
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...opts,
-    ...(opts.body && typeof opts.body === "object" && !(opts.body instanceof FormData)
-      ? { body: JSON.stringify(opts.body) }
-      : {}),
-  });
+  const init = { ...opts };
+  if (opts.body && typeof opts.body === "object" && !(opts.body instanceof FormData)) {
+    init.body = JSON.stringify(opts.body);
+    init.headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  } else if (opts.body instanceof FormData) {
+    // never set Content-Type on FormData — the browser owns the multipart boundary
+    init.headers = { ...(opts.headers || {}) };
+  }
+  const res = await fetch(path, init);
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch {}
@@ -40,6 +42,10 @@ const state = {
   renders: {},
   logLines: [],
   images: [],           // uploaded reference images [{name, path, url}]
+  neuralViews: {},      // §4.1 labelled slots: {front|back|left|right: {name, path, previewUrl}}
+  analyse: null,        // §4.3 neural analyse report (event or manifest)
+  clientGates: null,    // §4.4 delivery client gates [{gate, expected, received, passed}]
+  clientGatesAllPassed: null,
   viewer: null,
   lastMeasure: null,
 };
@@ -135,6 +141,8 @@ function initBuildForm() {
       state.mode = btn.dataset.mode;
       $("#form-ai").classList.toggle("hidden", state.mode !== "ai");
       $("#form-spec").classList.toggle("hidden", state.mode !== "spec");
+      $("#form-neural").classList.toggle("hidden", state.mode !== "neural");
+      if (state.mode === "neural") scheduleIntakePreview();
     })
   );
 
@@ -185,6 +193,8 @@ function initBuildForm() {
   // build!
   $("#btn-build").addEventListener("click", startBuild);
   $("#btn-cancel").addEventListener("click", cancelRun);
+
+  initNeuralForm();
 
   // viewer toolbar
   $("#btn-reset-view").addEventListener("click", () => state.viewer && state.viewer.resetView());
@@ -254,6 +264,153 @@ function validateSpec() {
   }
 }
 
+// ── neural intake (§4.1): labelled views + diversity + route preview ──────
+
+const VIEW_LABELS = ["front", "back", "left", "right"];
+let intakePreviewTimer = null;
+
+function initNeuralForm() {
+  VIEW_LABELS.forEach((label) => {
+    const drop = $(`#np-drop-${label}`);
+    const fileInput = $(`#np-file-${label}`);
+    drop.addEventListener("click", (e) => {
+      if (e.target.closest(".vs-rm")) return;
+      fileInput.click();
+    });
+    fileInput.addEventListener("change", () => {
+      if (fileInput.files[0]) setNeuralView(label, fileInput.files[0]);
+      fileInput.value = "";
+    });
+    ["dragenter", "dragover"].forEach((ev) =>
+      drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("dragover"); })
+    );
+    ["dragleave", "drop"].forEach((ev) =>
+      drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("dragover"); })
+    );
+    drop.addEventListener("drop", (e) => {
+      const f = e.dataTransfer.files[0];
+      if (f && f.type.startsWith("image/")) setNeuralView(label, f);
+    });
+  });
+
+  ["#np-prompt", "#np-l", "#np-w", "#np-h", "#np-class"].forEach((sel) =>
+    $(sel).addEventListener("input", scheduleIntakePreview)
+  );
+  ["#np-unit", "#np-route"].forEach((sel) =>
+    $(sel).addEventListener("change", scheduleIntakePreview)
+  );
+}
+
+async function setNeuralView(label, file) {
+  const fd = new FormData();
+  fd.append("files", file);
+  try {
+    const res = await api("/api/uploads", { method: "POST", body: fd });
+    state.neuralViews[label] = { ...res.files[0], previewUrl: URL.createObjectURL(file) };
+    renderNeuralSlot(label);
+    scheduleIntakePreview();
+  } catch (e) {
+    toast(`Upload failed (${label}): ${e.message}`, "bad");
+  }
+}
+
+function removeNeuralView(label) {
+  delete state.neuralViews[label];
+  renderNeuralSlot(label);
+  scheduleIntakePreview();
+}
+
+function renderNeuralSlot(label) {
+  const drop = $(`#np-drop-${label}`);
+  const v = state.neuralViews[label];
+  const thumb = drop.querySelector(".vs-thumb");
+  const hint = drop.querySelector(".vs-hint");
+  let rm = drop.querySelector(".vs-rm");
+  if (v) {
+    thumb.src = v.previewUrl;
+    thumb.classList.remove("hidden");
+    hint.classList.add("hidden");
+    drop.classList.add("filled");
+    if (!rm) {
+      rm = document.createElement("button");
+      rm.className = "vs-rm";
+      rm.textContent = "×";
+      rm.addEventListener("click", (e) => { e.stopPropagation(); removeNeuralView(label); });
+      drop.appendChild(rm);
+    }
+  } else {
+    thumb.src = "";
+    thumb.classList.add("hidden");
+    hint.classList.remove("hidden");
+    drop.classList.remove("filled");
+    if (rm) rm.remove();
+  }
+}
+
+function neuralPayload() {
+  const views = {};
+  Object.entries(state.neuralViews).forEach(([label, v]) => { views[label] = v.path; });
+  return {
+    mode: "neural",
+    prompt: $("#np-prompt").value.trim(),
+    views,
+    dims: {
+      length: parseFloat($("#np-l").value) || null,
+      width: parseFloat($("#np-w").value) || null,
+      height: parseFloat($("#np-h").value) || null,
+      unit: $("#np-unit").value,
+    },
+    route: $("#np-route").value,
+    product_class: $("#np-class").value.trim() || null,
+    job_code: $("#np-code").value.trim() || null,
+    declared_fabric: $("#np-fabric").checked,
+  };
+}
+
+function scheduleIntakePreview() {
+  if (state.mode !== "neural") return;
+  clearTimeout(intakePreviewTimer);
+  intakePreviewTimer = setTimeout(refreshIntakePreview, 500);
+}
+
+async function refreshIntakePreview() {
+  if (state.mode !== "neural") return;
+  const payload = neuralPayload();
+  const divBox = $("#np-diversity");
+  const routeBox = $("#np-route-preview");
+  try {
+    const res = await api("/api/intake/preview", { method: "POST", body: payload });
+
+    // §3.1 view diversity: loud visible warning, NEVER a refusal
+    if (Object.keys(payload.views).length >= 2) {
+      const d = res.diversity;
+      divBox.classList.remove("hidden");
+      divBox.classList.toggle("warn", !!d.warned);
+      divBox.innerHTML =
+        `<span class="score">${(d.score ?? 0).toFixed(3)}</span>` +
+        `<span>view diversity ${d.warned ? "" : "✓"}</span>` +
+        (d.warned ? `<span>⚠ ${escapeHtml(d.reason || "LOW VIEW DIVERSITY — views look near-identical")}</span>` : "");
+    } else {
+      divBox.classList.add("hidden");
+    }
+
+    // §4.0.5 route decision + one-line reason, BEFORE the run
+    const r = res.route;
+    routeBox.classList.remove("hidden");
+    routeBox.classList.toggle("bad", !res.intake.ok);
+    routeBox.innerHTML =
+      `<span class="rp-route">${escapeHtml(r.route || "?")}</span> will build this` +
+      `<span class="rp-reason">${escapeHtml(r.reason || "")}</span>` +
+      (res.intake.ok ? "" : `<span class="rp-reason">✗ ${escapeHtml(res.intake.error || "")}</span>`);
+  } catch (e) {
+    // forced route that cannot run, bad label, missing file — loud, never silent
+    divBox.classList.add("hidden");
+    routeBox.classList.remove("hidden");
+    routeBox.classList.add("bad");
+    routeBox.textContent = `✗ ${e.message}`;
+  }
+}
+
 // ── build / run lifecycle ────────────────────────────────────────────────
 
 async function startBuild() {
@@ -272,6 +429,13 @@ async function startBuild() {
       return;
     }
     payload = { mode: "spec", spec };
+  } else if (state.mode === "neural") {
+    payload = neuralPayload();
+    const d = payload.dims;
+    if (!d.length || !d.width || !d.height || !d.unit) {
+      toast("Dimensions are required with an explicit unit — never inferred (rule 9)", "bad");
+      return;
+    }
   } else {
     const prompt = $("#inp-prompt").value.trim();
     if (!prompt) {
@@ -328,6 +492,9 @@ async function openRun(runId, { live = false } = {}) {
   state.renders = {};
   state.logLines = [];
   state.lastMeasure = null;
+  state.analyse = null;
+  state.clientGates = null;
+  state.clientGatesAllPassed = null;
 
   $("#empty-state").classList.add("hidden");
   $("#output-body").classList.remove("hidden");
@@ -406,10 +573,22 @@ const STAGE_LABELS = {
   analyst_done: ["Analyst", "ObjectSpec ready"],
   analyst_error: ["Analyst", "failed to produce a valid spec"],
   iteration_started: null, // separator
+  route_decided: ["Route", null],
   neural_part_started: ["Neural", "img3d service is generating a mesh…"],
   neural_part_done: ["Neural", "neural mesh generated"],
   neural_part_error: ["Neural", "neural generation failed"],
   neural_skipped: ["Neural", "img3d unavailable — organic parts skipped"],
+  neural_generation_started: ["Neural gen", "TRELLIS is generating from the views…"],
+  neural_generation_done: ["Neural gen", "mesh generated"],
+  analyse_done: ["Analyse", null],
+  conform_done: ["Conform", "delivery spec authored"],
+  conform_refused: ["Conform", "REFUSED (S1) — aspect ratio off beyond tolerance"],
+  package_started: ["Package", "weld → retopo → atlas → bake → FBX → gates…"],
+  package_done: ["Package", "package emitted"],
+  package_log: null, // log view only — no timeline spam
+  template_compiling: ["Template", "compiling product template…"],
+  template_compiled: ["Template", "spec compiled"],
+  template_warning: ["Template", null],
   build_started: ["Build", "Blender is constructing the parts…"],
   build_done: ["Build", "geometry built"],
   build_error: ["Build", "Blender build failed"],
@@ -450,6 +629,73 @@ function handleEvent(ev) {
 
     case "iteration_started":
       addSeparator(`Iteration ${ev.index}`);
+      break;
+
+    case "route_decided":
+      addStep("route_decided", "done",
+        `${ev.route}${ev.forced ? " (forced)" : ""} · ${(ev.reason || "").slice(0, 220)}`);
+      break;
+
+    case "neural_generation_started":
+      addStep("neural_generation_started", "running",
+        `${(ev.views || []).join(", ")} · ceiling ${(ev.max_tris ?? 0).toLocaleString()} tris`);
+      break;
+
+    case "neural_generation_done":
+      markStep("neural_generation_started", "done",
+        `${(ev.tri_count ?? 0).toLocaleString()} tris · ${ev.duration_s ?? "?"}s`);
+      break;
+
+    case "analyse_done": {
+      const ok = ev.passed;
+      addStep(
+        "analyse_done",
+        ok ? "done" : "error",
+        ok
+          ? `${(ev.triangles ?? 0).toLocaleString()} tris · ${ev.bodies ?? "?"} bodies · metallic ${ev.metallic != null ? (100 * ev.metallic).toFixed(0) + "%" : "?"}`
+          : `gates failed: ${(ev.failed || []).join(", ")}`
+      );
+      state.analyse = { ...ev, checks: [] };
+      renderGates();
+      break;
+    }
+
+    case "conform_refused":
+      addStep("conform_refused", "error", (ev.reason || "").slice(0, 300));
+      break;
+
+    case "conform_done":
+      addStep("conform_done", "done",
+        `${ev.retopology?.tool || "retopo"}${ev.retopology?.voxel_size != null ? ` voxel ${ev.retopology.voxel_size} m` : ""} · maps: ${(ev.maps || []).join(", ") || "none"}`);
+      loadSpecFromRun();
+      break;
+
+    case "package_started":
+      addStep("package_started", "running");
+      break;
+
+    case "package_log":
+      break; // detail lines ride the log view only
+
+    case "package_done":
+      markStep("package_started", ev.all_passed ? "done" : "warn",
+        `${ev.all_passed ? "all delivery gates passed" : "delivery gates failed — see qa_report.json"}`);
+      state.clientGates = ev.gates || [];
+      state.clientGatesAllPassed = !!ev.all_passed;
+      renderGates();
+      break;
+
+    case "template_compiling":
+      addStep("template_compiling", "running", (ev.template || "").split(/[\\/]/).pop());
+      break;
+
+    case "template_warning":
+      addStep("template_warning", "warn", (ev.warning || "").slice(0, 220));
+      break;
+
+    case "template_compiled":
+      markStep("template_compiling", "done");
+      loadSpecFromRun();
       break;
 
     case "neural_part_started":
@@ -536,17 +782,29 @@ function handleEvent(ev) {
     case "run_finished":
       stopTimer();
       setRunStatus(ev.success ? "ok" : "warn", ev.success ? "✓ passed" : (ev.status || "finished"));
+      settleRunningSteps(ev.success ? "done" : "error",
+        ev.success ? null : (ev.error || ev.status || "run ended"));
       if (ev.spec_name || ev.model_name) $("#output-title").textContent = ev.model_name || $("#output-title").textContent;
-      if (ev.final_glb) loadModel(`/api/runs/${state.runId}/file/final.glb`);
-      else if (ev.renders && Object.keys(ev.renders).length) switchTab("renders");
+      if (ev.final_glb) {
+        const glbUrl = ev.final_glb_rel
+          ? `/api/runs/${state.runId}/file/${ev.final_glb_rel}`
+          : `/api/runs/${state.runId}/file/final.glb`;
+        loadModel(glbUrl);
+      } else if (ev.renders && Object.keys(ev.renders).length) switchTab("renders");
       if (ev.renders && Object.keys(ev.renders).length) {
         state.renders = toRenderUrls(ev.renders);
         renderRenders();
       }
       const dl = $("#btn-download");
-      dl.href = `/api/runs/${state.runId}/file/final.glb`;
+      dl.href = ev.final_glb_rel
+        ? `/api/runs/${state.runId}/file/${ev.final_glb_rel}`
+        : `/api/runs/${state.runId}/file/final.glb`;
       dl.setAttribute("download", `${(ev.model_name || "model").replace(/\W+/g, "_")}.glb`);
       dl.classList.remove("hidden");
+      if (ev.package_dir) {
+        markStep("package_done", ev.success ? "done" : "warn",
+          `${(ev.package_dir || "").split(/[\\/]/).pop()} · ${ev.wall_clock_s ?? "?"}s`);
+      }
       if (!ev._quiet) {
         toast(ev.success ? "Build passed all gates ✓" : "Build finished with warnings", ev.success ? "ok" : "bad");
       }
@@ -556,6 +814,7 @@ function handleEvent(ev) {
     case "run_error":
       stopTimer();
       setRunStatus("bad", "✗ failed");
+      settleRunningSteps("error", null);
       addStep("run_error", "error", (ev.error || "").slice(0, 300));
       if (!ev._quiet) toast("Run failed", "bad");
       closeWS();
@@ -593,6 +852,12 @@ async function loadFinishedRun(runId) {
         bounding_box_m: m.dimensions_m,
         warnings: m.metrics?.mesh_warnings || [],
       };
+      const nm = m.metrics || {};
+      if (nm.analyse) state.analyse = nm.analyse;
+      if (nm.package && Array.isArray(nm.package.gates)) {
+        state.clientGates = nm.package.gates;
+        state.clientGatesAllPassed = !!nm.package.all_passed;
+      }
       renderGates();
       if (m.dimensions_m) {
         $("#viewer-dims").textContent =
@@ -627,6 +892,21 @@ async function loadFinishedRun(runId) {
 function handleEventQuiet(ev) {
   // History replay: same handling, but finish toasts are suppressed.
   handleEvent({ ...ev, _quiet: true });
+}
+
+// conform_done / template_compiled write run_dir/spec.json — pull it into the
+// Spec tab live instead of waiting for a history reload.
+async function loadSpecFromRun() {
+  if (!state.runId) return;
+  try {
+    const res = await fetch(`/api/runs/${state.runId}/file/spec.json`);
+    if (!res.ok) return;
+    const spec = await res.json();
+    if (spec && spec.schema_name) {
+      state.spec = spec;
+      renderSpec();
+    }
+  } catch {}
 }
 
 // ── timeline ─────────────────────────────────────────────────────────────
@@ -679,6 +959,25 @@ function markStep(key, status, detail) {
   // No matching running step — add a completed one.
   const div = addStep(key, status, detail);
   div.dataset.plain = key;
+}
+
+// A run that dies mid-chain (e.g. the neural flow failing at generation)
+// leaves its last step spinning — settle every still-running step at finish.
+function settleRunningSteps(status, detail) {
+  $$("#timeline .tl-step.running").forEach((el) => {
+    el.className = `tl-step ${status}`;
+    el.querySelector(".tl-ico").textContent =
+      status === "done" ? "✓" : status === "warn" ? "!" : "✕";
+    if (detail) {
+      let d = el.querySelector(".tl-detail");
+      if (!d) {
+        d = document.createElement("div");
+        d.className = "tl-detail";
+        el.querySelector("div").appendChild(d);
+      }
+      d.textContent = detail;
+    }
+  });
 }
 
 let counter = 0;
@@ -734,7 +1033,7 @@ function renderRenders() {
 
 function renderGates() {
   const body = $("#gates-body");
-  if (!state.gates && !state.mesh) {
+  if (!state.gates && !state.mesh && !state.analyse && !state.clientGates) {
     body.innerHTML = `<div class="empty-state"><p>No gate results yet</p></div>`;
     return;
   }
@@ -787,6 +1086,57 @@ function renderGates() {
     </div>`;
   }
 
+  // §4.3 neural analyse report — which of the 5 maps exist at what resolution
+  if (state.analyse) {
+    const a = state.analyse;
+    const maps = a.maps || {};
+    const mapNames = ["albedo", "roughness", "metallic", "normal", "ao"];
+    const mapsHtml = mapNames.map((name) => {
+      const v = maps[name];
+      const present = typeof v === "object" && v !== null ? !!v.present : !!v;
+      const res = typeof v === "object" && v !== null && v.resolution
+        ? ` ${v.resolution.join("×")}` : "";
+      return `<span style="color:${present ? "var(--green)" : "var(--text-faint)"}">${present ? "✓" : "—"} ${name}${res}</span>`;
+    }).join(" · ");
+    const facts = [
+      ["Triangles", (a.triangles ?? 0).toLocaleString()],
+      ["Vertices", (a.vertices ?? 0).toLocaleString()],
+      ["Bodies", a.bodies ?? "—"],
+      ["Metallic", a.metallic != null ? `${(100 * a.metallic).toFixed(1)}%` : "—"],
+      ["Roughness", a.roughness != null ? `${(100 * a.roughness).toFixed(1)}%` : "—"],
+      ["Extents (m)", Array.isArray(a.extents_m) ? a.extents_m.map((d) => (d ?? 0).toFixed(3)).join(" × ") : "—"],
+    ];
+    const checks = (a.checks || []).map((c) => `<tr>
+        <td>${escapeHtml(c.name || "?")}</td>
+        <td>${c.gating ? "gate" : "record"}</td>
+        <td class="num">${escapeHtml(String(c.value ?? "—")).slice(0, 90)}</td>
+        <td class="${c.passed ? "pass" : "fail"}">${c.passed ? "PASS" : "FAIL"}</td>
+      </tr>`).join("");
+    html += `<div class="gate-section">
+      <div class="gate-title">Neural Analyse
+        <span class="chip ${a.passed ? "ok" : "bad"}">${a.passed ? "gates green" : "gates failed"}</span>
+      </div>
+      <div class="mesh-facts">${facts
+        .map(([k, v]) => `<div class="fact"><div class="fact-label">${k}</div><div class="fact-value">${v}</div></div>`)
+        .join("")}</div>
+      <div class="tl-detail" style="margin:8px 0">${mapsHtml}</div>
+      ${checks ? `<table class="gate-table">
+        <thead><tr><th>Check</th><th>Kind</th><th>Value</th><th></th></tr></thead>
+        <tbody>${checks}</tbody>
+      </table>` : ""}
+    </div>`;
+  }
+
+  // §4.4 delivery client gates (six pure validators, package time)
+  if (state.clientGates) {
+    html += `<div class="gate-section">
+      <div class="gate-title">Delivery Gates
+        <span class="chip ${state.clientGatesAllPassed ? "ok" : "bad"}">${state.clientGatesAllPassed ? "all passed" : "failed"}</span>
+      </div>
+      ${gateRows(state.clientGates)}
+    </div>`;
+  }
+
   body.innerHTML = html;
 }
 
@@ -802,6 +1152,7 @@ function appendLog(ev) {
   else if (ev.error) detail = String(ev.error).slice(0, 160);
   else if (ev.views) detail = Object.keys(ev.views).join(", ");
   else if (ev.parts) detail = ev.parts.join(", ");
+  else if (ev.message) detail = String(ev.message).slice(0, 160);
   line.innerHTML = `<span class="t">${t}</span>${escapeHtml(ev.event)}${detail ? "  ·  " + escapeHtml(detail) : ""}`;
   view.appendChild(line);
   view.scrollTop = view.scrollHeight;
